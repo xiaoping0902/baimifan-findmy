@@ -1,0 +1,60 @@
+# 01-libkfd-common-assert-hook.patch
+# assert 失败：sleep(30)+exit(1)  ->  调用宿主失败钩子 mf_kfd_fail_hook()；并补 <string.h>
+#
+# 原始版本保留在 app/Sources/Kernel/kfd/vendor/ 下，
+# 本 patch 是「从上游原样文件 -> 本工程工作副本」的完整差异。
+#
+--- a/libkfd/common.h
++++ b/libkfd/common.h
+@@ -4,6 +4,12 @@
+ 
+ #ifndef common_h
+ #define common_h
++
++/*
++ * [MF PATCH 01b] 补 <string.h>：上游 common.h 用了 memcmp/memcpy/strerror/bzero
++ * 却只靠 <stdio.h> 间接带入，在 iOS SDK 上不保证；显式包含避免隐式声明。
++ */
++#include <string.h>
+ 
+ #include <errno.h>
+ #include <mach/mach.h>
+@@ -112,17 +118,29 @@
+  * Helper assert macros.
+  */
+ 
++/*
++ * [MF PATCH 01a] 把「失败 = sleep(30) + exit(1)」改成「失败 = 调用宿主失败钩子」。
++ *
++ * 上游行为（原样保留在下面 #else 分支里，作为无 App 环境下的兜底）会让进程
++ * 卡 30 秒后闪退。在「白米饭复刻」里这既不可接受也无法向用户解释。
++ *
++ * 现在：断言失败 -> print 诊断 -> 调用 mf_kfd_fail_hook()。
++ *   - 宿主（MFKernelBridge.c）把该符号实现为 longjmp 回 mf_kopen()，
++ *     于是断言变成「返回错误码 + 错误字符串」，进程存活。
++ *   - 若宿主从未 setjmp（g_fail_armed == 0），钩子自身退化为上游的
++ *     sleep(30)+exit(1)，保证 libkfd 单独拿去编译（例如 macos_kfd.c）时行为不变。
++ */
+ #if CONFIG_ASSERT
+ 
+-#define assert(condition)                                               \
+-    do {                                                                \
+-        if (!(condition)) {                                             \
+-            print_failure("assertion failed: (%s)", #condition);        \
+-            print_failure("file: %s, line: %d", __FILE__, __LINE__);    \
+-            print_failure("... sleep(30) before exit(1) ...");          \
+-            sleep(30);                                                  \
+-            exit(1);                                                    \
+-        }                                                               \
++extern void mf_kfd_fail_hook(const char* what, const char* file, int line);
++
++#define assert(condition)                                                   \
++    do {                                                                    \
++        if (!(condition)) {                                                 \
++            print_failure("assertion failed: (%s)", #condition);            \
++            print_failure("file: %s, line: %d", __FILE__, __LINE__);        \
++            mf_kfd_fail_hook(#condition, __FILE__, __LINE__);               \
++        }                                                                   \
+     } while (0)
+ 
+ #else /* CONFIG_ASSERT */

@@ -1,0 +1,22 @@
+# 02-libkfd-krkw-no-exit.patch
+# patchfinder 失败：printf + exit(1)  ->  print_failure + 失败钩子
+#
+# 原始版本保留在 app/Sources/Kernel/kfd/vendor/ 下，
+# 本 patch 是「从上游原样文件 -> 本工程工作副本」的完整差异。
+#
+--- a/libkfd/krkw.h
++++ b/libkfd/krkw.h
+@@ -209,9 +209,11 @@
+         printf("defeated kaslr, kbase: 0x%llx, kslide: 0x%llx\n", kbase, kbase - vm_kernel_link_addr);
+         
+         //Step 2. run patchfinder
++        // [MF PATCH 02] 上游：printf("failed run_kfd_patchfinder\n"); exit(1);
++        // 改成把失败交给宿主钩子（宿主 longjmp 回 mf_kopen，最终返回 -1）。
+         if(run_kfd_patchfinder((u64)kfd, kbase) == -1) {
+-            printf("failed run_kfd_patchfinder\n");
+-            exit(1);
++            print_failure("failed run_kfd_patchfinder (kbase = 0x%llx)", kbase);
++            mf_kfd_fail_hook("run_kfd_patchfinder failed", __FILE__, __LINE__);
+         }
+     }
+     

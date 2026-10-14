@@ -6,11 +6,13 @@
 //
 #import "RootViewController.h"
 #import "MFResidueViewController.h"
+#import "MFProcessViewController.h"
 #import "../Features/MFPaths.h"
 #import "../Features/MFCleanup.h"
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
 #import "../HUD/MFHUDLauncher.h"
+#import "../Kernel/MFKernel.h"
 
 #import <mach-o/dyld.h>
 #import <spawn.h>
@@ -88,7 +90,8 @@ extern char **environ;
     // ---------- 0 状态 ----------
     MFSection *s0 = [[MFSection alloc] init];
     s0.header = @"状态";
-    [s0.rows addObject:[self infoRow:@"内核（KFD）" detail:@"未启动 · M3 接入" ok:NO]];
+    [s0.rows addObject:[self infoRow:@"内核（KFD）" detail:[[MFKernel shared] statusText]
+                                  ok:[[MFKernel shared] isOpen]]];
 
     BOOL hudUp = [MFHUDLauncher isHUDRunning];
     [s0.rows addObject:[self infoRow:@"悬浮窗（HUD）"
@@ -236,10 +239,25 @@ extern char **environ;
 #pragma mark - 动作
 
 - (void)actStartKernel {
-    [self toast:@"内核链将在 M3 接入（kfund patchfinder + landa）"];
+    MFProcessViewController *vc = [[MFProcessViewController alloc] init];
+    [self.navigationController pushViewController:vc animated:YES];
 }
 - (void)actKernelSettings {
-    [self toast:@"内核设置页将在 M3 接入"];
+    MFKernel *k = [MFKernel shared];
+    NSString *msg = [NSString stringWithFormat:
+        @"当前状态：%@\n\n"
+        @"身份：%@\n"
+        @"可用枚举路由：%@\n\n"
+        @"目标机 16.6.1/M2 上唯一可用的组合已固定：\n"
+        @"  puaf_method = landa (2)\n"
+        @"  kread       = kread_sem_open (1)\n"
+        @"  kwrite      = kwrite_sem_open (1)\n"
+        @"  puaf_pages  = 2048（不稳可降到 1024/512）\n\n"
+        @"详细能力探测请进「启动内核」页点底部「能力探测」。",
+        k.statusText, [k identityText],
+        k.availableRoute == MFEnumRoutePrivileged ? @"路A（host_priv）"
+            : (k.availableRoute == MFEnumRouteDefault ? @"路B（免特权）" : @"未探测")];
+    [self alert:@"内核设置" message:msg];
 }
 - (void)actStartHUD {
     if ([MFHUDLauncher isHUDRunning]) {

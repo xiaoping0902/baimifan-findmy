@@ -219,13 +219,16 @@ def check_sources():
                         f"—— ObjC++ 编译错误，改用局部变量中转")
 
             # 本地 #import "x" 路径存在性（含 HEADER_SEARCH_PATHS）
-            for m in re.finditer(r'#(?:import|include)\s+"([^"]+)"', raw):
+            # 注意：必须用去注释后的 body —— 否则注释里举例子写一句
+            #       #include "libkfd.h" 就会误报
+            for m in re.finditer(r'#(?:import|include)\s+"([^"]+)"', body):
                 inc = m.group(1)
                 base = os.path.dirname(p)
                 cands = [os.path.join(base, inc), os.path.join(APP, "Sources", inc)]
                 cands += [os.path.join(d, inc) for d in incdirs]
                 if not any(os.path.exists(c) for c in cands):
-                    err(f"{rel}: #import \"{inc}\" 找不到"
+                    line_no = body[:m.start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: #import \"{inc}\" 找不到"
                         f"（已查 同级目录 / Sources/ / HEADER_SEARCH_PATHS {len(incdirs)} 项）")
     ok(f"源码粗检完成，共 {n} 个文件")
 

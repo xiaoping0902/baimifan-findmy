@@ -1,0 +1,39 @@
+# 03-libdimentio-host-kread.patch
+# 去掉 fun/krw.h 依赖，改用 MFLibkfdKRead4()（宿主直通 libkfd kread）
+#
+# 原始版本保留在 app/Sources/Kernel/kfd/vendor/ 下，
+# 本 patch 是「从上游原样文件 -> 本工程工作副本」的完整差异。
+#
+--- a/fun/kpf/libdimentio.m
++++ b/fun/kpf/libdimentio.m
+@@ -14,6 +14,7 @@
+  */
+ #include "patchfinder.h"
+ #include "libdimentio.h"
++#include "MFLibkfdHost.h"   /* [MF PATCH 03] 宿主提供的 libkfd 直通 kread，替代 fun/krw */
+ #include <compression.h>
+ #include <dlfcn.h>
+ #include <mach-o/fat.h>
+@@ -22,7 +23,9 @@
+ #include <sys/stat.h>
+ #include <sys/sysctl.h>
+ #include <sys/utsname.h>
+-#include "../krw.h"
++/* [MF PATCH 03] 上游这里 #include "../krw.h"，只为了拿 early_kreadbuf()。
++ * 本工程不编 fun/krw.m（它会 #include "libkfd.h"，与 MFKernelBridge.c 构成
++ * 重复符号），改由 MFLibkfdHost.c 提供等价实现。故删除此行。 */
+ 
+ #define LZSS_F (18)
+ #define LZSS_N (4096)
+@@ -264,7 +267,10 @@
+ kread_buf_kfd(kaddr_t addr, void *buf, size_t sz) {
+     if(kfd == 0)
+         return KERN_FAILURE;
+-    early_kreadbuf(kfd, addr, buf, sz);
++    /* [MF PATCH 03] 上游：early_kreadbuf(kfd, addr, buf, sz);
++     * early_kreadbuf 逐 4 字节调用 libkfd 的 kread()（见 fun/krw.m），
++     * 这里由 MFLibkfdHost.c 提供逐字节等价的直通实现。 */
++    MFLibkfdKRead4((void *)(uintptr_t)kfd, addr, buf, sz);
+     return KERN_SUCCESS;
+ }
+ 

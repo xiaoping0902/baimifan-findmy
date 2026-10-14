@@ -21,8 +21,9 @@ targets:
         excludes:
           # 第三方整包排除，改为下面【逐文件精确加入】
           - "Render/imgui/**"
-          - "Kernel/kfd/**"
-          - "Kernel/kfund/**"
+          # M3: kfd 闭包同样逐文件加入（见 docs/kfd-移植清单.md 第 1 节）。
+          # vendor/ 只放「上游原样文件」，仅用于人工 diff / 生成 patch，绝不参与编译。
+          - "Kernel/kfd/vendor/**"
       # ── ImGui：只编这 6 个（其余 backends/*.cpp 是 dx/glfw/vulkan，编了必炸）──
       - path: Sources/Render/imgui/imgui.cpp
       - path: Sources/Render/imgui/imgui_draw.cpp
@@ -30,6 +31,21 @@ targets:
       - path: Sources/Render/imgui/imgui_widgets.cpp
       - path: Sources/Render/imgui/imgui_demo.cpp
       - path: Sources/Render/imgui/backends/imgui_impl_metal.mm
+      # ── M3: KFD 内核链 ────────────────────────────────────────────────
+      # 桥接层：MFKernelBridge.c 是【全工程唯一】include "libkfd.h" 的编译单元。
+      # libkfd.h 是 header-only（kopen/kread/kwrite/kclose/kfd_init 都是
+      # 无 static 的普通定义），被两个 TU 包含 = 重复符号。
+      - path: Sources/Kernel/MFKernelBridge.c
+      - path: Sources/Kernel/MFKernelBridge.h
+      # 注意：MFLibkfdHost.c 不存在 —— MFLibkfdKRead4() 的实现放在
+      # MFKernelBridge.c（行 535）里，避免第二个 TU 也 include libkfd.h。
+      # 这里只列头文件，给 libdimentio.m 提供原型。
+      - path: Sources/Kernel/MFLibkfdHost.h
+      # kfund 的运行时 patchfinder（.m 必须显式列出，否则 Core KPF 起不来）
+      - path: Sources/Kernel/kfd/fun/kpf/patchfinder.m
+      - path: Sources/Kernel/kfd/fun/kpf/libdimentio.m
+      # libkfd.h 是 MFKernelBridge.c 直接 include 的入口，显式列出保证被 XcodeGen 看见
+      - path: Sources/Kernel/kfd/libkfd.h
       - path: Resources
         buildPhase: resources
     # ── 系统框架 / 库（XcodeGen 不会自动加，必须显式声明）──
@@ -44,6 +60,10 @@ targets:
       - sdk: Metal.framework
       - sdk: MetalKit.framework
       - sdk: QuartzCore.framework
+      # M3：libdimentio.m L17 `#include <compression.h>` + L253 compression_decode_buffer()
+      #     iOS 上该符号由 libcompression 提供（libSystem 是否 re-export 依 SDK 版本
+      #     而异，显式链接最稳；重复链接无害）。
+      - sdk: libcompression.tbd
     settings:
       base:
         PRODUCT_NAME: FindMy
@@ -61,7 +81,21 @@ targets:
           - "$(SRCROOT)/Sources"
           - "$(SRCROOT)/Sources/Render/imgui"
           - "$(SRCROOT)/Sources/Render/imgui/backends"
-          - "$(SRCROOT)/Sources/Kernel/kfd/kfd"
+          # M3：上游 kfd 的 libkfd.h 内部按 "libkfd/common.h" 相对包含，
+          # 所以搜索路径必须指向 .../Kernel/kfd（libkfd.h 所在目录），
+          # 而不是旧的 .../Kernel/kfd/kfd。
+          - "$(SRCROOT)/Sources/Kernel/kfd"
+          # MFKernelBridge.c 里写的是 "kfd/libkfd.h" / "kfd/fun/kpf/patchfinder.h"
+          - "$(SRCROOT)/Sources/Kernel"
+        # M3：libkfd 的读写后端大量使用 sem_open / syscall / ioctl / open 等
+        # 已标记 deprecated 的 API；上游 macOS Makefile 也是靠这个开关静音的。
+        OTHER_CFLAGS:
+          - "$(inherited)"
+          - "-Wno-deprecated-declarations"
+          # kpf/libdimentio.h 等使用旧式空参数表声明风格，clang 15+ 会报
+          # -Wdeprecated-non-prototype；本工程未开 -Werror，所以那个警告即使
+          # 冒出来也不会失败，这里顺手压掉。若工具链不认识该选项，删掉这一行即可。
+          - "-Wno-deprecated-non-prototype"
         # 云构建不签名（构建后由 CI 用 ldid + entitlements 伪签名）
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO

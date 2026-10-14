@@ -1,0 +1,90 @@
+//
+//  MFKernel.h — 内核会话
+//
+//  实现依据《KFD到读取后端_完整链路报告.md》《KFD侧_完整分析.md》：
+//    [1] 提权 root   setgid(0)/setregid(0,0)/setuid(0)/setreuid(0,0) ×2 遍
+//    [2] 内核端口    task_get_special_port(task_self, 4=TASK_KERNEL_PORT, &port)
+//                    —— 全二进制唯一一处；非越狱环境返回 0
+//    [3] 枚举 task   路 A（要 host_priv）：host_processor_sets → host_processor_set_priv
+//                                       → processor_set_tasks
+//                    路 B（免特权）：    processor_set_default → processor_set_tasks
+//                    匹配：proc_pidpath + strrchr('/') + strncmp
+//    [4] 端口缓存    dword_100FF7470 ← 目标 task port
+//    门条件：模式标记 == 1 && 端口 != 0
+//
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSInteger, MFKernelState) {
+    MFKernelStateIdle = 0,      // 未启动
+    MFKernelStateRunning,       // 运行中（内核已开）
+    MFKernelStateFailed,        // 失败
+};
+
+typedef NS_ENUM(NSInteger, MFEnumRoute) {
+    MFEnumRouteNone = 0,
+    MFEnumRoutePrivileged = 1,  // 路 A：host_processor_set_priv
+    MFEnumRouteDefault = 2,     // 路 B：processor_set_default（免特权）
+};
+
+/// 一个系统进程
+@interface MFProcessInfo : NSObject
+@property (nonatomic, assign) int pid;
+@property (nonatomic, copy) NSString *name;      // basename
+@property (nonatomic, copy) NSString *path;      // 完整可执行路径
+@property (nonatomic, assign) uint32_t taskPort;
+@end
+
+@interface MFKernel : NSObject
+
++ (instancetype)shared;
+
+@property (nonatomic, readonly) MFKernelState state;
+@property (nonatomic, readonly) BOOL isOpen;
+@property (nonatomic, copy, readonly) NSString *statusText;
+@property (nonatomic, copy, readonly) NSString *lastError;
+@property (nonatomic, readonly) uint64_t kbase;
+@property (nonatomic, readonly) uint64_t kslide;
+@property (nonatomic, readonly) uint64_t puafPages;
+@property (nonatomic, readonly) MFEnumRoute availableRoute;
+
+#pragma mark 生命周期
+
+/// 启动内核链（在后台线程跑，completion 回主线程）
+- (void)startWithPuafPages:(uint64_t)pages
+                completion:(void (^)(BOOL ok, NSString *message))completion;
+
+/// 只做能力探测（不跑漏洞）：拿内核端口 + 试两条枚举路
+- (void)probeCapabilitiesWithCompletion:(void (^)(NSString *report))completion;
+
+- (void)stop;
+
+#pragma mark 提权
+
+/// setgid/setregid/setuid/setreuid(0) 序列，两遍（对齐原实现）
+- (BOOL)gainRootWithError:(NSString *_Nullable *_Nullable)err;
+
+/// 当前身份
+- (NSString *)identityText;
+
+#pragma mark 进程枚举
+
+/// 当前可用的枚举路（探测结果）
+- (MFEnumRoute)detectRoute;
+
+/// 枚举全系统 task。route 传 0 = 自动选
+- (NSArray<MFProcessInfo *> *)enumerateProcessesWithRoute:(MFEnumRoute)route
+                                                    error:(NSString *_Nullable *_Nullable)err;
+
+/// 按进程名匹配（对标原实现 proc_pidpath + strrchr + strncmp 前缀匹配）
+- (nullable MFProcessInfo *)findProcessNamed:(NSString *)name;
+
+#pragma mark 内核读写（桥接层透传）
+
+- (BOOL)kreadAddress:(uint64_t)kaddr into:(void *)out size:(uint64_t)size;
+- (BOOL)kwriteValue:(const void *)in toAddress:(uint64_t)kaddr size:(uint64_t)size;
+
+@end
+
+NS_ASSUME_NONNULL_END

@@ -1,0 +1,34 @@
+# 05-kpf-patchfinder-drop-krw-include.patch
+# 删掉解析不到的 #import "krw.h"（本工程不编 fun/），并显式补 <stdbool.h>/<stdlib.h>/<string.h>
+#
+# 原始版本保留在 app/Sources/Kernel/kfd/vendor/ 下，
+# 本 patch 是「从上游原样文件 -> 本工程工作副本」的完整差异。
+#
+--- a/fun/kpf/patchfinder.m
++++ b/fun/kpf/patchfinder.m
+@@ -5,12 +5,24 @@
+ //  Created by Seo Hyun-gyu on 1/8/24.
+ //
+ 
++// [MF PATCH 05a] 显式补标准库头：本文件用到 bool / strstr / strdup / strcmp，
++// 上游只靠 <Foundation/Foundation.h> 间接带入，不保证（下面已删掉那唯一的间接来源）。
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #import <Foundation/Foundation.h>
+ #import <sys/sysctl.h>
+ #import <sys/mount.h>
+ #import "patchfinder.h"
+ #import "libdimentio.h"
+-#import "krw.h"
++// [MF PATCH 05b] 上游此处 `#import "krw.h"`。
++// 本工程不编 fun/ 目录（fun/krw.m 会 #include "libkfd.h"，与 MFKernelBridge.c
++// 构成重复符号），因此 fun/krw.h 不存在、这一行解析不到。
++// 逐行核实：本文件全文【没有】调用任何一个 krw 层函数（do_kread/do_kwrite/
++// kread32/kread64/kreadbuf/early_kread*/vtophys/phystokv 全部 0 命中），
++// 故此行是纯冗余依赖，删除即可。它原本间接带入的 Mach 类型由
++// patchfinder.h(<Foundation>) 与 libdimentio.h 覆盖。
+ 
+ bool did_patchfinder = false;
+ uint64_t off_cdevsw = 0;

@@ -1,0 +1,30 @@
+# 04-libkfd-config-ifndef.patch
+# CONFIG_ASSERT/PRINT/TIMER 加 #ifndef 守卫，允许命令行覆盖
+#
+# 原始版本保留在 app/Sources/Kernel/kfd/vendor/ 下，
+# 本 patch 是「从上游原样文件 -> 本工程工作副本」的完整差异。
+#
+--- a/libkfd.h
++++ b/libkfd.h
+@@ -7,10 +7,20 @@
+ 
+ /*
+  * The global configuration parameters of libkfd.
+- */
++ *
++ * [MF PATCH 04] 改为 #ifndef 守卫：宿主工程可在编译单元用
++ *   -DCONFIG_PRINT=0 -DCONFIG_TIMER=0
++ * 关掉海量日志，而不必改动 libkfd 本体。未定义时保持与上游一致的默认值。
++ */
++#ifndef CONFIG_ASSERT
+ #define CONFIG_ASSERT 1
++#endif
++#ifndef CONFIG_PRINT
+ #define CONFIG_PRINT 1
++#endif
++#ifndef CONFIG_TIMER
+ #define CONFIG_TIMER 1
++#endif
+ 
+ #include "libkfd/common.h"
+ 
