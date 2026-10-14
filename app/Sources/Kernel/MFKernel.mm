@@ -262,7 +262,7 @@
 
         // 实际试枚举一次
         NSString *err = nil;
-        NSArray<MFProcessInfo *> *procs = [self enumerateProcessesWithRoute:0 error:&err];
+        NSArray<MFProcessInfo *> *procs = [self enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
         if (procs.count) {
             [r appendFormat:@"枚举结果：✓ 拿到 %lu 个进程（走 %@）\n",
              (unsigned long)procs.count,
@@ -373,7 +373,7 @@
 }
 
 - (MFProcessInfo *)findProcessNamed:(NSString *)name {
-    NSArray<MFProcessInfo *> *all = [self enumerateProcessesWithRoute:0 error:NULL];
+    NSArray<MFProcessInfo *> *all = [self enumerateProcessesWithRoute:MFEnumRouteNone error:NULL];
     size_t want = name.length;
     for (MFProcessInfo *p in all) {
         if (strncmp(p.name.UTF8String, name.UTF8String, want) == 0) return p;

@@ -55,7 +55,7 @@
     self.headerLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 48, header.bounds.size.width - 60, 40)];
     self.headerLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.headerLabel.numberOfLines = 2;
-    self.headerLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontRegular];
+    self.headerLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     self.headerLabel.textColor = [UIColor secondaryLabelColor];
     [header addSubview:self.headerLabel];
 
@@ -87,7 +87,7 @@
         MFKernel *k = [MFKernel shared];
         NSString *err = nil;
         MFEnumRoute route = [k detectRoute];
-        NSArray<MFProcessInfo *> *list = [k enumerateProcessesWithRoute:0 error:&err];
+        NSArray<MFProcessInfo *> *list = [k enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimating];
             [self.all removeAllObjects];
@@ -190,7 +190,7 @@
     UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:rid];
     if (!c) {
         c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:rid];
-        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontRegular];
+        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
         c.detailTextLabel.numberOfLines = 2;
     }
     MFProcessInfo *p = self.shown[ip.row];

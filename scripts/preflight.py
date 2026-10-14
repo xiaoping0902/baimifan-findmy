@@ -400,6 +400,94 @@ def check_ios_spi():
     ok(f"iOS SPI 检查完成，扫描 {checked} 个源文件")
 
 
+# ------------------------------------------------- 7.7 ObjC++ 枚举参数 / 常量拼写
+# 【已证】UIKit 里不存在、但很容易顺手写错的常量名
+BAD_CONSTANTS = {
+    "UIFontRegular": "UIFontWeightRegular",
+    "UIFontBold": "UIFontWeightBold",
+    "UIFontMedium": "UIFontWeightMedium",
+    "UIFontSemibold": "UIFontWeightSemibold",
+    "UIColorBlack": "UIColor.blackColor",
+}
+
+
+def check_objcxx_traps():
+    """
+    ObjC++ 比 ObjC 严格，两类常见硬错误：
+      1) 把裸整数传给声明为枚举类型的参数（"cannot initialize a parameter of
+         type 'MFEnumRoute' with an rvalue of type 'int'"）
+      2) UIKit 常量名拼错（use of undeclared identifier）
+    """
+    src_exts = (".mm", ".m", ".c", ".cpp")
+    hdr_exts = (".h", ".hpp")
+    skip = {"imgui", "kfd"}
+
+    # ---- 收集本工程的枚举类型名 ----
+    enum_types = set()
+    for dirpath, dirnames, filenames in os.walk(APP):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(hdr_exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                txt = strip_code(f.read())
+            # NS_ENUM(NSInteger, Name) —— 名字在括号【内】
+            for m in re.finditer(r"(?:NS_ENUM|NS_OPTIONS)\s*\(\s*\w+\s*,\s*([A-Za-z_]\w*)\s*\)", txt):
+                enum_types.add(m.group(1))
+            # typedef enum {...} Name;  /  typedef NS_ENUM(...) Name;（少见）
+            for m in re.finditer(r"typedef\s+enum\s*\w*\s*\{.*?\}\s*([A-Za-z_]\w*)\s*;", txt, re.S):
+                enum_types.add(m.group(1))
+    enum_types = {e for e in enum_types if e.startswith("MF") or e.endswith(("Route", "Style", "State", "Mode"))}
+
+    # ---- 收集「参数类型是枚举」的选择器关键字 ----
+    enum_keywords = set()
+    for dirpath, dirnames, filenames in os.walk(APP):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(hdr_exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                txt = strip_code(f.read())
+            for et in enum_types:
+                for m in re.finditer(r"(\w+)\s*:\s*\(?\s*" + re.escape(et) + r"\s*\)?\s*\w+", txt):
+                    enum_keywords.add(m.group(1))
+    enum_keywords.discard("typedef")
+
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(src_exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            checked += 1
+
+            # 1) 枚举参数传裸数字
+            for kw in enum_keywords:
+                for m in re.finditer(r"\b" + re.escape(kw) + r"\s*:\s*(\d+)\b", body):
+                    line_no = body[:m.start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: 选择器 `{kw}:` 的参数是枚举类型，"
+                        f"传了裸整数 {m.group(1)} —— ObjC++ 会报 cannot initialize "
+                        f"a parameter of type enum with an rvalue of type 'int'；"
+                        f"请改用枚举常量")
+
+            # 2) UIKit 常量拼写
+            for bad, good in BAD_CONSTANTS.items():
+                if re.search(r"\b" + re.escape(bad) + r"\b", body):
+                    line_no = body[:re.search(r"\b" + re.escape(bad) + r"\b", body).start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: `{bad}` 不存在 —— 应为 `{good}`")
+
+    ok(f"ObjC++ 陷阱检查完成（枚举类型 {len(enum_types)} 个 · 枚举关键字 {len(enum_keywords)} 个 · 扫描 {checked} 个文件）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -444,6 +532,7 @@ def main():
     check_sources()
     check_frameworks()
     check_ios_spi()
+    check_objcxx_traps()
     check_identity()
 
     print(f"\n通过 {len(OKS)} 项")
