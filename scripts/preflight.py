@@ -133,14 +133,33 @@ BRACKETS = {")": "(", "]": "[", "}": "{"}
 
 
 def strip_code(src):
-    """去掉注释与字符串字面量，但【保留换行】以便报错行号仍然准确"""
+    """
+    去掉注释与字符串字面量，但保留换行以便报错行号准确。
+
+    ★ 关键：必须【保留 #include / #import 后面的引号路径】。
+      否则 `#include "../../fun/kpf/patchfinder.h"` 会被清成 `#include ""`，
+      导致所有基于依赖链的检查（import 存在性、ObjC 传递闭包）全部失灵。
+      （这个 bug 真实存在过一轮，靠反例测试才暴露出来。）
+    """
     def keep_newlines(m):
         return "\n" * m.group(0).count("\n")
-    src = re.sub(r'/\*.*?\*/', keep_newlines, src, flags=re.S)   # 块注释
-    src = re.sub(r'//[^\n]*', '', src)                            # 行注释
-    src = re.sub(r'"(?:\\.|[^"\\])*"', '""', src)                 # 字符串
-    src = re.sub(r"'(?:\\.|[^'\\])*'", "''", src)                 # 字符
-    return src
+
+    # 块注释 → 用等量换行替换
+    src = re.sub(r'/\*.*?\*/', keep_newlines, src, flags=re.S)
+
+    out = []
+    # 不依赖 startswith —— 文件可能有 UTF-8 BOM，会在行首多出 \ufeff
+    inc_re = re.compile(r"^\s*\ufeff?\s*#\s*(?:include|import)\b")
+    for line in src.split("\n"):
+        # include / import 行：只清行注释，路径原样保留
+        if inc_re.match(line):
+            out.append(re.sub(r"//[^\n]*", "", line))
+            continue
+        line = re.sub(r"//[^\n]*", "", line)
+        line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)      # 字符串
+        line = re.sub(r"'(?:\\.|[^'\\])*'", "''", line)      # 字符
+        out.append(line)
+    return "\n".join(out)
 
 
 def header_search_dirs():
@@ -504,6 +523,121 @@ def check_objcxx_traps():
     ok(f"ObjC++ 陷阱检查完成（枚举类型 {len(enum_types)} 个 · 枚举关键字 {len(enum_keywords)} 个 · 扫描 {checked} 个文件）")
 
 
+# ------------------------------------------------- 7.8 编译单元语言边界
+OBJC_HEADER_MARKERS = (r"#\s*(?:import|include)\s*<Foundation/",
+                       r"#\s*(?:import|include)\s*<UIKit/",
+                       r"#\s*(?:import|include)\s*<CoreGraphics/")
+
+
+def check_language_boundaries():
+    """
+    两类「语言边界」硬错误：
+      1) .c（纯 C）编译单元（含传递包含）吃到 ObjC 头（Foundation/UIKit）→
+         "Module 'ObjectiveC.NSObject' requires feature 'objc'"
+         （构建 #13）
+      2) .mm（ObjC++）里 extern 声明 C 符号却没包 extern "C" →
+         名字改编导致链接期找不到符号（构建 #14）
+    """
+    src_root = os.path.join(APP, "Sources")
+    skip = {"imgui", "vendor"}
+
+    # ---- 建一张「哪些头最终会拉进 ObjC」的传递闭包 ----
+    # 先收集所有头文件 → 它直接包含的本地头 / 是否直接含 ObjC 标记
+    headers = {}          # abs_path -> {"includes": set(), "objc": bool}
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            if not fn.endswith((".h", ".hpp")):
+                continue
+            p = os.path.normpath(os.path.join(dirpath, fn))
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            incs = set()
+            for m in re.finditer(r'#\s*(?:import|include)\s+"([^"]+)"', body):
+                incs.add(m.group(1))
+            objc = any(re.search(pat, body) for pat in OBJC_HEADER_MARKERS)
+            headers[p] = {"includes": incs, "objc": objc}
+
+    def resolves_to(from_path, inc):
+        base = os.path.dirname(from_path)
+        for cand in (os.path.normpath(os.path.join(base, inc)),
+                     os.path.normpath(os.path.join(src_root, inc)),
+                     os.path.normpath(os.path.join(src_root, "Kernel", inc)),
+                     os.path.normpath(os.path.join(src_root, "Kernel", "kfd", inc))):
+            if cand in headers:
+                return cand
+        return None
+
+    # 传递闭包（带记忆化 + 防环）
+    memo = {}
+
+    def reaches_objc(path, seen=None):
+        if path in memo:
+            return memo[path]
+        if seen is None:
+            seen = set()
+        if path in seen:
+            return False
+        seen.add(path)
+        info = headers.get(path)
+        if not info:
+            return False
+        if info["objc"]:
+            memo[path] = True
+            return True
+        for inc in info["includes"]:
+            tgt = resolves_to(path, inc)
+            if tgt and reaches_objc(tgt, seen):
+                memo[path] = True
+                return True
+        memo[path] = False
+        return False
+
+    # ---- 检查 .c 文件 ----
+    n_c = 0
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            if not fn.endswith(".c"):
+                continue
+            p = os.path.normpath(os.path.join(dirpath, fn))
+            rel = os.path.relpath(p, ROOT)
+            n_c += 1
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            for m in re.finditer(r'#\s*(?:import|include)\s+"([^"]+)"', body):
+                tgt = resolves_to(p, m.group(1))
+                if tgt and reaches_objc(tgt):
+                    line_no = body[:m.start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: 纯 C 单元包含了最终会拉进 ObjC 头的 "
+                        f"\"{m.group(1)}\" —— 会报 Module 'ObjectiveC.NSObject' "
+                        f"requires feature 'objc'；把本文件改成 .m（ObjC）即可")
+
+    # ---- 检查 .mm 文件的 extern "C" ----
+    n_mm = 0
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            if not fn.endswith(".mm"):
+                continue
+            p = os.path.normpath(os.path.join(dirpath, fn))
+            rel = os.path.relpath(p, ROOT)
+            n_mm += 1
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            if 'extern "C"' in body:
+                continue                      # 已经包了，跳过
+            # \ufeff? —— 容忍文件头 BOM
+            for m in re.finditer(r"^[ \t]*\ufeff?[ \t]*extern\s+[\w\s\*]+?\b(\w+)\s*\([^;]*\)\s*;",
+                                 body, re.M):
+                line_no = body[:m.start()].count("\n") + 1
+                err(f"{rel}:{line_no}: .mm 里声明了外部 C 函数 `{m.group(1)}` 但没包 "
+                    f"extern \"C\" —— ObjC++ 会做名字改编，链接期找不到 _"
+                    f"{m.group(1)}；用 extern \"C\" {{ ... }} 包住")
+
+    ok(f"语言边界检查完成（.c {n_c} 个 · .mm {n_mm} 个 · 头文件 {len(headers)} 个）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -549,6 +683,7 @@ def main():
     check_frameworks()
     check_ios_spi()
     check_objcxx_traps()
+    check_language_boundaries()
     check_identity()
 
     print(f"\n通过 {len(OKS)} 项")

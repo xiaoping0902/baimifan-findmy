@@ -189,12 +189,23 @@ u64 kopen(u64 puaf_pages, u64 puaf_method, u64 kread_method, u64 kwrite_method)
     assert(kwrite_method <= kwrite_sem_open);
 
     struct kfd* kfd = kfd_init(puaf_pages, puaf_method, kread_method, kwrite_method);
-    
+
+    // [MF PATCH 07] 上游的 `goto retry` 是【无限循环】：若 landa 在这台机器上恒定
+    //   失败（例如 PUAF 页没喷满、或 16GB 机型），kopen 会永不返回，
+    //   App 表现为卡死在「启动内核」。这里加次数上限。
+    int mf_retry_count = 0;
+    const int mf_retry_max = 3;
+
 retry:
     puaf_run(kfd);
     
     fail = krkw_run(kfd);
     if(fail && (puaf_method == puaf_landa)) {
+        if (++mf_retry_count >= mf_retry_max) {
+            print_failure("landa retry limit reached (%d attempts), giving up", mf_retry_count);
+            mf_kfd_fail_hook("landa retry limit reached", __FILE__, __LINE__);
+            return 0;      /* 0 = 失败，mf_kopen 会转成 -1 */
+        }
         // Thanks: m1zole / dunkeyyfong
         puaf_free(kfd);
         info_free(kfd);

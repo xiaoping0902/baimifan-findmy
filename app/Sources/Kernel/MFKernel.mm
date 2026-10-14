@@ -8,6 +8,8 @@
 #import <mach/mach_host.h>
 #import <mach/task_special_ports.h>
 #import <sys/stat.h>
+#import <sys/resource.h>       // getrlimit / struct rlimit
+#import <sys/sysctl.h>         // sysctlbyname
 #import <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -114,6 +116,27 @@ extern "C" {
         // 顺序严格对齐 kfd 上游：先做机型/环境预检，再 kopen
         NSString *ver = [NSString stringWithUTF8String:mf_kernel_version() ?: "?"];
         NSLog(@"[MF][Kernel] kern.version = %@", ver);
+
+        // ── 环境预检：fd 上限 ──
+        // 依据 kfd-移植清单.md §9.4：
+        //   kread_sem_open 要为每个 id 开一个 sem_open → 一个 fd，
+        //   峰值用量 ≈ maxfilesperproc - 100。iOS 上通常 10240。
+        //   若 hard limit 被压低，setrlimit 抬高会 EPERM → 断言失败。
+        //   这是第一次装机最该先看的一行日志。
+        struct rlimit rl = {0, 0};
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+            NSLog(@"[MF][Kernel] RLIMIT_NOFILE  soft=%llu hard=%llu（KFD 需要 ~10000+）",
+                  (unsigned long long)rl.rlim_cur, (unsigned long long)rl.rlim_max);
+        } else {
+            NSLog(@"[MF][Kernel] getrlimit 失败 errno=%d", errno);
+        }
+        int mfp = 0;
+        size_t mfpSize = sizeof(mfp);
+        if (sysctlbyname("kern.maxfilesperproc", &mfp, &mfpSize, NULL, 0) == 0) {
+            NSLog(@"[MF][Kernel] kern.maxfilesperproc = %d → KFD 批量分配约需 %d 个 fd",
+                  mfp, mfp > 100 ? mfp - 100 : 0);
+        }
+        NSLog(@"[MF][Kernel] 身份 %@", [self identityText]);
 
         BOOL isM = [ver containsString:@"T8103"] || [ver containsString:@"T8112"];
         NSLog(@"[MF][Kernel] 机型判定：%@（arm64_link_addr 将由 patchfinder 定）",

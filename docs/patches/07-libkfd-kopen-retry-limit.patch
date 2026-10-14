@@ -1,0 +1,21 @@
+--- a/kfd/libkfd.h
++++ b/kfd/libkfd.h
+@@ MF PATCH 07: landa 重试加次数上限
+ #
+ # 上游问题（kfd-移植清单.md §9.6，标记为【已证】）：
+ #   kopen() 里的 landa 重试是
+ #       retry:
+ #           puaf_run(kfd);
+ #           fail = krkw_run(kfd);
+ #           if (fail && puaf_method == puaf_landa) { ...; goto retry; }
+ #   【没有次数上限】。若 landa 在这台机器上恒定失败
+ #   （PUAF 页喷不满、或 16GB 机型），kopen 永不返回。
+ #   表现：App 卡死在「启动内核」，只能强杀。
+ #
+ # 改动：
+ #   - 加 mf_retry_count / mf_retry_max = 3
+ #   - 超过上限 → print_failure + mf_kfd_fail_hook + return 0
+ #     （0 = 失败，mf_kopen 转成 -1，UI 能看到错误字符串）
+ #
+ # 附带收益：把「卡死」变成「3 次尝试后明确报错」，
+ #   用户知道该重启 App 而不是干等。

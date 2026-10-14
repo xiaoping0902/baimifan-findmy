@@ -1,0 +1,19 @@
+--- a/kfd/libkfd/krkw.h
++++ b/kfd/libkfd/krkw.h
+@@ MF PATCH 06: KASLR 扫描加下界 + 迭代上限
+ #
+ # 上游问题（kfd-移植清单.md §9.2，标记为【已证·高危】）：
+ #   krkw_helper_find_kfd_offsets 里的 KASLR 扫描是
+ #       while (true) { ...; kerntask_tte_page -= 0x1000; }
+ #   循环体【没有任何下界检查】。若 val 永远不等于 0x100000cfeedfacf
+ #   （例如 kernel_task->vm_map 的 0x28 偏移在这个内核版本上不对），
+ #   地址会一路减到 0 然后回绕 —— 永不退出。
+ #   表现：App 卡死在「启动内核」，只能强杀。
+ #
+ # 改动：
+ #   - while 条件改为 (kerntask_tte_page >= 0xfffff00000000000ULL
+ #                      && scanned < 0x100000)
+ #   - 扫完还没找到 → print_failure + mf_kfd_fail_hook（宿主 longjmp 回去）
+ #
+ # 实测依据：M2 (T8112) 的内核基址在 0xfffffe0007004000 附近，
+ #   下界 0xfffff00000000000 留了充足余量；上限 1M 页 = 4GB 扫描窗口。
