@@ -4,6 +4,7 @@ app/out/
 app/*.xcodeproj/
 app/*.xcworkspace/
 DerivedData/
+dist/
 *.ipa
 *.dSYM/
 Payload/
