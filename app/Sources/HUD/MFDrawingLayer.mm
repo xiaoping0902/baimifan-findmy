@@ -11,6 +11,10 @@
 
 static BOOL gDrawEnabled = YES;
 
+@interface MFDrawingLayer ()
+@property (nonatomic, strong) MFGameReader *reader;
+@end
+
 /// UIKit 颜色 → ImU32（ImGui 的 ABGR 打包格式）
 static ImU32 MFU32(UIColor *c, float alphaScale = 1.0f) {
     CGFloat r = 1, g = 1, b = 1, a = 1;
