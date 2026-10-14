@@ -39,17 +39,17 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - 执行
 
 /// 为四个游戏重置标识符（生成新 UUID 并写回 plist）
-- (NSDictionary<NSString *, NSString *> *)resetIdentifiersForGamesWithError:(NSString **)err;
+- (NSDictionary<NSString *, NSString *> *)resetIdentifiersForGamesWithError:(NSString *_Nullable *_Nullable)err;
 
 /// 底层：为指定 bundleID 列表重置
 - (NSDictionary<NSString *, NSString *> *)resetIdentifiersForBundleIDs:(NSArray<NSString *> *)bundleIDs
-                                                                 error:(NSString **)err;
+                                                                 error:(NSString *_Nullable *_Nullable)err;
 
 /// 尝试让 lsd 重新读取（原实现收尾动作 lrproki:("lsd")）
 - (BOOL)restartLSD;
 
 /// 备份当前 plist 到 Documents（改动前保险）
-- (nullable NSString *)backupPlistWithError:(NSString **)err;
+- (nullable NSString *)backupPlistWithError:(NSString *_Nullable *_Nullable)err;
 
 @end
 

@@ -23,8 +23,10 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 源字体放在 assets/fonts（不进 App 包）；产物放进 app/Resources/fonts（会打进 IPA）
+SRC_DIR = os.path.join(ROOT, "assets", "fonts")
 FONT_DIR = os.path.join(ROOT, "app", "Resources", "fonts")
-SRC_FONT = os.path.join(FONT_DIR, "NotoSansSC-Regular.otf")
+SRC_FONT = os.path.join(SRC_DIR, "NotoSansSC-Regular.otf")
 OUT_FONT = os.path.join(FONT_DIR, "NotoSansSC-subset.ttf")
 
 SCAN_EXTS = (".mm", ".m", ".h", ".c", ".cpp", ".hpp",
@@ -130,7 +132,9 @@ def main():
     cjk = sum(1 for c in chars if 0x4E00 <= ord(c) <= 0x9FFF)
     print(f"  其中汉字 {cjk} 个")
 
-    chars_file = os.path.join(FONT_DIR, "_charset.txt")
+    chars_file = os.path.join(SRC_DIR, "_charset.txt")
+    os.makedirs(SRC_DIR, exist_ok=True)
+    os.makedirs(FONT_DIR, exist_ok=True)
     with open(chars_file, "w", encoding="utf-8") as f:
         f.write(text)
 

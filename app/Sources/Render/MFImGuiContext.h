@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithDevice:(id<MTLDevice>)device;
 
 /// 初始化（CreateContext + ImGui_ImplMetal_Init + 皮肤 + 字体）
-- (BOOL)setupWithError:(NSString **)err;
+- (BOOL)setupWithError:(NSString *_Nullable *_Nullable)err;
 
 /// iOS 风格皮肤
 - (void)applyIOSStyle;

@@ -154,7 +154,8 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     if (![d isKindOfClass:[NSDictionary class]] || d.count == 0) return NO;
 
     #define LOAD_BOOL(name) if (d[@#name]) _##name = [d[@#name] boolValue]
-    #define LOAD_NUM(name)  if (d[@#name]) _##name = [d[@#name] doubleValue]
+    // 显式转回字段自身类型：ObjC++ 下 double → enum 是硬错误，必须 cast
+    #define LOAD_NUM(name)  if (d[@#name]) _##name = (__typeof__(_##name))[d[@#name] doubleValue]
 
     LOAD_BOOL(masterEnabled); LOAD_BOOL(drawEnabled);
     LOAD_BOOL(showBot); LOAD_BOOL(showName); LOAD_BOOL(showArmor);

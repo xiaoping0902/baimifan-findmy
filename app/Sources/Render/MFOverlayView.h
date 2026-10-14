@@ -37,7 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithFrame:(CGRect)frame interactive:(BOOL)interactive;
 
-- (BOOL)startRenderingWithError:(NSString **)err;
+- (BOOL)startRenderingWithError:(NSString *_Nullable *_Nullable)err;
 - (void)stopRendering;
 
 @end

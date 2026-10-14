@@ -53,7 +53,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 读 stat.st_mode & 0x80：无该位 = 已开启
 - (BOOL)isGameModeOn;
 - (NSString *)gameModeStatusText;          // 给界面直接显示
-- (BOOL)setGameModeOn:(BOOL)on error:(NSString **)err;
+- (BOOL)setGameModeOn:(BOOL)on error:(NSString *_Nullable *_Nullable)err;
 
 /// 当前 keychain-2.db 的权限（八进制字符串，供诊断）
 - (nullable NSString *)keychainModeOctal;
