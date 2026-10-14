@@ -32,10 +32,21 @@ targets:
       - path: Sources/Render/imgui/imgui_demo.cpp
       - path: Sources/Render/imgui/backends/imgui_impl_metal.mm
       # ── M3: KFD 内核链 ────────────────────────────────────────────────
-      # 桥接层：MFKernelBridge.c 是【全工程唯一】include "libkfd.h" 的编译单元。
+      # 桥接层：MFKernelBridge.m 是【全工程唯一】include "libkfd.h" 的编译单元。
       # libkfd.h 是 header-only（kopen/kread/kwrite/kclose/kfd_init 都是
       # 无 static 的普通定义），被两个 TU 包含 = 重复符号。
-      - path: Sources/Kernel/MFKernelBridge.c
+      #
+      # 为什么是 .m 而不是 .c：
+      #   libkfd.h → info.h → info/dynamic_info.h → fun/kpf/patchfinder.h
+      #   最后一行是 #import <Foundation/Foundation.h>。
+      #   纯 C（.c）编译单元吃不下 ObjC 模块，会报
+      #     "Module 'ObjectiveC.NSObject' requires feature 'objc'"
+      #     "Could not build module 'Foundation'"
+      #   .m（ObjC，非 ObjC++）可以。min/max 宏在 .m 下无害 —— 只有
+      #   ObjC++（.mm）才会与 libc++ 的 std::min/std::max 冲突。
+      # 另外单独关掉 ARC：本文件用 setjmp/longjmp，且无任何 ObjC 对象。
+      - path: Sources/Kernel/MFKernelBridge.m
+        compilerFlags: -fno-objc-arc
       - path: Sources/Kernel/MFKernelBridge.h
       # 注意：MFLibkfdHost.c 不存在 —— MFLibkfdKRead4() 的实现放在
       # MFKernelBridge.c（行 535）里，避免第二个 TU 也 include libkfd.h。
