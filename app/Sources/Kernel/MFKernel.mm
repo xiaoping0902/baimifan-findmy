@@ -16,10 +16,15 @@
 //
 // iOS 公开 SDK 【没有】 libproc.h（那是私有头）——
 // 但 proc_pidpath / proc_pidinfo 的符号在 libSystem 里是稳定存在的。
-// 所以自己声明原型，不 #import <libproc.h>（构建 #12 就是被它挡住的）。
+// 所以自己声明原型，不 #import <libproc.h>。
 //
-extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
-extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
+// ★ 本文件是 .mm（ObjC++），必须用 extern "C" 包住，
+//   否则 C++ 会做名字改编，链接期找不到 _proc_pidpath（构建 #14 就是这么挂的）。
+//
+extern "C" {
+    int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+    int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
+}
 
 // 分析里已证的两个常量
 #ifndef TASK_KERNEL_PORT
