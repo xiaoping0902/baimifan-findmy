@@ -141,9 +141,38 @@ def strip_code(src):
     return src
 
 
+def header_search_dirs():
+    """从 project.yml 读 HEADER_SEARCH_PATHS，把 $(SRCROOT) 解析成 app/"""
+    proj = os.path.join(APP, "project.yml")
+    dirs = []
+    try:
+        with open(proj, encoding="utf-8") as f:
+            txt = f.read()
+    except Exception:
+        return dirs
+    in_block = False
+    base_indent = 0
+    for line in txt.splitlines():
+        if "HEADER_SEARCH_PATHS:" in line:
+            in_block = True
+            base_indent = len(line) - len(line.lstrip())
+            continue
+        if in_block:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if not stripped.startswith("-") or indent <= base_indent:
+                in_block = False
+                continue
+            val = stripped.lstrip("- ").strip().strip('"').strip("'")
+            val = val.replace("$(SRCROOT)", APP)
+            dirs.append(os.path.normpath(val))
+    return dirs
+
+
 def check_sources():
     exts = (".mm", ".m", ".h", ".c", ".cpp", ".hpp")
     skip = {"imgui", "kfd", "kfund"}
+    incdirs = header_search_dirs()
     n = 0
     for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
         if any(s in dirpath.split(os.sep) for s in skip):
@@ -174,16 +203,15 @@ def check_sources():
             elif not bad:
                 ok(f"{rel}: 括号配平")
 
-            # 本地 #import "x" 路径存在性
+            # 本地 #import "x" 路径存在性（含 HEADER_SEARCH_PATHS）
             for m in re.finditer(r'#(?:import|include)\s+"([^"]+)"', raw):
                 inc = m.group(1)
                 base = os.path.dirname(p)
-                cands = [
-                    os.path.join(base, inc),
-                    os.path.join(APP, "Sources", inc),
-                ]
+                cands = [os.path.join(base, inc), os.path.join(APP, "Sources", inc)]
+                cands += [os.path.join(d, inc) for d in incdirs]
                 if not any(os.path.exists(c) for c in cands):
-                    err(f"{rel}: #import \"{inc}\" 找不到（已查 {os.path.relpath(base, ROOT)} 与 Sources/）")
+                    err(f"{rel}: #import \"{inc}\" 找不到"
+                        f"（已查 同级目录 / Sources/ / HEADER_SEARCH_PATHS {len(incdirs)} 项）")
     ok(f"源码粗检完成，共 {n} 个文件")
 
 
@@ -263,9 +291,11 @@ def check_frameworks():
     with open(proj, encoding="utf-8") as f:
         yml = f.read()
 
-    # 常见的 C 标准库 / libSystem，不需要显式 framework
+    # 常见的 C 标准库 / libSystem / SDK 头目录，不需要显式 framework
     IGNORE = {"mach", "mach-o", "sys", "unistd", "stdlib", "string", "errno",
-              "stdio", "pthread", "semaphore", "libkern", "os", "spawn"}
+              "stdio", "pthread", "semaphore", "libkern", "os", "spawn",
+              "objc", "objc-runtime", "dispatch", "uuid", "signal", "stdint",
+              "time", "math", "netinet", "arpa", "net", "dlfcn", "fcntl"}
 
     exts = (".mm", ".m", ".h", ".c", ".cpp", ".hpp")
     skip = {"imgui", "kfd", "kfund"}

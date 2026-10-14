@@ -19,12 +19,17 @@ targets:
     sources:
       - path: Sources
         excludes:
-          # --- 第三方源码，按里程碑逐步启用 ---
-          # M2 启用：取消注释即可把 imgui 编进来
+          # 第三方整包排除，改为下面【逐文件精确加入】
           - "Render/imgui/**"
-          # M3 启用：kfd / kfund
           - "Kernel/kfd/**"
           - "Kernel/kfund/**"
+      # ── ImGui：只编这 6 个（其余 backends/*.cpp 是 dx/glfw/vulkan，编了必炸）──
+      - path: Sources/Render/imgui/imgui.cpp
+      - path: Sources/Render/imgui/imgui_draw.cpp
+      - path: Sources/Render/imgui/imgui_tables.cpp
+      - path: Sources/Render/imgui/imgui_widgets.cpp
+      - path: Sources/Render/imgui/imgui_demo.cpp
+      - path: Sources/Render/imgui/backends/imgui_impl_metal.mm
       - path: Resources
         buildPhase: resources
     # ── 系统框架 / 库（XcodeGen 不会自动加，必须显式声明）──

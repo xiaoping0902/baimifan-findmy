@@ -166,7 +166,7 @@ static sqlite3 *MFOpenKeychain(NSString **err) {
 - (NSString *)gameModeStatusText {
     NSString *mode = [self keychainModeOctal];
     if ([self isGameModeOn]) {
-        return [NSString stringWithFormat:@"✅ 高级游戏模式已开启（权限 %@）", mode ?: @"?"];
+        return [NSString stringWithFormat:@"✓ 高级游戏模式已开启（权限 %@）", mode ?: @"?"];
     }
     return [NSString stringWithFormat:@"高级游戏模式已关闭（权限 %@）", mode ?: @"?"];
 }

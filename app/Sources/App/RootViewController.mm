@@ -10,6 +10,7 @@
 #import "../Features/MFCleanup.h"
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
+#import "../HUD/MFHUDLauncher.h"
 
 #import <mach-o/dyld.h>
 #import <spawn.h>
@@ -88,7 +89,13 @@ extern char **environ;
     MFSection *s0 = [[MFSection alloc] init];
     s0.header = @"状态";
     [s0.rows addObject:[self infoRow:@"内核（KFD）" detail:@"未启动 · M3 接入" ok:NO]];
-    [s0.rows addObject:[self infoRow:@"悬浮窗（HUD）" detail:@"未启动 · M2 接入" ok:NO]];
+
+    BOOL hudUp = [MFHUDLauncher isHUDRunning];
+    [s0.rows addObject:[self infoRow:@"悬浮窗（HUD）"
+                              detail:(hudUp ? [NSString stringWithFormat:@"运行中 · PID %d",
+                                               [MFHUDLauncher hudPID]]
+                                            : @"未启动 · M2 已接入")
+                                  ok:hudUp]];
     [s0.rows addObject:[self infoRow:@"运行身份" detail:[self identityText] ok:YES]];
 
     NSDictionary *rs = [MFCleanup ruleSummary];
@@ -186,12 +193,12 @@ extern char **environ;
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
-        r.detail = @"✗ 路径不存在"; r.ok = NO; r.hasState = YES; return r;
+        r.detail = @"× 路径不存在"; r.ok = NO; r.hasState = YES; return r;
     }
     NSError *err = nil;
     NSArray *items = [fm contentsOfDirectoryAtPath:path error:&err];
     if (!items) {
-        r.detail = [NSString stringWithFormat:@"✗ 读取失败：%@", err.localizedDescription ?: @"unknown"];
+        r.detail = [NSString stringWithFormat:@"× 读取失败：%@", err.localizedDescription ?: @"unknown"];
         r.ok = NO;
     } else {
         r.detail = [NSString stringWithFormat:@"✓ 可见 %lu 项%@",
@@ -207,9 +214,9 @@ extern char **environ;
     MFRow *r = [MFRow new];
     r.title = @"自派生能力（posix_spawn）";
     NSString *exe = [NSBundle mainBundle].executablePath;
-    if (!exe) { r.detail = @"✗ 取不到自身可执行路径"; r.ok = NO; r.hasState = YES; return r; }
+    if (!exe) { r.detail = @"× 取不到自身可执行路径"; r.ok = NO; r.hasState = YES; return r; }
     if (access(exe.fileSystemRepresentation, X_OK) != 0) {
-        r.detail = [NSString stringWithFormat:@"✗ 无执行权限（errno=%d）", errno];
+        r.detail = [NSString stringWithFormat:@"× 无执行权限（errno=%d）", errno];
         r.ok = NO; r.hasState = YES; return r;
     }
     r.detail = @"✓ 可执行文件可访问（未实际拉起子进程）";
@@ -235,7 +242,42 @@ extern char **environ;
     [self toast:@"内核设置页将在 M3 接入"];
 }
 - (void)actStartHUD {
-    [self toast:@"HUD 双窗口将在 M2 接入"];
+    if ([MFHUDLauncher isHUDRunning]) {
+        UIAlertController *a = [UIAlertController
+            alertControllerWithTitle:@"悬浮窗正在运行"
+                             message:[NSString stringWithFormat:@"PID = %d\n\n要结束它吗？",
+                                      [MFHUDLauncher hudPID]]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"结束悬浮窗" style:UIAlertActionStyleDestructive
+                                           handler:^(UIAlertAction *_) { [self stopHUDNow]; }]];
+        [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+        return;
+    }
+
+    NSString *err = nil;
+    if (![MFHUDLauncher startHUDWithError:&err]) {
+        [self alert:@"启动失败" message:[NSString stringWithFormat:
+            @"%@\n\n排查建议：\n"
+            @"1) 自检页里 /var/mobile 是否可读\n"
+            @"2) 控制台日志里找 [MF][HUDLaunch]", err ?: @"未知错误"]];
+        return;
+    }
+    [self alert:@"悬浮窗已启动"
+        message:[NSString stringWithFormat:
+                 @"HUD 进程 PID = %d\n\n"
+                 @"它会在 0.35 秒后把两个窗口托管给 SpringBoard。\n"
+                 @"若没看到悬浮菜单，去看设备日志里的 [MF][HUD] 行。",
+                 [MFHUDLauncher hudPID]]];
+    [self refreshStatus];
+}
+
+- (void)stopHUDNow {
+    NSString *err = nil;
+    if (![MFHUDLauncher stopHUDWithError:&err]) {
+        [self alert:@"结束失败" message:err ?: @"未知错误"];
+    }
+    [self refreshStatus];
 }
 
 #pragma mark 清理系统残留
@@ -269,7 +311,7 @@ extern char **environ;
     NSMutableString *msg = [NSMutableString string];
     NSInteger total = 0;
     for (MFKeychainResult *r in [[MFKeychain shared] countForAllGames]) {
-        if (r.error) { [msg appendFormat:@"%@\n  ✗ %@\n", r.bundleID, r.error]; continue; }
+        if (r.error) { [msg appendFormat:@"%@\n  × %@\n", r.bundleID, r.error]; continue; }
         [msg appendFormat:@"%@\n  命中 %ld 条\n", r.bundleID, (long)r.totalMatched];
         total += r.totalMatched;
     }
