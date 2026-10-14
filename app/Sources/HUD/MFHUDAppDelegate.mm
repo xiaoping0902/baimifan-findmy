@@ -3,7 +3,9 @@
 //
 #import "MFHUDAppDelegate.h"
 #import "MFMenuUI.h"
+#import "MFDrawingLayer.h"
 #import "../Render/MFOverlayView.h"
+#import "../Kernel/MFKernel.h"
 #import <objc/message.h>
 #include <string.h>
 
@@ -86,6 +88,10 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     MFOverlayView *drawView = [[MFOverlayView alloc] initWithFrame:drawVC.view.bounds
                                                        interactive:NO];
     drawView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    MFDrawingLayer *drawLayer = [[MFDrawingLayer alloc] init];
+    drawLayer.overlay = drawView;
+    drawView.delegate = drawLayer;
+    self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
     [drawVC.view addSubview:drawView];
     drawWin.hidden = NO;
     [drawWin makeKeyAndVisible];

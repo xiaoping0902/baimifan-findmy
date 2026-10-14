@@ -20,6 +20,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) UIWindow *hudMenuWindow;
 @property (nonatomic, strong, nullable) UIWindow *drawingWindow;
 @property (nonatomic, strong, nullable) id menuController;   // 强引用，delegate 是 weak
+@property (nonatomic, strong, nullable) id drawingLayer;     // 同上
 + (BOOL)isHUDProcess;
 @end
 

@@ -12,7 +12,9 @@
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
 #import "../HUD/MFHUDLauncher.h"
+#import "../HUD/MFDrawingLayer.h"
 #import "../Kernel/MFKernel.h"
+#import "../Game/MFGameReader.h"
 
 #import <mach-o/dyld.h>
 #import <spawn.h>
@@ -130,6 +132,7 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"启动内核" detail:@"M3" action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];
+    [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
     [secs addObject:s1];
 
     // ---------- 2 清理与防封 ----------
@@ -296,6 +299,38 @@ extern char **environ;
         [self alert:@"结束失败" message:err ?: @"未知错误"];
     }
     [self refreshStatus];
+}
+
+#pragma mark 游戏数据自检
+
+- (void)actGameDataCheck {
+    CGSize sz = self.view.bounds.size;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *dump = nil;
+        if ([MFGameReader shared].ready) {
+            MFDrawingLayer *dl = [[MFDrawingLayer alloc] init];
+            dump = [dl dumpFrameWithSize:sz];
+        } else {
+            dump = [NSString stringWithFormat:
+                    @"读取链未就绪\n\n%@\n\n"
+                    @"要打开读取链：\n"
+                    @"1) 进「启动内核」页\n"
+                    @"2) 底部「能力探测」→ 拿到进程列表\n"
+                    @"3) 点目标游戏的进程 → 自动绑定 task port",
+                    [[MFGameReader shared] diagnosticReport]];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"游戏数据自检"
+                                                                      message:dump
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault
+                                               handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = dump;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 #pragma mark 清理系统残留

@@ -5,6 +5,9 @@
 //
 #import "MFProcessViewController.h"
 #import "../Kernel/MFKernel.h"
+#import "../Game/MFGameReader.h"
+#import "../Read/MFReadBackend.h"
+#import "../Game/Offsets.h"
 
 @interface MFProcessViewController () <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 
@@ -197,13 +200,53 @@
     c.textLabel.text = [NSString stringWithFormat:@"%d  ·  %@", p.pid, p.name];
     c.textLabel.font = [UIFont systemFontOfSize:15];
     c.detailTextLabel.text = p.path;
-    c.selectionStyle = UITableViewCellSelectionStyleNone;
-    // 高亮腾讯游戏（防封目标）
-    if ([p.name hasPrefix:@"ShadowTracker"] || [p.path containsString:@"DeltaForce"] ||
+    c.selectionStyle = UITableViewCellSelectionStyleDefault;
+
+    // 当前已绑定目标高亮
+    if ([MFGameReader shared].targetTaskPort == p.taskPort && p.taskPort != 0) {
+        c.accessoryType = UITableViewCellAccessoryCheckmark;
+        c.textLabel.textColor = [UIColor systemBlueColor];
+    } else if ([p.name hasPrefix:@"ShadowTracker"] || [p.path containsString:@"DeltaForce"] ||
         [p.path containsString:@"dfm"] || [p.path containsString:@"pubgm"]) {
-        c.textLabel.textColor = [UIColor systemGreenColor];
+        c.accessoryType = UITableViewCellAccessoryNone;
+        c.textLabel.textColor = [UIColor systemGreenColor];   // 防封目标游戏
+    } else {
+        c.accessoryType = UITableViewCellAccessoryNone;
+        c.textLabel.textColor = [UIColor labelColor];
     }
     return c;
+}
+
+/// 点进程 = 绑定为读取目标（写 task port 到读取后端 → 开门条件）
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    MFProcessInfo *p = self.shown[ip.row];
+    if (p.taskPort == 0) {
+        [self alert:@"无法绑定" message:@"该进程没有有效的 task port"];
+        return;
+    }
+
+    MFGameReader *r = [MFGameReader shared];
+    r.targetTaskPort = p.taskPort;
+    [MFReadBackend shared].modeFlag = YES;
+
+    // 顺便把进程名写回当前档案，方便后续自动匹配
+    MFGameProfile *prof = [MFOffsets shared].current;
+    if (prof.processName.length == 0) {
+        prof.processName = p.name;
+        [[MFOffsets shared] saveCalibration];
+    }
+
+    [tv reloadData];
+
+    NSString *msg = [NSString stringWithFormat:
+        @"已绑定：%@ (pid %d)\ntask port = 0x%x\n\n"
+        @"门条件：%@\n\n"
+        @"下一步：回到悬浮窗看绘制层，或在这里往下拉刷新后\n"
+        @"在「启动内核」页点「能力探测」看读取统计。",
+        p.name, p.pid, p.taskPort,
+        [MFReadBackend shared].gateOpen ? @"✓ 已就绪" : @"× 未就绪"];
+    [self alert:@"绑定成功" message:msg];
 }
 
 @end
