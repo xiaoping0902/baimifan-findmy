@@ -347,6 +347,59 @@ def check_frameworks():
         err(f"源码用到 {fw}，但 project.yml 未声明 `- sdk: {fw}.framework`（会在链接阶段炸）")
 
 
+# ------------------------------------------------- 7.6 iOS SPI 直接调用
+def check_ios_spi():
+    """
+    iOS 公开 SDK 头里【不声明】的一批 SPI。
+    直接写函数名调用会得到 "use of undeclared identifier"（构建 #10 就是这么挂的）。
+    必须走 dlsym，或者显式声明函数指针类型。
+    """
+    # 【已证】iOS 公开 SDK 头里没有声明 —— 构建 #10 实测 mach_vm_deallocate 报
+    #        "use of undeclared identifier"。直接调用必挂，一律 ERROR。
+    SPI_HARD = {
+        "mach_vm_remap", "mach_vm_deallocate", "mach_vm_read",
+        "mach_vm_write", "mach_vm_region", "mach_vm_allocate",
+        "mach_vm_protect", "mach_vm_read_overwrite", "mach_vm_machine_attribute",
+    }
+    # 【未证】可能公开也可能 SPI，只提醒不报错
+    SPI_SOFT = {
+        "task_for_pid", "host_processor_set_priv",
+        "processor_set_tasks", "host_processor_sets", "host_get_special_port",
+        "processor_set_default",
+    }
+
+    exts = (".mm", ".m", ".c", ".cpp")
+    skip = {"imgui", "kfd"}
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            checked += 1
+
+            for sym, hard in [(s, True) for s in SPI_HARD] + [(s, False) for s in SPI_SOFT]:
+                # 直接调用形态： symbol(
+                if not re.search(r"(?<![\w\"])" + re.escape(sym) + r"\s*\(", body):
+                    continue
+                # 已经 dlsym 包装过就不算
+                if re.search(r"dlsym\s*\([^)]*\"" + re.escape(sym) + r"\"", body):
+                    continue
+                if hard:
+                    err(f"{rel}: 直接调用了 iOS SPI `{sym}(...)` —— "
+                        f"公开 SDK 头里没声明，会报 use of undeclared identifier；"
+                        f"改用 dlsym + 函数指针")
+                else:
+                    warn(f"{rel}: 调用了 `{sym}(...)` —— 该符号在 iOS 上是否公开未证，"
+                         f"若构建报 undeclared 就改 dlsym")
+    ok(f"iOS SPI 检查完成，扫描 {checked} 个源文件")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -390,6 +443,7 @@ def main():
     check_assets()
     check_sources()
     check_frameworks()
+    check_ios_spi()
     check_identity()
 
     print(f"\n通过 {len(OKS)} 项")

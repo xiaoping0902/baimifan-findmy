@@ -22,7 +22,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)lsdIdentifiersPlist;     // com.apple.lsdidentifiers.plist（自动定位）
 
 /// 沙盒豁免自检：能否列出该目录
-+ (BOOL)canListDirectory:(NSString *)path count:(NSUInteger *)count error:(NSString **)err;
++ (BOOL)canListDirectory:(NSString *)path
+                   count:(nullable NSUInteger *)count
+                   error:(NSString *_Nullable *_Nullable)err;
 
 /// 是否具备 root（uid==0）
 + (BOOL)isRoot;

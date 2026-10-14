@@ -8,7 +8,8 @@
 #import <unistd.h>
 #include <string.h>
 
-// mach_vm_remap 是私有符号 —— 原实现也是 dlsym 拿的
+// mach_vm_remap / mach_vm_deallocate 都是 iOS 的 SPI —— 公开 SDK 头里没有声明。
+// 原实现同样是用 dlsym 拿 mach_vm_remap 的。
 typedef kern_return_t (*mf_mach_vm_remap_fn)(
     vm_map_t target_task,
     mach_vm_address_t *target_address,
@@ -22,8 +23,21 @@ typedef kern_return_t (*mf_mach_vm_remap_fn)(
     vm_prot_t *max_protection,
     vm_inherit_t inheritance);
 
-static mf_mach_vm_remap_fn g_remap = NULL;
+typedef kern_return_t (*mf_mach_vm_deallocate_fn)(
+    vm_map_t target,
+    mach_vm_address_t address,
+    mach_vm_size_t size);
+
+static mf_mach_vm_remap_fn      g_remap    = NULL;
+static mf_mach_vm_deallocate_fn g_dealloc  = NULL;
 static uint64_t g_pagesize = 0;
+
+/// 解除映射：优先用 SPI 版 mach_vm_deallocate（支持 >4GB 地址），
+/// 拿不到就退回公开的 vm_deallocate
+static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, mach_vm_size_t size) {
+    if (g_dealloc) return g_dealloc(task, addr, size);
+    return vm_deallocate(task, (vm_address_t)addr, (vm_size_t)size);
+}
 
 @implementation MFReadBackend {
     uint64_t _readCount;
@@ -42,10 +56,13 @@ static uint64_t g_pagesize = 0;
         // 对齐原实现初始化：dlsym("mach_vm_remap") + getpagesize()
         g_remap = (mf_mach_vm_remap_fn)dlsym(RTLD_DEFAULT, "mach_vm_remap");
         if (!g_remap) g_remap = (mf_mach_vm_remap_fn)dlsym(RTLD_DEFAULT, "_mach_vm_remap");
+        g_dealloc = (mf_mach_vm_deallocate_fn)dlsym(RTLD_DEFAULT, "mach_vm_deallocate");
+        if (!g_dealloc) g_dealloc = (mf_mach_vm_deallocate_fn)dlsym(RTLD_DEFAULT, "_mach_vm_deallocate");
         g_pagesize = (uint64_t)getpagesize();
         if (!g_pagesize) g_pagesize = 0x4000;
         _modeFlag = NO;
-        NSLog(@"[MF][Read] 后端就绪 remap=%p pagesize=0x%llx", (void *)g_remap, g_pagesize);
+        NSLog(@"[MF][Read] 后端就绪 remap=%p dealloc=%p(回退 vm_deallocate) pagesize=0x%llx",
+              (void *)g_remap, (void *)g_dealloc, g_pagesize);
     }
     return self;
 }
@@ -100,7 +117,7 @@ static uint64_t g_pagesize = 0;
     }
 
     memcpy(out, (void *)(local + offset), size);
-    mach_vm_deallocate(mach_task_self(), local, span);
+    mf_dealloc(mach_task_self(), local, span);
 
     _readCount++;
     return YES;
