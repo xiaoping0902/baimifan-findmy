@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 平台应用身份（白米饭包内同款，TrollStore 环境生效） -->
+	<key>platform-application</key>
+	<true/>
+	<!-- 沙盒完全豁免：内核链 / 清理 / 防封 读系统目录的前提 -->
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<!-- 系统应用包目录访问（AppBundles） -->
+	<key>com.apple.private.security.storage.AppBundles</key>
+	<true/>
+	<!-- persona 管理 -->
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
+	<!-- HUD 跨 App 窗口托管（SpringBoard 辅助窗口） —— M2 悬浮窗的前提 -->
+	<key>com.apple.springboard.accessibility-window-hosting</key>
+	<true/>
+	<!-- task_for_pid 权限 -->
+	<key>task_for_pid-allow</key>
+	<true/>
+	<!-- IOKit 用户客户端（GPU / Surface，Metal 绘制层） -->
+	<key>com.apple.security.exception.iokit-user-client-class</key>
+	<array>
+		<string>AGXDeviceUserClient</string>
+		<string>IOSurfaceRootUserClient</string>
+	</array>
+</dict>
+</plist>

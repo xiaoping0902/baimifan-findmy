@@ -1,0 +1,62 @@
+name: FindMy
+options:
+  bundleIdPrefix: com.apple
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+targets:
+  FindMy:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          # --- 第三方源码，按里程碑逐步启用 ---
+          # M2 启用：取消注释即可把 imgui 编进来
+          - "Render/imgui/**"
+          # M3 启用：kfd / kfund
+          - "Kernel/kfd/**"
+          - "Kernel/kfund/**"
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: FindMy
+        PRODUCT_BUNDLE_IDENTIFIER: com.apple.findmy
+        INFOPLIST_FILE: Support/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CLANG_ENABLE_OBJC_ARC: YES
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        GCC_C_LANGUAGE_STANDARD: gnu17
+        CLANG_CXX_LIBRARY: libc++
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Sources"
+          - "$(SRCROOT)/Sources/Render/imgui"
+          - "$(SRCROOT)/Sources/Render/imgui/backends"
+          - "$(SRCROOT)/Sources/Kernel/kfd/kfd"
+        # 云构建不签名（构建后由 CI 用 ldid + entitlements 伪签名）
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        DEVELOPMENT_TEAM: ""
+        # 允许在真机上以 Release 编译出可 ldid 签名的产物
+        ONLY_ACTIVE_ARCH: NO
+        ARCHS: arm64
+        VALIDATE_PRODUCT: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+schemes:
+  FindMy:
+    build:
+      targets:
+        FindMy: all
+    run:
+      config: Release

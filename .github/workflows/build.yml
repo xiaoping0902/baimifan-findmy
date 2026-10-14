@@ -1,0 +1,85 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Install xcodegen & ldid
+        run: brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        working-directory: app
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project FindMy.xcodeproj \
+            -scheme FindMy \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tail -120
+
+      - name: Locate .app
+        id: locate
+        working-directory: app
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "app_path=$APP" >> "$GITHUB_OUTPUT"
+          echo "Found: $APP"
+          ls -la "$APP"
+
+      - name: Inject entitlements (ldid)
+        working-directory: app
+        run: |
+          APP="${{ steps.locate.outputs.app_path }}"
+          ENT="$PWD/Support/entitlements.plist"
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          echo "Executable: $EXEC_NAME"
+          ldid -S"$ENT" "$APP/$EXEC_NAME"
+          echo "--- entitlements 验证 ---"
+          ldid -e "$APP/$EXEC_NAME"
+          if [ -d "$APP/Frameworks" ]; then
+            find "$APP/Frameworks" -type f | while read -r bin; do
+              if file -b "$bin" | grep -q "Mach-O"; then
+                ldid -S"$ENT" "$bin"
+                echo "signed: $bin"
+              fi
+            done
+          fi
+
+      - name: Package IPA
+        working-directory: app
+        run: |
+          APP="${{ steps.locate.outputs.app_path }}"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out && zip -qry FindMy-unsigned.ipa Payload
+          ls -la
+          echo "--- 结构校验 ---"
+          unzip -l FindMy-unsigned.ipa | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FindMy-unsigned-ipa
+          path: app/out/FindMy-unsigned.ipa
+          if-no-files-found: error

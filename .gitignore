@@ -1,0 +1,25 @@
+# ---- 构建产物 ----
+app/build/
+app/out/
+app/*.xcodeproj/
+app/*.xcworkspace/
+DerivedData/
+*.ipa
+*.dSYM/
+Payload/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- 临时 ----
+scratch/
+*.log
+*.tmp
+*.bak
+
+# ---- 打包教程内的演示仓库（自带 .git，不并入主仓）----
+打包教程/
+
+# ---- 大体积第三方源码保留入库（云构建需要）----
+# imgui：app/Sources/Render/imgui/    （5 个核心 cpp + backends/imgui_impl_metal + docs）
+# kfd  ：app/Sources/Kernel/kfd/      （header-only，含 kfd.xcodeproj 与 writeups，构建时已排除）

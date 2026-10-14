@@ -1,0 +1,20 @@
+# 统一 LF，避免 Windows 的 CRLF 混进云构建（macOS runner）
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.ttf  binary
+*.otf  binary
+*.ttc  binary
+*.zip  binary
+*.ipa  binary
+*.i64  binary
+*.db   binary
+*.xz   binary
+
+# Xcode 工程描述由 CI 生成，不入库
+*.xcodeproj linguist-generated=true
