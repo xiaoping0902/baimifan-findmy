@@ -7,12 +7,31 @@
 
 #include "imgui.h"
 
-/// ImGui 不认 UIColor，转 ImVec4
-static ImVec4 MFV4(UIColor *c, float alphaScale = 1.0f) {
-    CGFloat r = 0, g = 0, b = 0, a = 1;
-    if (![c getRed:&r green:&g blue:&b alpha:&a]) { r = g = b = 1; a = 1; }
-    return ImVec4((float)r, (float)g, (float)b, (float)a * alphaScale);
-}
+//
+// ★ ObjC++ 硬约束：不能对 property 表达式取地址（&s.someProp 是编译错误）。
+//   所以所有 ImGui 控件都走下面这组宏：
+//     读进局部变量 → 传局部变量地址 → 有变更再写回属性。
+//
+#define MF_CHECK(label, prop)                           \
+    do {                                                \
+        bool _v = (s.prop);                             \
+        if (ImGui::Checkbox(label, &_v)) s.prop = _v;   \
+    } while (0)
+
+#define MF_CHECK_SAME(label, prop)                      \
+    do {                                                \
+        bool _v = (s.prop);                             \
+        if (ImGui::Checkbox(label, &_v)) s.prop = _v;   \
+        ImGui::SameLine();                              \
+    } while (0)
+
+#define MF_SLIDE_F(label, prop, lo, hi, fmt)                          \
+    do {                                                              \
+        float _v = (float)(s.prop);                                   \
+        ImGui::SetNextItemWidth(-1);                                  \
+        if (ImGui::SliderFloat(label, &_v, lo, hi, fmt)) s.prop = _v; \
+    } while (0)
+
 static bool MFUIColorEdit(const char *label, UIColor **io, MFColorSlot slot) {
     UIColor *c = *io;
     CGFloat r = 0, g = 0, b = 0, a = 1;
@@ -56,7 +75,7 @@ static BOOL gVisible = YES;
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
     MFSettings *s = [MFSettings shared];
 
-    // 未开启总开关 → 什么都不画，捕获区清空（全屏穿透）
+    // 关掉总开关或手动隐藏 → 什么都不画，捕获区清空（全屏穿透）
     if (!gVisible || !s.masterEnabled) {
         overlay.captureRect = CGRectNull;
         return;
@@ -65,13 +84,13 @@ static BOOL gVisible = YES;
     ImGuiIO &io = ImGui::GetIO();
     const ImVec2 screen = io.DisplaySize;
     const float W = 348.0f;
-    const float H = MIN(520.0f, screen.y - 120.0f);
+    const float H = MIN(520.0f, MAX(240.0f, screen.y - 120.0f));
 
-    ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Always);
     if (!_posInit) {
         _pos = ImVec2(24, 90);
         _posInit = YES;
     }
+    ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Always);
     ImGui::SetNextWindowPos(_pos, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(_alpha);
 
@@ -83,19 +102,16 @@ static BOOL gVisible = YES;
         return;
     }
 
-    // 拖动后同步位置（ImGui 内部会改窗口位置）
+    // 拖动后同步位置；主面板矩形交给 overlay 做命中判定
     _pos = ImGui::GetWindowPos();
-
-    // 主面板矩形 → 交给 overlay 做命中判定
-    ImVec2 wp = ImGui::GetWindowPos();
     ImVec2 ws = ImGui::GetWindowSize();
-    overlay.captureRect = CGRectMake(wp.x, wp.y, ws.x, ws.y);
+    overlay.captureRect = CGRectMake(_pos.x, _pos.y, ws.x, ws.y);
 
     // ── 标题行 ──
     ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), "复刻版");
     ImGui::SameLine();
     ImGui::TextDisabled("| 悬浮菜单");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 56);
     if (ImGui::SmallButton("隐藏")) gVisible = NO;
     ImGui::Separator();
 
@@ -109,7 +125,7 @@ static BOOL gVisible = YES;
 
     // ── 底部：透明度 + 保存 ──
     ImGui::Separator();
-    ImGui::SetNextItemWidth(-90);
+    ImGui::SetNextItemWidth(-96);
     ImGui::SliderFloat("##alpha", &_alpha, 0.4f, 1.0f, "透明度 %.2f");
     ImGui::SameLine();
     if (ImGui::Button("保存配置")) [[MFSettings shared] save];
@@ -121,63 +137,68 @@ static BOOL gVisible = YES;
 
 - (void)pageMain:(MFSettings *)s {
     ImGui::Spacing();
-    ImGui::Checkbox("总开关", &s.masterEnabled);
-    ImGui::SameLine();
-    ImGui::Checkbox("启用绘制", &s.drawEnabled);
+    MF_CHECK_SAME("总开关", masterEnabled);
+    MF_CHECK("启用绘制", drawEnabled);
 
     ImGui::Spacing();
     ImGui::TextDisabled("绘制开关");
     ImGui::Separator();
-    ImGui::Checkbox("人机显示", &s.showBot);
-    ImGui::Checkbox("名字", &s.showName);
-    ImGui::Checkbox("头甲", &s.showArmor);
-    ImGui::Checkbox("血量", &s.showHealth);
-    ImGui::Checkbox("距离", &s.showDistance);
+    MF_CHECK("人机显示", showBot);
+    MF_CHECK("名字", showName);
+    MF_CHECK("头甲", showArmor);
+    MF_CHECK("血量", showHealth);
+    MF_CHECK("距离", showDistance);
     ImGui::SameLine();
-    ImGui::Checkbox("队伍", &s.showTeam);
-    ImGui::Checkbox("射线", &s.showTracer);
+    MF_CHECK("队伍", showTeam);
+    MF_CHECK("射线", showTracer);
     ImGui::SameLine();
-    ImGui::Checkbox("手持", &s.showHeld);
-    ImGui::Checkbox("骨骼", &s.showSkeleton);
+    MF_CHECK("手持", showHeld);
+    MF_CHECK("骨骼", showSkeleton);
 
     ImGui::Spacing();
     ImGui::TextDisabled("物资与盒子");
     ImGui::Separator();
-    ImGui::Checkbox("物资", &s.showLoot);
-    ImGui::SameLine();
-    ImGui::Checkbox("盒子", &s.showBox);
-    ImGui::Checkbox("物资名字", &s.showLootName);
-    ImGui::SameLine();
-    ImGui::Checkbox("统计窗口", &s.showLootStats);
+    MF_CHECK_SAME("物资", showLoot);
+    MF_CHECK("盒子", showBox);
+    MF_CHECK_SAME("物资名字", showLootName);
+    MF_CHECK("统计窗口", showLootStats);
 
-    int lvl = (int)s.minLootLevel;
-    int val = (int)s.minLootValue;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::SliderInt("物资等级阈值", &lvl, 0, 6, lvl == 0 ? "不限制" : "等级 >= %d")) s.minLootLevel = lvl;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::SliderInt("物资价值阈值", &val, 0, 50000, val == 0 ? "不限制" : "价值 >= %d")) s.minLootValue = val;
+    {   // 等级阈值：0 显示「不限制」
+        int v = (int)s.minLootLevel;
+        char fmt[32];
+        if (v == 0) snprintf(fmt, sizeof(fmt), "不限制");
+        else        snprintf(fmt, sizeof(fmt), "等级 >= %%d");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("物资等级阈值", &v, 0, 6, fmt)) s.minLootLevel = v;
+    }
+    {   // 价值阈值
+        int v = (int)s.minLootValue;
+        char fmt[32];
+        if (v == 0) snprintf(fmt, sizeof(fmt), "不限制");
+        else        snprintf(fmt, sizeof(fmt), "价值 >= %%d");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("物资价值阈值", &v, 0, 50000, fmt)) s.minLootValue = v;
+    }
 
     ImGui::Spacing();
     ImGui::TextDisabled("绘制范围");
     ImGui::Separator();
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("盒子距离", &s.boxDrawDistance, 10.0f, 500.0f, "%.0f 米");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("物资距离", &s.lootDrawDistance, 10.0f, 500.0f, "%.0f 米");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("骨骼距离", &s.skeletonDistance, 10.0f, 300.0f, "%.0f 米");
+    MF_SLIDE_F("盒子距离", boxDrawDistance, 10.0f, 500.0f, "%.0f 米");
+    MF_SLIDE_F("物资距离", lootDrawDistance, 10.0f, 500.0f, "%.0f 米");
+    MF_SLIDE_F("骨骼距离", skeletonDistance, 10.0f, 300.0f, "%.0f 米");
     ImGui::TextDisabled("骨骼距离越低越流畅");
 
     ImGui::Spacing();
     ImGui::TextDisabled("背敌提示");
     ImGui::Separator();
-    ImGui::Checkbox("背敌", &s.backEnemyEnabled);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("背敌半径", &s.backEnemyRadius, 10.0f, 300.0f, "%.0f px");
-    const char *styles[] = {"圆形", "箭头", "圆环"};
-    int st = (int)s.backEnemyStyle;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("背敌样式", &st, styles, 3)) s.backEnemyStyle = (MFBackEnemyStyle)st;
+    MF_CHECK("背敌", backEnemyEnabled);
+    MF_SLIDE_F("背敌半径", backEnemyRadius, 10.0f, 300.0f, "%.0f px");
+    {
+        const char *styles[] = {"圆形", "箭头", "圆环"};
+        int st = (int)s.backEnemyStyle;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("背敌样式", &st, styles, 3)) s.backEnemyStyle = (MFBackEnemyStyle)st;
+    }
 }
 
 #pragma mark - 外观页
@@ -186,38 +207,34 @@ static BOOL gVisible = YES;
     ImGui::Spacing();
     ImGui::TextDisabled("字号");
     ImGui::Separator();
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("人物字号", &s.fontPerson, 8.0f, 28.0f, "%.0f");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("盒子字号", &s.fontBox, 8.0f, 28.0f, "%.0f");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("信息字号", &s.fontInfo, 8.0f, 28.0f, "%.0f");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("头甲字号", &s.fontArmor, 8.0f, 28.0f, "%.0f");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("骨骼粗细", &s.skeletonThickness, 0.5f, 6.0f, "%.1f");
+    MF_SLIDE_F("人物字号", fontPerson, 8.0f, 28.0f, "%.0f");
+    MF_SLIDE_F("盒子字号", fontBox, 8.0f, 28.0f, "%.0f");
+    MF_SLIDE_F("信息字号", fontInfo, 8.0f, 28.0f, "%.0f");
+    MF_SLIDE_F("头甲字号", fontArmor, 8.0f, 28.0f, "%.0f");
+    MF_SLIDE_F("骨骼粗细", skeletonThickness, 0.5f, 6.0f, "%.1f");
 
     ImGui::Spacing();
     ImGui::TextDisabled("颜色");
     ImGui::Separator();
 
-    struct { const char *label; MFColorSlot slot; UIColor *c; } rows[] = {
-        { "人物信息",   MFColorSlotPersonInfo, nil },
-        { "0-2级物资",  MFColorSlotLootLow,    nil },
-        { "3级物资",    MFColorSlotLoot3,      nil },
-        { "4级物资",    MFColorSlotLoot4,      nil },
-        { "5级物资",    MFColorSlotLoot5,      nil },
-        { "6级物资",    MFColorSlotLoot6,      nil },
-        { "队伍",       MFColorSlotTeam,       nil },
-        { "头甲",       MFColorSlotArmor,      nil },
-        { "真人骨骼",   MFColorSlotSkeleton,   nil },
-        { "背敌",       MFColorSlotBackEnemy,  nil },
+    struct Row { const char *label; MFColorSlot slot; };
+    static const Row rows[] = {
+        { "人物信息",   MFColorSlotPersonInfo },
+        { "0-2级物资",  MFColorSlotLootLow    },
+        { "3级物资",    MFColorSlotLoot3      },
+        { "4级物资",    MFColorSlotLoot4      },
+        { "5级物资",    MFColorSlotLoot5      },
+        { "6级物资",    MFColorSlotLoot6      },
+        { "队伍",       MFColorSlotTeam       },
+        { "头甲",       MFColorSlotArmor      },
+        { "真人骨骼",   MFColorSlotSkeleton   },
+        { "背敌",       MFColorSlotBackEnemy  },
     };
-    for (auto &r : rows) {
-        r.c = [s colorForSlot:r.slot];
+    for (const Row &r : rows) {
         ImGui::Text("%s", r.label);
         ImGui::SameLine(150);
-        if (MFUIColorEdit(r.label, &r.c, r.slot)) [s save];
+        UIColor *c = [s colorForSlot:r.slot];
+        if (MFUIColorEdit(r.label, &c, r.slot)) [s save];
     }
 }
 
@@ -227,31 +244,34 @@ static BOOL gVisible = YES;
     ImGui::Spacing();
     ImGui::TextDisabled("物资统计");
     ImGui::Separator();
-    ImGui::Checkbox("物资统计窗口", &s.showLootStats);
+    MF_CHECK("物资统计窗口", showLootStats);
     ImGui::TextDisabled("等级/价值阈值在主功能页");
 
     ImGui::Spacing();
     ImGui::TextDisabled("渲染");
     ImGui::Separator();
-    const char *rates[] = {"60", "90", "120"};
-    int ri = s.refreshRate == 120 ? 2 : (s.refreshRate == 90 ? 1 : 0);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("刷新率", &ri, rates, 3)) {
-        s.refreshRate = (ri == 2) ? 120 : (ri == 1 ? 90 : 60);
-        self.overlay.preferredFPS = s.refreshRate;
+    {
+        const char *rates[] = {"60", "90", "120"};
+        int ri = s.refreshRate == 120 ? 2 : (s.refreshRate == 90 ? 1 : 0);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("刷新率", &ri, rates, 3)) {
+            s.refreshRate = (ri == 2) ? 120 : (ri == 1 ? 90 : 60);
+            self.overlay.preferredFPS = s.refreshRate;
+        }
     }
-    const char *bars[] = {"细线", "圆头", "分段"};
-    int hb = (int)s.healthBarStyle;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("血条样式", &hb, bars, 3)) s.healthBarStyle = hb;
-    ImGui::Checkbox("平滑绘制", &s.smoothAim);
+    {
+        const char *bars[] = {"细线", "圆头", "分段"};
+        int hb = (int)s.healthBarStyle;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("血条样式", &hb, bars, 3)) s.healthBarStyle = hb;
+    }
+    MF_CHECK("平滑绘制", smoothAim);
 
     ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
-    ImGui::Checkbox("观战模式", &s.spectatorMode);
-    ImGui::SameLine();
-    ImGui::Checkbox("直播模式", &s.liveMode);
+    MF_CHECK_SAME("观战模式", spectatorMode);
+    MF_CHECK("直播模式", liveMode);
     ImGui::TextDisabled("直播模式对应原版 DrawingView._isLiveModeEnabled");
 
     ImGui::Spacing();

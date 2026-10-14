@@ -133,11 +133,13 @@ BRACKETS = {")": "(", "]": "[", "}": "{"}
 
 
 def strip_code(src):
-    """去掉注释与字符串字面量，避免误判括号"""
-    src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
-    src = re.sub(r'//[^\n]*', '', src)
-    src = re.sub(r'"(?:\\.|[^"\\])*"', '""', src)
-    src = re.sub(r"'(?:\\.|[^'\\])*'", "''", src)
+    """去掉注释与字符串字面量，但【保留换行】以便报错行号仍然准确"""
+    def keep_newlines(m):
+        return "\n" * m.group(0).count("\n")
+    src = re.sub(r'/\*.*?\*/', keep_newlines, src, flags=re.S)   # 块注释
+    src = re.sub(r'//[^\n]*', '', src)                            # 行注释
+    src = re.sub(r'"(?:\\.|[^"\\])*"', '""', src)                 # 字符串
+    src = re.sub(r"'(?:\\.|[^'\\])*'", "''", src)                 # 字符
     return src
 
 
@@ -202,6 +204,19 @@ def check_sources():
                 err(f"{rel}: 有 {len(stack)} 个未闭合的括号")
             elif not bad:
                 ok(f"{rel}: 括号配平")
+
+            # ★ ObjC++ 陷阱：不能对 property 表达式取地址（&obj.prop 是编译错误）
+            #   先收集本文件里声明为【指针】的变量名，再找 &<ptr>.<name>
+            #   注意：要排除 && / &= / & 后跟 & 的情况（逻辑与不是取地址）
+            ptr_vars = set()
+            for pm in re.finditer(r'\b([A-Za-z_]\w*)\s*\*\s*([A-Za-z_]\w*)\s*(?=[;=,)])', body):
+                ptr_vars.add(pm.group(2))
+            for am in re.finditer(r'(?<![&])&(?![&=])\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)', body):
+                base, field = am.group(1), am.group(2)
+                if base in ptr_vars:
+                    line_no = body[:am.start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: 对 property 取地址 &{base}.{field} "
+                        f"—— ObjC++ 编译错误，改用局部变量中转")
 
             # 本地 #import "x" 路径存在性（含 HEADER_SEARCH_PATHS）
             for m in re.finditer(r'#(?:import|include)\s+"([^"]+)"', raw):
