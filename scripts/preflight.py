@@ -253,6 +253,52 @@ def check_identity():
             err(f"entitlements 缺 {k}")
 
 
+# ------------------------------------------------- 7.5 框架链接完整性
+def check_frameworks():
+    """
+    扫源码里的 <Framework/Header.h> 引用，核对 project.yml 是否声明了对应 sdk 依赖。
+    XcodeGen 不会自动链接系统框架 —— 漏了就会在【链接阶段】才炸（编译能过）。
+    """
+    proj = os.path.join(APP, "project.yml")
+    with open(proj, encoding="utf-8") as f:
+        yml = f.read()
+
+    # 常见的 C 标准库 / libSystem，不需要显式 framework
+    IGNORE = {"mach", "mach-o", "sys", "unistd", "stdlib", "string", "errno",
+              "stdio", "pthread", "semaphore", "libkern", "os", "spawn"}
+
+    exts = (".mm", ".m", ".h", ".c", ".cpp", ".hpp")
+    skip = {"imgui", "kfd", "kfund"}
+    used = set()
+
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            with open(os.path.join(dirpath, fn), encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            for m in re.finditer(r'#(?:import|include)\s+<([A-Za-z0-9_]+)/', raw):
+                fw = m.group(1)
+                if fw not in IGNORE:
+                    used.add(fw)
+
+    if not used:
+        ok("未发现需要显式链接的系统框架")
+        return
+
+    missing = []
+    for fw in sorted(used):
+        if f"{fw}.framework" in yml:
+            ok(f"框架已声明: {fw}.framework")
+        else:
+            missing.append(fw)
+
+    for fw in missing:
+        err(f"源码用到 {fw}，但 project.yml 未声明 `- sdk: {fw}.framework`（会在链接阶段炸）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -295,6 +341,7 @@ def main():
     check_yml()
     check_assets()
     check_sources()
+    check_frameworks()
     check_identity()
 
     print(f"\n通过 {len(OKS)} 项")

@@ -27,6 +27,18 @@ targets:
           - "Kernel/kfund/**"
       - path: Resources
         buildPhase: resources
+    # ── 系统框架 / 库（XcodeGen 不会自动加，必须显式声明）──
+    dependencies:
+      # M0 必需
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreGraphics.framework
+      # M1：清理 Key 走 sqlite3
+      - sdk: libsqlite3.tbd
+      # M2：ImGui → Metal 渲染链
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
     settings:
       base:
         PRODUCT_NAME: FindMy
@@ -38,6 +50,8 @@ targets:
         CLANG_CXX_LANGUAGE_STANDARD: "c++17"
         GCC_C_LANGUAGE_STANDARD: gnu17
         CLANG_CXX_LIBRARY: libc++
+        CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS: NO
+        GCC_WARN_UNDECLARED_SELECTOR: NO
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Sources"
           - "$(SRCROOT)/Sources/Render/imgui"
@@ -48,7 +62,7 @@ targets:
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
         DEVELOPMENT_TEAM: ""
-        # 允许在真机上以 Release 编译出可 ldid 签名的产物
+        # 真机 Release 产物（arm64）
         ONLY_ACTIVE_ARCH: NO
         ARCHS: arm64
         VALIDATE_PRODUCT: NO
