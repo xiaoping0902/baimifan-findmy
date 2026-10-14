@@ -5,6 +5,11 @@
 //  M0 阶段：全部按钮已接线（未实现的动作弹提示），自检页做 entitlements 实测
 //
 #import "RootViewController.h"
+#import "MFResidueViewController.h"
+#import "../Features/MFPaths.h"
+#import "../Features/MFCleanup.h"
+#import "../Features/MFKeychain.h"
+#import "../Features/MFAntiBan.h"
 
 #import <mach-o/dyld.h>
 #import <spawn.h>
@@ -85,6 +90,27 @@ extern char **environ;
     [s0.rows addObject:[self infoRow:@"内核（KFD）" detail:@"未启动 · M3 接入" ok:NO]];
     [s0.rows addObject:[self infoRow:@"悬浮窗（HUD）" detail:@"未启动 · M2 接入" ok:NO]];
     [s0.rows addObject:[self infoRow:@"运行身份" detail:[self identityText] ok:YES]];
+
+    NSDictionary *rs = [MFCleanup ruleSummary];
+    NSString *rulesDetail = ([rs[@"dirs"] unsignedIntegerValue] > 0)
+        ? [NSString stringWithFormat:@"%@ 个目录 · 黑 %@ / 白 %@ 条规则",
+           rs[@"dirs"], rs[@"blacklistRules"], rs[@"whitelistRules"]]
+        : @"配置未加载";
+    [s0.rows addObject:[self infoRow:@"清理规则" detail:rulesDetail
+                                  ok:([rs[@"dirs"] unsignedIntegerValue] > 0)]];
+
+    NSString *kcMode = [[MFKeychain shared] keychainModeOctal];
+    [s0.rows addObject:[self infoRow:@"keychain-2.db"
+                              detail:(kcMode ? [NSString stringWithFormat:@"权限 %@ · %@",
+                                                kcMode, [[MFKeychain shared] gameModeStatusText]]
+                                             : @"不可访问")
+                                  ok:(kcMode != nil)]];
+
+    NSString *lsd = [[MFAntiBan shared] plistPath];
+    [s0.rows addObject:[self infoRow:@"lsdidentifiers"
+                              detail:(lsd ? [lsd stringByReplacingOccurrencesOfString:@"/var/containers/Shared/SystemGroup/" withString:@"…/"]
+                                          : @"未找到（防封不可用）")
+                                  ok:(lsd != nil)]];
     [secs addObject:s0];
 
     // ---------- 1 功能 ----------
@@ -134,7 +160,7 @@ extern char **environ;
     [s4.rows addObject:[self infoRow:@"构建时间"
                               detail:[NSString stringWithFormat:@"%s  %s", __DATE__, __TIME__]
                                   ok:YES]];
-    [s4.rows addObject:[self infoRow:@"里程碑" detail:@"M0 · 管道 + 伪装壳" ok:YES]];
+    [s4.rows addObject:[self infoRow:@"里程碑" detail:@"M1 · 控制台 + 清理 / 防封 / 游戏模式" ok:YES]];
     [secs addObject:s4];
 
     self.sections = secs;
@@ -200,7 +226,7 @@ extern char **environ;
             getuid(), getgid(), ver, model];
 }
 
-#pragma mark - 动作（M0 桩，后续里程碑填充）
+#pragma mark - 动作
 
 - (void)actStartKernel {
     [self toast:@"内核链将在 M3 接入（kfund patchfinder + landa）"];
@@ -211,17 +237,179 @@ extern char **environ;
 - (void)actStartHUD {
     [self toast:@"HUD 双窗口将在 M2 接入"];
 }
+
+#pragma mark 清理系统残留
+
 - (void)actCleanResidue {
-    [self toast:@"清理系统残留将在 M1 接入（先 dry-run 出清单）"];
+    MFResidueViewController *vc = [[MFResidueViewController alloc] init];
+    [self.navigationController pushViewController:vc animated:YES];
 }
+
+#pragma mark 清理 Key
+
 - (void)actCleanKeychain {
-    [self toast:@"清理 Key 将在 M1 接入"];
+    NSArray<NSString *> *games = [MFKeychain gameBundleIDs];
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"清理 Key"
+                         message:@"打开 /var/Keychains/keychain-2.db，按 agrp 字段 LIKE 匹配 bundleID 并删除条目。\n\n先选一个目标统计（不会立即删除）："
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    a.popoverPresentationController.sourceView = self.view;
+    a.popoverPresentationController.sourceRect = self.view.bounds;
+    [a addAction:[UIAlertAction actionWithTitle:@"四个游戏全部统计" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *_) { [self keychainCountAll]; }]];
+    for (NSString *g in games) {
+        [a addAction:[UIAlertAction actionWithTitle:g style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *_) { [self keychainCountOne:g]; }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
+
+- (void)keychainCountAll {
+    NSMutableString *msg = [NSMutableString string];
+    NSInteger total = 0;
+    for (MFKeychainResult *r in [[MFKeychain shared] countForAllGames]) {
+        if (r.error) { [msg appendFormat:@"%@\n  ✗ %@\n", r.bundleID, r.error]; continue; }
+        [msg appendFormat:@"%@\n  命中 %ld 条\n", r.bundleID, (long)r.totalMatched];
+        total += r.totalMatched;
+    }
+    [msg appendFormat:@"\n合计 %ld 条", (long)total];
+
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"统计结果" message:msg
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    if (total > 0) {
+        [a addAction:[UIAlertAction actionWithTitle:@"删除全部" style:UIAlertActionStyleDestructive
+                                           handler:^(UIAlertAction *_) { [self keychainDeleteAll]; }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)keychainCountOne:(NSString *)bundleID {
+    MFKeychainResult *r = [[MFKeychain shared] countForBundleID:bundleID];
+    if (r.error) { [self toast:r.error]; return; }
+
+    NSMutableString *msg = [NSMutableString stringWithFormat:@"%@\n命中 %ld 条\n", bundleID, (long)r.totalMatched];
+    for (NSString *t in r.matchedPerTable) {
+        [msg appendFormat:@"  %@: %@\n", t, r.matchedPerTable[t]];
+    }
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"统计结果" message:msg
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    if (r.totalMatched > 0) {
+        [a addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive
+                                           handler:^(UIAlertAction *_) { [self keychainDeleteOne:bundleID]; }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)keychainDeleteAll {
+    NSMutableString *msg = [NSMutableString string];
+    NSInteger total = 0;
+    for (MFKeychainResult *r in [[MFKeychain shared] countForAllGames]) {
+        total += r.totalMatched;
+    }
+    for (NSString *g in [MFKeychain gameBundleIDs]) {
+        MFKeychainResult *r = [[MFKeychain shared] deleteForBundleID:g];
+        [msg appendFormat:@"%@: 删除 %ld 条\n", g, (long)r.totalDeleted];
+    }
+    [msg insertString:[NSString stringWithFormat:@"共 %ld 条\n\n", (long)total] atIndex:0];
+    [self alert:@"清理 Key 完成" message:msg];
+    [self refreshStatus];
+}
+
+- (void)keychainDeleteOne:(NSString *)bundleID {
+    MFKeychainResult *r = [[MFKeychain shared] deleteForBundleID:bundleID];
+    [self alert:@"清理 Key 完成"
+        message:[NSString stringWithFormat:@"%@\n删除 %ld 条", bundleID, (long)r.totalDeleted]];
+    [self refreshStatus];
+}
+
+#pragma mark 防封
+
 - (void)actAntiBan {
-    [self toast:@"防封设置将在 M1 接入"];
+    MFAntiBan *ab = [MFAntiBan shared];
+    NSString *path = [ab plistPath];
+    if (!path) { [self toast:@"未找到 com.apple.lsdidentifiers.plist"]; return; }
+
+    [ab backupPlistWithError:NULL];      // 先备份
+
+    NSDictionary *dump = [ab dumpStructure];
+    NSMutableString *msg = [NSMutableString stringWithFormat:@"文件：\n%@\n\n顶层结构：\n", path];
+    for (NSString *k in dump) {
+        if ([k isEqualToString:@"path"]) continue;
+        [msg appendFormat:@"  %@ → %@\n", k, dump[k]];
+    }
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"防封 · LaunchServices 标识符"
+                         message:msg
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"重置四个游戏" style:UIAlertActionStyleDestructive
+                                       handler:^(UIAlertAction *_) { [self antiBanReset]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
+
+- (void)antiBanReset {
+    NSString *err = nil;
+    NSDictionary<NSString *, NSString *> *map =
+        [[MFAntiBan shared] resetIdentifiersForGamesWithError:&err];
+    if (err) { [self toast:err]; return; }
+
+    NSMutableString *msg = [NSMutableString stringWithFormat:@"已重置 %lu 个目标的标识符：\n\n",
+                            (unsigned long)map.count];
+    for (NSString *k in map) {
+        [msg appendFormat:@"%@\n  %@\n", k, map[k]];
+    }
+    [msg appendString:@"\n原文件已备份到 App 的 Documents 目录。"];
+    [self alert:@"防封完成" message:msg];
+}
+
+#pragma mark 高级游戏模式
+
 - (void)actGameMode {
-    [self toast:@"高级游戏模式将在 M1 接入"];
+    MFKeychain *kc = [MFKeychain shared];
+    NSString *status = [kc gameModeStatusText];
+    BOOL on = [kc isGameModeOn];
+
+    NSString *warn =
+        @"纯巨魔模式重启概率高不建议开启\n"
+        @"开启高级游戏模式\n"
+        @"可解决设备黑环境问题\n"
+        @"一定记得关闭\n"
+        @"1.有人反馈开启后关机重启会白\n"
+        @"2.多人反馈不会白没问题\n"
+        @"自行考虑是否开启";
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"高级游戏模式"
+                         message:[NSString stringWithFormat:@"%@\n\n%@", status, warn]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:(on ? @"关闭" : @"开启")
+                                          style:(on ? UIAlertActionStyleDefault : UIAlertActionStyleDestructive)
+                                        handler:^(UIAlertAction *_) { [self gameModeToggle:!on]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)gameModeToggle:(BOOL)on {
+    NSString *err = nil;
+    if (![[MFKeychain shared] setGameModeOn:on error:&err]) {
+        [self toast:[NSString stringWithFormat:@"切换失败：%@\n\n（需要 root 权限）", err]];
+        return;
+    }
+    [self alert:@"已切换" message:[[MFKeychain shared] gameModeStatusText]];
+    [self refreshStatus];
+}
+
+#pragma mark - 小工具
+
+- (void)alert:(NSString *)title message:(NSString *)msg {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)toast:(NSString *)msg {
