@@ -7,12 +7,19 @@
 #import <mach/mach.h>
 #import <mach/mach_host.h>
 #import <mach/task_special_ports.h>
-#import <libproc.h>
 #import <sys/stat.h>
 #import <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+
+//
+// iOS 公开 SDK 【没有】 libproc.h（那是私有头）——
+// 但 proc_pidpath / proc_pidinfo 的符号在 libSystem 里是稳定存在的。
+// 所以自己声明原型，不 #import <libproc.h>（构建 #12 就是被它挡住的）。
+//
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
 
 // 分析里已证的两个常量
 #ifndef TASK_KERNEL_PORT

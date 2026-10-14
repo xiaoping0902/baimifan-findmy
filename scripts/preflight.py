@@ -350,10 +350,18 @@ def check_frameworks():
 # ------------------------------------------------- 7.6 iOS SPI 直接调用
 def check_ios_spi():
     """
-    iOS 公开 SDK 头里【不声明】的一批 SPI。
-    直接写函数名调用会得到 "use of undeclared identifier"（构建 #10 就是这么挂的）。
-    必须走 dlsym，或者显式声明函数指针类型。
+    iOS 公开 SDK 头里【不声明】的一批 SPI / 私有头。
+    直接写会得到 "use of undeclared identifier"（构建 #10）
+    或 "fatal error: 'xxx.h' file not found"（构建 #12）。
     """
+    # 【已证】iOS 公开 SDK 里不存在的头文件
+    PRIVATE_HEADERS = {
+        "libproc.h": "proc_pidpath / proc_pidinfo 自己 extern 声明即可",
+        "spawn_private.h": "posix_spawnattr_set_persona_np 等需自声明或 dlsym",
+        "rocketbootstrap.h": "越狱环境专有",
+        "substrate.h": "Cydia Substrate 专有",
+        "Kernel.framework": "内核框架，App 侧不可用",
+    }
     # 【已证】iOS 公开 SDK 头里没有声明 —— 构建 #10 实测 mach_vm_deallocate 报
     #        "use of undeclared identifier"。直接调用必挂，一律 ERROR。
     SPI_HARD = {
@@ -382,6 +390,14 @@ def check_ios_spi():
             with open(p, encoding="utf-8", errors="replace") as f:
                 body = strip_code(f.read())
             checked += 1
+
+            # 私有 iOS 头：fatal error: 'xxx.h' file not found
+            for hdr, hint in PRIVATE_HEADERS.items():
+                m2 = re.search(r"#\s*(?:import|include)\s*[<\"]" + re.escape(hdr), body)
+                if m2:
+                    line_no = body[:m2.start()].count("\n") + 1
+                    err(f"{rel}:{line_no}: `{hdr}` 在 iOS 公开 SDK 里不存在"
+                        f"（fatal error: file not found）—— {hint}")
 
             for sym, hard in [(s, True) for s in SPI_HARD] + [(s, False) for s in SPI_SOFT]:
                 # 直接调用形态： symbol(
