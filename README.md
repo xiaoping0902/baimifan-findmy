@@ -10,13 +10,32 @@
 
 ## 当前进度
 
-| 里程碑 | 内容 | 状态 |
-|---|---|---|
-| **M0** | 伪装壳 + 云构建管道 + entitlements 自检 | 🚧 代码就绪，待云构建验证 |
-| M1 | 主界面控制台 + 清理系统残留 + 清理 Key + 防封 + 游戏模式 | ⬜ |
-| M2 | `-hud` 自派生 + 双窗口托管 + ImGui 三页菜单 | ⬜ |
-| M3 | KFD 内核链（kfund patchfinder + landa + task 枚举） | ⬜ |
-| M4 | 读取后端 + 投影 + ESP 绘制 | ⬜ |
+**M0–M4 全部完成并构建通过。**
+
+| 里程碑 | 内容 | 状态 | 构建 |
+|---|---|---|---|
+| **M0** | 伪装壳 + 云构建管道 + entitlements 自检 | ✅ | #2 |
+| **M1** | 主界面控制台 + 清理系统残留 + 清理 Key + 防封 + 游戏模式 | ✅ | #5 |
+| **M2** | `-hud` 自派生 + 双窗口托管 + ImGui 三页菜单 | ✅ | #9 |
+| **M3** | KFD 内核链（kfund 运行时 patchfinder + landa + task 枚举） | ✅ | #15 |
+| **M4** | 读取后端 + 投影 + ESP 绘制层 | ✅ | #17 / #18 |
+
+📋 **[复刻版验证状态](docs/复刻版验证状态.md)** —— 哪些已证、哪些未证、哪些做不到（诚实盘点）
+📋 **[kfd-移植清单](docs/kfd-移植清单.md)** —— 20 文件闭包 + 7 处 patch + 风险清单
+
+### 还没做的（缺前提，不是没做）
+
+- ⏳ **装机验证** —— 需要 iPad（entitlements 是否真生效、悬浮窗能否托管、内核链能否跑起来）
+- ⛔ **游戏偏移校准** —— 需要**目标游戏本体**（进程名/模块名/对象链/骨骼拓扑都是游戏的逆向结果）
+
+### 本地自检
+
+```bash
+python scripts/preflight.py        # 116 项预检，推 GitHub 之前先跑
+python scripts/verify_ipa.py dist/FindMy-unsigned.ipa   # IPA 验货（含 entitlements 逐条核对）
+python scripts/make_icon.py        # 重新生成图标
+python scripts/make_font.py        # 重新生成中文子集字体（加了新文案就跑一遍）
+python scripts/serve_ipa.py        # 局域网分发 IPA，iPad 上 Safari 直接下
 
 ---
 
@@ -87,13 +106,27 @@ GitHub 仓库页 → **Actions** → 等绿色 ✓ → 页面底部 **Artifacts*
 把 IPA 传到 iPad → **TrollStore** 打开 → 安装。
 装好后桌面出现**「查找」**图标，点开是本 App 的控制台。
 
-### 4. M0 验收标准
+### 4. 装机验收（按安全到危险排序）
 
-- [ ] 桌面「查找」图标点开 = 我方控制台界面
-- [ ] 自检页里 `/var/Keychains`、`/var/mobile`、`/Applications` 均显示 **✓ 可见 N 项**（= entitlements 生效）
+**① 自检（安全）**
+- [ ] 桌面「查找」图标点开 = 我方控制台
+- [ ] `/var/Keychains`、`/var/mobile`、`/Applications` 均显示 **✓ 可见 N 项**（= entitlements 生效）
 - [ ] 「运行身份」显示 `uid=... gid=... · iOS 16.6.1 · arm64e`
 
-任一项不通过 → 说明 entitlements 没生效，需回查 `app/Support/entitlements.plist` 与 CI 里的 `ldid` 步骤。
+**② 悬浮窗（安全）**
+- [ ] 点「启动悬浮窗」→ 浮出 ImGui 菜单（深色圆角卡片 + 三页签）
+- [ ] 汉字正常、拖动跟手、菜单外能点到底层（穿透生效）
+
+**③ 能力探测（安全，不跑漏洞）**
+- [ ] 「启动内核」页 → 底部「能力探测」→ 报告复制出来
+- [ ] 关注：`task_get_special_port` 是否通 · **路 B 能否枚举进程**
+
+**④ 启动内核（⚠️ 有风险，前三步都过了再做）**
+- [ ] 会打 `RLIMIT_NOFILE` / `maxfilesperproc` / `kern.version`
+- [ ] **失败后不要原地重试** —— 重启 App
+
+①不通过 → entitlements 没生效，回查 `app/Support/entitlements.plist` 与 CI 里的 `ldid` 步骤。
+③的完整判读标准见 [复刻版验证状态](docs/复刻版验证状态.md) §5。
 
 ---
 

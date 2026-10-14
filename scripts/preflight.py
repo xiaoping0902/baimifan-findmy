@@ -638,6 +638,39 @@ def check_language_boundaries():
     ok(f"语言边界检查完成（.c {n_c} 个 · .mm {n_mm} 个 · 头文件 {len(headers)} 个）")
 
 
+# ------------------------------------------------- 7.9 project.yml 路径存在性
+def check_project_paths():
+    """
+    project.yml 的 sources 里每个 `- path:` 都必须在磁盘上真实存在。
+    XcodeGen 遇到不存在的路径会直接报错，构建就废了。
+    （这个检查本该早就有 —— MFLibkfdHost.c 被列进工程却不存在，就是这么漏掉的。）
+    同时核对 excludes 通配符是否至少匹配到了东西，避免写出无效排除。
+    """
+    proj = os.path.join(APP, "project.yml")
+    if not os.path.exists(proj):
+        err("project.yml 不存在")
+        return
+    with open(proj, encoding="utf-8") as f:
+        lines = f.readlines()
+
+    n_path = 0
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*-\s*path:\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        raw = m.group(1).strip().strip('"').strip("'")
+        n_path += 1
+        target = os.path.normpath(os.path.join(APP, raw))
+        if os.path.exists(target):
+            ok(f"project.yml 路径存在: {raw}")
+        else:
+            err(f"project.yml:{i+1}: 列出的路径不存在 → `{raw}`"
+                f"（XcodeGen 会报错，构建必挂）")
+
+    if n_path == 0:
+        warn("project.yml 里没解析到任何 `- path:` 条目 —— 检查缩进格式是否变了")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -684,6 +717,7 @@ def main():
     check_ios_spi()
     check_objcxx_traps()
     check_language_boundaries()
+    check_project_paths()
     check_identity()
 
     print(f"\n通过 {len(OKS)} 项")

@@ -7,6 +7,8 @@
 #import "../Game/MFSettings.h"
 #import "../Game/Offsets.h"
 
+#import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
+
 #include "imgui.h"
 
 static BOOL gDrawEnabled = YES;
@@ -59,10 +61,18 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
 
     MFSettings *st = [MFSettings shared];
     if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) return;
-    if (!self.reader.ready) return;
 
     const CGSize size = overlay.bounds.size;
     if (size.width < 1 || size.height < 1) return;
+
+    // ── 渲染自检：不碰游戏内存，纯合成数据 ──
+    //   用途：在偏移校准之前，独立验证 ImGui → Metal → 透明层 → 投影 这条链。
+    if (st.renderSelfTest) {
+        [self runSelfTest:st overlay:overlay];
+        return;
+    }
+
+    if (!self.reader.ready) return;
 
     NSDictionary *frame = [self.reader readFrameWithSize:size];
     _camOK = [frame[@"cameraOK"] boolValue];
@@ -270,6 +280,85 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
         ImGui::Text("总价值：%lld", totalValue);
         // ImGui 的格式化不认 %@，必须转成 UTF-8 C 串
         ImGui::TextDisabled("%s", [[MFOffsets shared] summary].UTF8String);
+    }
+    ImGui::End();
+}
+
+#pragma mark - 渲染自检
+
+/// 合成数据渲染。不读任何游戏内存。
+///
+/// 相机约定（来自 Game/MFProjection.h）：
+///   前向 F = (cosP·cosY, cosP·sinY, sinP)  → P=Y=0 时 F=(1,0,0)，即朝 +X 看
+///   右向 R = (-sinY, cosY, 0)              → y>0 在屏幕右侧
+///   上向 U = (-sinP·cosY, -sinP·sinY, cosP) → z>0 在屏幕上方
+- (void)runSelfTest:(MFSettings *)st overlay:(MFOverlayView *)overlay {
+    const CGSize size = overlay.bounds.size;
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    if (!dl) return;
+
+    const float t = (float)(fmod(CACurrentMediaTime(), 6.0));   // 0–6 秒循环
+    const float bob = sinf(t * 1.6f) * 60.0f;                   // 目标上下浮动
+
+    MFCamera cam = (MFCamera){0};
+    cam.fov = 90.0f;
+
+    MFScreen sc = [MFProjection screenWithSize:size fov:cam.fov];
+
+    // 场景：4 个「人」（不同距离/横向）+ 4 个「物资」（不同等级/价值）
+    struct Item { float x, y, z; int level, value; BOOL isLoot; const char *name; };
+    static const struct Item kItems[] = {
+        {  300,   0,  0, 0,     0, NO,  "近距目标" },
+        {  600, 120, 20, 0,     0, NO,  "中距目标" },
+        { 1000, -160, 0, 0,     0, NO,  "远距目标" },
+        {  800,   0, -60, 0,    0, NO,  "低位目标" },
+        {  450,  260, 0, 3,   500, YES, "3级物资" },
+        {  450, -260, 0, 4,  4000, YES, "4级物资" },
+        {  700,  200, 0, 5, 20000, YES, "5级物资" },
+        {  700, -200, 0, 6, 99999, YES, "6级物资" },
+    };
+
+    for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
+        const struct Item *it = &kItems[i];
+        float world[3] = { it->x, it->y, it->z + bob };
+
+        MFPoint2D p = [[MFProjection shared] projectTarget:world camera:cam screen:sc];
+        if (!p.valid) continue;
+
+        MFEntity *e = [[MFEntity alloc] init];
+        e.screen = p;
+        e.isVisible = YES;
+        e.worldX = world[0]; e.worldY = world[1]; e.worldZ = world[2];
+
+        float camPos[3] = { cam.x, cam.y, cam.z };
+        e.distanceMeters = [MFProjection distanceMetersFrom:world to:camPos];
+        e.name = [NSString stringWithUTF8String:it->name];
+
+        if (it->isLoot) {
+            e.isLoot = YES;
+            e.level = it->level;
+            e.value = it->value;
+            [self drawLoot:e drawList:dl settings:st screen:ImVec2((float)size.width, (float)size.height)];
+        } else {
+            [self drawEntity:e drawList:dl settings:st
+                       screen:ImVec2((float)size.width, (float)size.height) camera:cam];
+        }
+    }
+
+    // 顶部提示条
+    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.9f);
+    if (ImGui::Begin("##selftest", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs)) {
+        ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), "渲染自检模式");
+        ImGui::Separator();
+        ImGui::Text("画面尺寸  %.0f × %.0f", size.width, size.height);
+        ImGui::Text("帧         %.1f s", t);
+        ImGui::Text("看到的框        4 个（随距离缩放）");
+        ImGui::Text("看到的物资标签  4 个（3/4/5/6 级各自色）");
+        ImGui::TextDisabled("这条链通了 = ImGui/Metal/透明层/投影 全正常");
+        ImGui::TextDisabled("关掉「渲染自检」才会回到读游戏内存的模式");
     }
     ImGui::End();
 }

@@ -268,6 +268,13 @@ static BOOL gVisible = YES;
     MF_CHECK("平滑绘制", smoothAim);
 
     ImGui::Spacing();
+    ImGui::TextDisabled("自检");
+    ImGui::Separator();
+    MF_CHECK("渲染自检", renderSelfTest);
+    ImGui::TextDisabled("打开后会画 4 个合成框 + 4 个物资标签");
+    ImGui::TextDisabled("用于在偏移校准之前验证渲染链");
+
+    ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
     MF_CHECK_SAME("观战模式", spectatorMode);

@@ -66,6 +66,46 @@ jobs:
             done
           fi
 
+      - name: Verify entitlements + identity (fail fast)
+        working-directory: app
+        run: |
+          APP="${{ steps.locate.outputs.app_path }}"
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          ldid -e "$APP/$EXEC_NAME" > /tmp/mf_ent.plist || true
+          echo "=== entitlements 逐条核对 ==="
+          fail=0
+          for k in platform-application \
+                   com.apple.private.security.no-sandbox \
+                   com.apple.private.security.storage.AppBundles \
+                   com.apple.private.persona-mgmt \
+                   com.apple.springboard.accessibility-window-hosting \
+                   task_for_pid-allow \
+                   com.apple.security.exception.iokit-user-client-class ; do
+            if grep -q "$k" /tmp/mf_ent.plist; then echo "  ✓ $k"; else echo "  ✗ $k"; fail=1; fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::entitlements 注入不完整 —— 装机后权限不会生效"
+            exit 1
+          fi
+
+          echo "=== 伪装身份核对 ==="
+          NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist")
+          ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          echo "  显示名: $NAME"
+          echo "  Bundle : $ID"
+          echo "  可执行 : $EXE"
+          [ "$ID" = "com.apple.findmy" ] || { echo "::error::Bundle ID 不对: $ID"; exit 1; }
+          [ "$EXE" = "FindMy" ]          || { echo "::error::可执行名不对: $EXE"; exit 1; }
+
+          echo "=== 架构核对 ==="
+          lipo -info "$APP/$EXEC_NAME"
+          file "$APP/$EXEC_NAME"
+          ARCH=$(lipo -info "$APP/$EXEC_NAME" | grep -o 'arm64' | head -1)
+          [ "$ARCH" = "arm64" ] || { echo "::error::缺少 arm64 slice —— 真机装不上"; exit 1; }
+
+          echo "✅ 全部核对通过"
+
       - name: Package IPA
         working-directory: app
         run: |

@@ -86,6 +86,11 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL spectatorMode;      // 观战模式
 @property (nonatomic, assign) BOOL liveMode;           // 直播模式
 
+#pragma mark 自检
+/// 渲染自检：不读游戏内存，直接画合成方块。
+/// 用途：在偏移校准之前，独立验证 ImGui/Metal/透明层/投影 这条链是否通。
+@property (nonatomic, assign) BOOL renderSelfTest;
+
 #pragma mark - 颜色
 
 - (UIColor *)colorForSlot:(MFColorSlot)slot;
