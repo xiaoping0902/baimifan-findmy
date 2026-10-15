@@ -74,6 +74,8 @@ def main():
                 sources = [ROOT / "tests/hud_input_bridge_regressions.mm",
                            ROOT / "app/Sources/HUD/MFHUDInputBridge.mm",
                            ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"]
+                sources += [ROOT / f"app/Sources/Render/imgui/{name}.cpp"
+                            for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
             elif args.suite == "game-reader":
                 sources = [ROOT / "tests/game_reader_base_regressions.mm"]
                 sources += [ROOT / f"app/Sources/Game/{name}.mm"

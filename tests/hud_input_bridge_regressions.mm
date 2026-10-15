@@ -3,6 +3,7 @@
 #import "MFHUDInputBridge.h"
 #import "MFHUDLog.h"
 #import "../app/Sources/Render/MFOverlayView.h"
+#include "../app/Sources/Render/MFImGuiInput.h"
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,7 @@ static AXFixtureEvent *currentAX;
 @interface TouchRecorder : NSObject
 @property NSUInteger presses, releases, cancellations;
 @property CGPoint lastPoint;
+@property BOOL forwardsToImGui;
 - (void)addTouchX:(float)x y:(float)y down:(BOOL)down;
 - (void)cancelTouch;
 @end
@@ -61,8 +63,17 @@ static AXFixtureEvent *currentAX;
 - (void)addTouchX:(float)x y:(float)y down:(BOOL)down {
     if (down) self.presses++; else self.releases++;
     self.lastPoint = CGPointMake(x, y);
+    if (self.forwardsToImGui) {
+        ImGuiIO &io = ImGui::GetIO();
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMousePosEvent(x, y);
+        io.AddMouseButtonEvent(0, down);
+    }
 }
-- (void)cancelTouch { self.cancellations++; }
+- (void)cancelTouch {
+    self.cancellations++;
+    if (self.forwardsToImGui) MFCancelImGuiTouch();
+}
 @end
 
 // A real UIView supplies UIKit coordinate conversion, without starting Metal.
@@ -323,6 +334,64 @@ static void TestBallTapAndDragHaveDifferentOutcomes(void) {
     w.hidden = YES;
 }
 
+static bool BallFrame(void) {
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(56, 56));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##ball", nullptr, ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar);
+    bool expanded = ImGui::InvisibleButton("##expand", ImVec2(56, 56));
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::Render();
+    return expanded;
+}
+
+// The production bridge queues both halves of a ball tap without giving the
+// router an owner. Real ImGui trickles these events across multiple frames;
+// lock/rotation cancellation must discard them at every point in that sequence.
+static void TestCancellationDiscardsQueuedBallTap(void) {
+    for (int consumedFrames = -1; consumedFrames <= 2; consumedFrames++) {
+        UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+        p.captureRect = p.interactionRect = p.headerDragRect = CGRectMake(0, 0, 56, 56);
+        ImGui::CreateContext();
+        ImGuiIO &io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.DisplaySize = ImVec2(348, 520);
+        io.DeltaTime = 1.0f / 60;
+        io.ConfigInputTrickleEventQueue = true;
+        unsigned char *pixels; int width, height;
+        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        BallFrame(); BallFrame();
+        p.imgui.forwardsToImGui = YES;
+        Send(b, w, p, 420, 3, 0, CGPointMake(28, 28));
+        Send(b, w, p, 420, 2, 2, CGPointMake(28, 28));
+        CHECK(p.imgui.presses == 1 && p.imgui.releases == 1 &&
+              ImGui::GetCurrentContext()->InputEventsQueue.Size > 0,
+              "a real ball tap must queue an ImGui click before testing cancellation");
+        bool expanded = false;
+        if (consumedFrames >= 0) {
+            for (int frame = 0; frame < consumedFrames; frame++) expanded |= BallFrame();
+            CHECK(!expanded, "the cancellation fixture must stop before release activation");
+            [b cancelAll];
+            CHECK(p.imgui.cancellations == 1,
+                  "bridge cancellation must reach ImGui exactly once after a completed ball tap");
+        }
+        for (int frame = 0; frame < 5; frame++) expanded |= BallFrame();
+        if (consumedFrames < 0)
+            CHECK(expanded, "an uncancelled queued ball tap must expand with real ImGui processing");
+        else
+            CHECK(!expanded && ImGui::GetActiveID() == 0 && !io.MouseDown[0] &&
+                  ImGui::GetCurrentContext()->InputEventsQueue.Size == 0,
+                  "a cancelled queued ball tap must never expand on a later frame");
+        p.imgui.forwardsToImGui = NO;
+        ImGui::DestroyContext();
+        w.hidden = YES;
+    }
+}
+
 @interface InputRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation InputRegressionDelegate
@@ -346,6 +415,7 @@ static void TestBallTapAndDragHaveDifferentOutcomes(void) {
         TestRawIdentityCannotCollideWithInternalToken();
         TestBlankSpaceCannotStartMenuInteraction();
         TestBallTapAndDragHaveDifferentOutcomes();
+        TestCancellationDiscardsQueuedBallTap();
         puts("PASS: production HID bridge releases device taps and drags with stable raw contact ownership");
         fflush(stdout); exit(0);
     });
