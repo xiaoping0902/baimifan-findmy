@@ -1069,6 +1069,45 @@ def check_kfd_free_not_in_failure_path():
     ok("kfd_free 调用位置检查完成")
 
 
+# ------------------ 7.17 libkfd 宿主钩子的签名必须与 common.h 一致
+def check_libkfd_hook_signatures():
+    """
+    2026-10-15 构建 #35 实际踩过（conflicting types）：
+
+        common.h:151  extern void mf_kfd_safe_cleanup(void* kfd);
+        libkfd.h:211        void mf_kfd_safe_cleanup(struct kfd* kfd)   ← 冲突
+
+    common.h 在 `struct kfd` 定义【之前】被包含，所以只能用 void*。
+    libkfd.h 里的定义必须跟着用 void*，进来再转。
+
+    规则：common.h 里以 extern 声明的 mf_* 钩子，在 MFKernelBridge.m 的
+    定义处和 libkfd.h 的调用/定义处，参数类型都必须能对上。
+    这里做最基本的检查：同一函数名在 common.h 是 void*，在 libkfd.h 里
+    若出现定义，也不能写成 struct kfd*。
+    """
+    common = os.path.join(APP, "Sources", "Kernel", "kfd", "libkfd", "common.h")
+    libkfd = os.path.join(APP, "Sources", "Kernel", "kfd", "libkfd.h")
+    if not (os.path.exists(common) and os.path.exists(libkfd)):
+        return
+
+    with open(common, encoding="utf-8", errors="replace") as f:
+        c = strip_code(f.read())
+    hooks = re.findall(r'extern\s+void\s+(mf_kfd_\w+)\s*\(\s*void\s*\*\s*\w+\s*\)', c)
+    if not hooks:
+        return
+
+    with open(libkfd, encoding="utf-8", errors="replace") as f:
+        l = strip_code(f.read())
+    for h in hooks:
+        # 在 libkfd.h 里找该函数的定义（行首 void 名字( 且带 struct kfd*）
+        m = re.search(r'^\s*void\s+' + re.escape(h) + r'\s*\(\s*struct\s+kfd\s*\*', l, re.M)
+        if m:
+            err(f"{os.path.relpath(libkfd, ROOT)}: {h}() 定义成 struct kfd*，"
+                f"但 common.h 声明的是 void* —— 会报 conflicting types（构建 #35 踩过）。"
+                f"定义也要用 void*，进来再转")
+    ok(f"libkfd 宿主钩子签名检查完成（{len(hooks)} 个钩子）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -1122,6 +1161,7 @@ def main():
     check_linux_only_headers()
     check_offsets_constants_reachable()
     check_kfd_free_not_in_failure_path()
+    check_libkfd_hook_signatures()
     check_project_paths()
     check_identity()
 

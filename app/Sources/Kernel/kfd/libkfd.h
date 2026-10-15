@@ -208,8 +208,16 @@ void kfd_free(struct kfd* kfd)
  *   · 用户退出 App 时进程结束，所有 fd 由内核自动关闭 → 资源全还回去
  * 这比「冒着崩溃风险去主动关」安全得多。
  */
-void mf_kfd_safe_cleanup(struct kfd* kfd)
+/*
+ * ★ 签名必须是 void* ——
+ *   common.h 里声明成 extern void mf_kfd_safe_cleanup(void* kfd);
+ *   因为那个头在 `struct kfd` 定义【之前】就被包含了，用不了 struct 指针。
+ *   这里如果写成 struct kfd*，就是 conflicting types（构建 #35 实际踩过）。
+ *   所以定义也用 void*，进来再转。
+ */
+void mf_kfd_safe_cleanup(void* p)
 {
+    struct kfd* kfd = (struct kfd*)p;
     if (kfd == NULL) return;
     puaf_free(kfd);
     info_free(kfd);
