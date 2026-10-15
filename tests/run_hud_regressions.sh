@@ -10,3 +10,9 @@ trap 'rm -rf "$(dirname "$binary")"' EXIT
 clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
     -framework Foundation -framework QuartzCore "${sources[@]}" -o "$binary"
 "$binary"
+sudo mkdir -p /var/mobile/Library/Caches /var/mobile/Media/mf-debug
+sudo chmod 777 /var/mobile/Library/Caches /var/mobile/Media/mf-debug
+clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -framework Foundation -lproc \
+    tests/hud_launcher_regressions.mm app/Sources/HUD/MFHUDLauncher.mm \
+    app/Sources/HUD/MFHUDStartupStatus.mm -o "$(dirname "$binary")/hud-launcher-regressions"
+"$(dirname "$binary")/hud-launcher-regressions"
