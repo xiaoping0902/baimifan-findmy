@@ -114,8 +114,50 @@ static BOOL MFPidAlive(pid_t p) {
     argv[1] = (char *)"-hud";
     argv[2] = NULL;
 
+    /*
+     * ══════════════════════════════════════════════════════════════
+     *  ★★★ [M5.22] 用 root 身份派生 —— 对齐 TrollSpeed ★★★
+     *
+     *  TrollSpeed（Lessica，开源，ch.xxtou.hudapp）的 SetHUDEnabled：
+     *
+     *      posix_spawnattr_t attr;
+     *      posix_spawnattr_init(&attr);
+     *      posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+     *      posix_spawnattr_set_persona_uid_np(&attr, 0);
+     *      posix_spawnattr_set_persona_gid_np(&attr, 0);
+     *      ...
+     *      posix_spawnattr_setpgroup(&attr, 0);
+     *      posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+     *      posix_spawn(&task_pid, executablePath, NULL, &attr, (char **)args, environ);
+     *
+     *  为什么这很重要：
+     *      HUD 子进程要调 GSInitialize() / BKSDisplayServicesStart() /
+     *      UIApplicationInitialize() 这些图形栈底层初始化。
+     *      以 mobile(501) 身份跑，这些大概率半途失败 →
+     *      UIApplication 内部状态不完整 → 窗口拿不到 CAContext。
+     *
+     *  依赖 entitlement：persona-mgmt（我们已验证生效）。
+     */
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+
+    extern "C" {
+        int posix_spawnattr_set_persona_np(const posix_spawnattr_t *, uid_t, uint32_t);
+        int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *, uid_t);
+        int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *, uid_t);
+    }
+
+    int pr1 = posix_spawnattr_set_persona_np(&attr, 99, 1 /* OVERRIDE */);
+    int pr2 = posix_spawnattr_set_persona_uid_np(&attr, 0);
+    int pr3 = posix_spawnattr_set_persona_gid_np(&attr, 0);
+    MFHUDLogLine(@"persona 设定：np=%d uid=%d gid=%d（0 表示成功）", pr1, pr2, pr3);
+
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, path, NULL, NULL, argv, environ);
+    int rc = posix_spawn(&pid, path, NULL, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
     if (rc != 0) {
         if (err) {
             *err = [NSString stringWithFormat:@"posix_spawn 失败: %s (rc=%d)", strerror(rc), rc];

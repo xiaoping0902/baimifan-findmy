@@ -316,95 +316,173 @@ void MFDumpWindowAPI(void) {
 #pragma mark - HUD 引导
 
 int MFLaunchHUDRole(int argc, char *argv[]) {
-    MFHUDLogLine(@"---- HUD 引导开始（绕开 UIApplicationMain）----");
+    MFHUDLogLine(@"---- HUD 引导开始（对齐 TrollSpeed / ch.xxtou.hudapp）----");
 
     /*
-     * ① 拿私有函数 UIApplicationInstantiateSingleton
-     *    它在 UIKit 里，符号可见（白米饭直接调用过）。
+     * ══════════════════════════════════════════════════════════════
+     *  [M5.22] ★★★ 完整对齐 TrollSpeed 的启动序列 ★★★
+     *
+     *  来源：https://github.com/Lessica/TrollSpeed（开源）
+     *        sources/HUDApp.mm 的 -hud 分支
+     *
+     *  TrollSpeed 的原文：
+     *      [UIScreen initialize];
+     *      CFRunLoopGetCurrent();
+     *      GSInitialize();
+     *      BKSDisplayServicesStart();
+     *      UIApplicationInitialize();
+     *      UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
+     *      [UIApplication.sharedApplication setDelegate:appDelegate];
+     *      [UIApplication.sharedApplication _accessibilityInit];
+     *      [NSRunLoop currentRunLoop];
+     *      BKSHIDEventRegisterEventCallback(_HUDEventCallback);
+     *      GSEventInitialize(0);
+     *      GSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+     *      [UIApplication.sharedApplication __completeAndRunAsPlugin];
+     *      CFRunLoopRun();
+     *
+     *  ★ 我们之前缺了整整一层：GSInitialize / BKSDisplayServicesStart /
+     *    UIApplicationInitialize / _accessibilityInit / GSEventInitialize /
+     *    __completeAndRunAsPlugin —— 一个都没做。
+     *
+     *  ★ 而且 TrollSpeed 【不手动调 didFinishLaunching】——
+     *    是 __completeAndRunAsPlugin 触发的。
+     *    我们手动调了，但 UIApplication 内部状态没就绪，
+     *    所以窗口拿不到 CAContext（_contextId 恒为 0）。
+     *
+     *  全部用 dlsym 取，符号缺失时明确记录并降级。
+     * ══════════════════════════════════════════════════════════════
+     */
+
+    typedef void (*mf_void_fn)(void);
+    typedef void (*mf_int_fn)(int);
+    typedef void (*mf_cfstr_fn)(CFStringRef);
+
+    mf_void_fn   p_UIScreenInitialize   = (mf_void_fn)  dlsym(RTLD_DEFAULT, "UIScreenInitialize");
+    // UIScreen 的 +initialize 是 ObjC 类方法，用 objc_msgSend 调更稳
+    ((void (*)(id, SEL))objc_msgSend)((id)[UIScreen class], sel_registerName("initialize"));
+    MFHUDLogLine(@"① [UIScreen initialize] ✓");
+
+    CFRunLoopGetCurrent();
+    MFHUDLogLine(@"② CFRunLoopGetCurrent() ✓");
+
+    mf_void_fn p_GSInitialize = (mf_void_fn)dlsym(RTLD_DEFAULT, "GSInitialize");
+    MFHUDLogLine(@"③ GSInitialize = %p", (void *)p_GSInitialize);
+    if (p_GSInitialize) { p_GSInitialize(); MFHUDLogLine(@"   GSInitialize() ✓"); }
+
+    mf_void_fn p_BKSDisplayServicesStart = (mf_void_fn)dlsym(RTLD_DEFAULT, "BKSDisplayServicesStart");
+    MFHUDLogLine(@"④ BKSDisplayServicesStart = %p", (void *)p_BKSDisplayServicesStart);
+    if (p_BKSDisplayServicesStart) { p_BKSDisplayServicesStart(); MFHUDLogLine(@"   已调用 ✓"); }
+    else {
+        // 有些版本在 BackBoardServices 框架里，手动 dlopen 再试
+        void *h = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_LAZY);
+        if (h) {
+            p_BKSDisplayServicesStart = (mf_void_fn)dlsym(h, "BKSDisplayServicesStart");
+            MFHUDLogLine(@"   从框架里再取 = %p", (void *)p_BKSDisplayServicesStart);
+            if (p_BKSDisplayServicesStart) { p_BKSDisplayServicesStart(); MFHUDLogLine(@"   已调用 ✓"); }
+        }
+    }
+
+    mf_void_fn p_UIApplicationInitialize = (mf_void_fn)dlsym(RTLD_DEFAULT, "UIApplicationInitialize");
+    MFHUDLogLine(@"⑤ UIApplicationInitialize = %p", (void *)p_UIApplicationInitialize);
+    if (p_UIApplicationInitialize) { p_UIApplicationInitialize(); MFHUDLogLine(@"   已调用 ✓"); }
+
+    /*
+     * ⑥ 实例化 App 单例
      */
     typedef void (*mf_instantiate_t)(Class);
-    mf_instantiate_t instantiate = NULL;
-
-    instantiate = (mf_instantiate_t)dlsym(RTLD_DEFAULT,
-                                          "UIApplicationInstantiateSingleton");
-    if (instantiate == NULL) {
-        void *h = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
-        if (h) instantiate = (mf_instantiate_t)dlsym(h, "UIApplicationInstantiateSingleton");
-    }
-    MFHUDLogLine(@"① UIApplicationInstantiateSingleton = %p", (void *)instantiate);
-
+    mf_instantiate_t instantiate = (mf_instantiate_t)dlsym(RTLD_DEFAULT,
+                                                           "UIApplicationInstantiateSingleton");
+    MFHUDLogLine(@"⑥ UIApplicationInstantiateSingleton = %p", (void *)instantiate);
     if (instantiate == NULL) {
         MFHUDLogLine(@"✗ 拿不到该符号 → 回退标准 UIApplicationMain（大概率还是卡）");
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([MFHUDAppDelegate class]));
     }
 
+    static MFHUDAppDelegate *sDelegate = nil;   // ★ 进程级强引用，见 [M5.19]
+
+    instantiate([MFHUDApplication class]);
+    UIApplication *app = [UIApplication sharedApplication];
+    MFHUDLogLine(@"   已实例化：%@", app ? NSStringFromClass(app.class) : @"★ nil");
+    if (app == nil) { MFHUDLogLine(@"✗ sharedApplication 仍为 nil"); return 1; }
+
+    sDelegate = [[MFHUDAppDelegate alloc] init];
+    [app setDelegate:sDelegate];
+    MFHUDLogLine(@"   delegate 已设并强引用保住：%@", (app.delegate == sDelegate) ? @"✓ 一致" : @"⚠️ 不一致");
+
     /*
-     * ★★★ [M5.19] delegate 必须用【静态强引用】保住 ★★★
-     *
-     * 真机日志（M5.18，pid 365 / 373，两次完全一致）：
-     *     ① UIApplicationInstantiateSingleton = 0x1aafad2e8
-     *     ② MFHUDApplication 已实例化
-     *     ③ delegate 已设置：MFHUDAppDelegate → ✓
-     *     ← 然后进程在 400ms 内消失，④ 那行【从没出现过】
-     *
-     * 原因：原来写成
-     *         @autoreleasepool {
-     *             MFHUDAppDelegate *del = [[MFHUDAppDelegate alloc] init];
-     *             [app setDelegate:del];     // UIApplication.delegate 是 weak/assign
-     *         }                              // ← del 在这里被释放
-     *         @autoreleasepool {
-     *             id del = app.delegate;     // ← 悬垂指针 → 崩
-     *         }
-     *
-     * UIApplication 不持有 delegate（和 NSURLSession 那些不一样），
-     * 所以 delegate 必须由我们自己保活 —— 这是 UIApplicationMain 内部做的事，
-     * 我们绕开它就得自己补上。
+     * ⑦ _accessibilityInit —— TrollSpeed 有这一步
      */
-    static MFHUDAppDelegate *sDelegate = nil;   // ★ 进程生命周期强引用
+    SEL accSel = sel_registerName("_accessibilityInit");
+    if ([app respondsToSelector:accSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(app, accSel);
+        MFHUDLogLine(@"⑦ [app _accessibilityInit] ✓");
+    } else {
+        MFHUDLogLine(@"⑦ ⚠️ app 没有 _accessibilityInit");
+    }
 
-    @autoreleasepool {
-        // ② 实例化 App 单例（不走 scene 协商）
-        instantiate([MFHUDApplication class]);
-        UIApplication *app = [UIApplication sharedApplication];
-        MFHUDLogLine(@"② MFHUDApplication 已实例化：%@",
-                     app ? NSStringFromClass(app.class) : @"★ nil");
-        if (app == nil) {
-            MFHUDLogLine(@"✗ sharedApplication 仍是 nil，放弃");
-            return 1;
-        }
+    /*
+     * ⑧ [NSRunLoop currentRunLoop] —— 提前把 runloop 建起来
+     */
+    [NSRunLoop currentRunLoop];
+    MFHUDLogLine(@"⑧ [NSRunLoop currentRunLoop] ✓");
 
-        // ③ 设 delegate（强引用存进 static）
-        sDelegate = [[MFHUDAppDelegate alloc] init];
-        [app setDelegate:sDelegate];
-        MFHUDLogLine(@"③ delegate 已设置并强引用保住：%@ → %@",
-                     NSStringFromClass(sDelegate.class),
-                     (app.delegate == sDelegate) ? @"✓ 一致" : @"⚠️ 不一致");
+    /*
+     * ⑨ BKSHIDEventRegisterEventCallback —— 注册 HID 事件回调
+     *    （没有它窗口收不到触摸；TrollSpeed 传的是自己的 _HUDEventCallback）
+     */
+    typedef void *(*mf_hidreg_t)(void *);
+    mf_hidreg_t p_BKSHIDReg = (mf_hidreg_t)dlsym(RTLD_DEFAULT,
+                                                 "BKSHIDEventRegisterEventCallback");
+    MFHUDLogLine(@"⑨ BKSHIDEventRegisterEventCallback = %p", (void *)p_BKSHIDReg);
+    if (p_BKSHIDReg) {
+        p_BKSHIDReg((void *)NULL);   // 先传 NULL，只要注册动作本身生效即可
+        MFHUDLogLine(@"   已注册 ✓");
+    }
 
-        // ④ 手动触发 didFinishLaunchingWithOptions
-        //    标准流程里这一步由 UIApplicationMain 在 scene 就绪后调用；
-        //    我们绕开了它，所以自己调。
-        MFHUDLogLine(@"④ 手动调用 didFinishLaunchingWithOptions…");
-        BOOL ok = NO;
-        SEL s = sel_registerName("application:didFinishLaunchingWithOptions:");
-        if ([sDelegate respondsToSelector:s]) {
-            ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(sDelegate, s, app, @{});
-        }
-        MFHUDLogLine(@"④ didFinishLaunching 返回 %d", ok);
+    /*
+     * ⑩ GSEvent 初始化（iOS 15+）
+     */
+    if (@available(iOS 15.0, *)) {
+        mf_int_fn p_GSEventInitialize = (mf_int_fn)dlsym(RTLD_DEFAULT, "GSEventInitialize");
+        MFHUDLogLine(@"⑩ GSEventInitialize = %p", (void *)p_GSEventInitialize);
+        if (p_GSEventInitialize) { p_GSEventInitialize(0); MFHUDLogLine(@"   已调用 ✓"); }
 
-        SEL s2 = sel_registerName("application:willFinishLaunchingWithOptions:");
-        if ([sDelegate respondsToSelector:s2]) {
-            ((BOOL (*)(id, SEL, id, id))objc_msgSend)(sDelegate, s2, app, @{});
-            MFHUDLogLine(@"   已调 willFinishLaunching");
+        mf_cfstr_fn p_GSEventPushRunLoopMode = (mf_cfstr_fn)dlsym(RTLD_DEFAULT,
+                                                                  "GSEventPushRunLoopMode");
+        MFHUDLogLine(@"   GSEventPushRunLoopMode = %p", (void *)p_GSEventPushRunLoopMode);
+        if (p_GSEventPushRunLoopMode) {
+            p_GSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+            MFHUDLogLine(@"   已推 runloop mode ✓");
         }
     }
 
     /*
-     * ⑤ 跑 runloop
+     * ⑪ ★★★ 最关键的一步：__completeAndRunAsPlugin
      *
-     * 不用 [app run] —— 那个在 scene 模式下也有依赖。
-     * 直接 CFRunLoopRun()，UIWindow 建好后主线程事件照常处理。
+     *  TrollSpeed 用它取代了手动调 didFinishLaunchingWithOptions。
+     *  它会把 UIApplication 内部状态补全（eventDispatcher / eventFetcher /
+     *  accessibility / 无 scene 的插件模式），然后触发 didFinishLaunching。
      */
-    MFHUDLogLine(@"⑤ 进入 CFRunLoopRun()（HUD 常驻）");
+    SEL completeSel = sel_registerName("__completeAndRunAsPlugin");
+    MFHUDLogLine(@"⑪ app 有 __completeAndRunAsPlugin = %d",
+                 [app respondsToSelector:completeSel]);
+    if ([app respondsToSelector:completeSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(app, completeSel);
+        MFHUDLogLine(@"   ★ 已调用 __completeAndRunAsPlugin");
+    } else {
+        MFHUDLogLine(@"   ★ 没有这个方法，退回手动触发 didFinishLaunching");
+        SEL s = sel_registerName("application:didFinishLaunchingWithOptions:");
+        if ([sDelegate respondsToSelector:s]) {
+            ((BOOL (*)(id, SEL, id, id))objc_msgSend)(sDelegate, s, app, @{});
+            MFHUDLogLine(@"   手动 didFinishLaunching ✓");
+        }
+    }
+
+    /*
+     * ⑫ 跑 runloop
+     */
+    MFHUDLogLine(@"⑫ 进入 CFRunLoopRun()（HUD 常驻）");
     CFRunLoopRun();
 
     MFHUDLogLine(@"⚠️ CFRunLoopRun 返回了（异常）");

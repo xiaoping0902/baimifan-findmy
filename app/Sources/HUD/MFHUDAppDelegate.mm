@@ -17,8 +17,33 @@
 
 @implementation MFHUDWindow
 
-/// 私有属性，对齐分析已证：三项返回 YES
-- (BOOL)_isSystemWindow { return YES; }
+/*
+ * ★★★ [M5.22] 这一组就是 TrollSpeed（Lessica，开源，ch.xxtou.hudapp）的做法 ★★★
+ *
+ * 来源：https://github.com/Lessica/TrollSpeed
+ *       sources/HUDMainWindow.mm
+ *
+ *     @implementation HUDMainWindow
+ *     + (BOOL)_isSystemWindow            { return YES; }
+ *     - (BOOL)_isWindowServerHostingManaged { return NO; }
+ *     - (BOOL)_ignoresHitTest            { return [HUDRootViewController passthroughMode]; }
+ *     - (BOOL)_isSecure                  { return YES; }
+ *     - (BOOL)_shouldCreateContextAsSecure { return YES; }
+ *     @end
+ *
+ * ★ 三个关键修正（之前全搞错了）：
+ *
+ *   ① 这些是【重写 getter】，不是「调 setter」。
+ *      我前面一直在试 set_isSystemWindow: / _setSystemWindow: 之类的名字，
+ *      8 个里只有 1 个存在 —— 因为根本不该去 set，UIWindow 内部会问这些问题。
+ *
+ *   ② _isSystemWindow 是【类方法】(+) 不是实例方法。
+ *
+ *   ③ _isWindowServerHostingManaged 返回的是【NO】不是 YES。
+ *      我前面把语义理解反了。
+ */
++ (BOOL)_isSystemWindow { return YES; }
+- (BOOL)_isWindowServerHostingManaged { return NO; }
 - (BOOL)_isSecure { return YES; }
 - (BOOL)_shouldCreateContextAsSecure { return YES; }
 - (BOOL)_ignoresHitTest { return self.ignoresHitTestOverride; }
@@ -115,9 +140,42 @@ static BOOL MFHostWindow(UIWindow *window) {
         return NO;
     }
 
-    ((void (*)(id, SEL, uint32_t, double))objc_msgSend)(
-        controller, regSel, ctxId, (double)window.windowLevel);
-    MFHUDLogLine(@"  ✓ 已托管 contextId=0x%x level=%.0f", ctxId, (double)window.windowLevel);
+    /*
+     * ★★★ [M5.22] 用 NSInvocation 调用 —— 对齐 TrollSpeed ★★★
+     *
+     * TrollSpeed 的 HUDMainApplicationDelegate：
+     *     NSMethodSignature *signature =
+     *         [NSMethodSignature signatureWithObjCTypes:"v@:Id"];
+     *     NSInvocation *invocation =
+     *         [NSInvocation invocationWithMethodSignature:signature];
+     *     [invocation setTarget:_windowHostingController];
+     *     [invocation setSelector:@selector(registerWindowWithContextID:atLevel:)];
+     *     [invocation setArgument:&_contextId atIndex:2];
+     *     [invocation setArgument:&windowLevel atIndex:3];
+     *     [invocation invoke];
+     *
+     * 真实签名（来自 TrollSpeed 的
+     * headers/SBSAccessibilityWindowHostingController.h）：
+     *     - (void)registerWindowWithContextID:(unsigned)arg1 atLevel:(double)arg2;
+     *
+     * "v@:Id" 里 I = unsigned int，d = double。
+     * 我们原来直接强转 uint32_t 调 —— 参数类型不匹配，
+     * 在 arm64 上 unsigned int 走的是 32 位寄存器路径，
+     * ABI 上可能被错位解释。用 NSInvocation 最稳。
+     */
+    {
+        unsigned int cid = (unsigned int)ctxId;
+        double lvl = (double)window.windowLevel;
+
+        NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:"v@:Id"];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:controller];
+        [inv setSelector:regSel];
+        [inv setArgument:&cid atIndex:2];
+        [inv setArgument:&lvl atIndex:3];
+        [inv invoke];
+        MFHUDLogLine(@"  ✓ 已用 NSInvocation 托管 contextId=%u level=%.0f", cid, lvl);
+    }
     return YES;
 }
 
@@ -168,10 +226,10 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     }
 
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
-    // 分析已证：level = UIWindowLevelStatusBar + 20；opaque=NO；userInteractionEnabled=NO
+    // [M5.22] 层级对齐 TrollSpeed 的 10000010.0（原来 1020，差了四个数量级）
     MFHUDWindow *drawWin = [[MFHUDWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     drawWin.ignoresHitTestOverride = YES;
-    drawWin.windowLevel = UIWindowLevelStatusBar + 20;
+    drawWin.windowLevel = 10000010.0;
     drawWin.backgroundColor = [UIColor clearColor];
     drawWin.opaque = NO;
     drawWin.userInteractionEnabled = NO;
@@ -200,9 +258,9 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     self.drawingWindow = drawWin;
 
     // ── ② 菜单窗（可交互）────────────────────────────
-    // 分析已证：level = UIWindowLevelStatusBar - 20
+    // [M5.22] 对齐 TrollSpeed（绘制窗 10000010，菜单窗略低一点）
     MFHUDWindow *menuWin = [[MFHUDWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    menuWin.windowLevel = UIWindowLevelStatusBar - 20;
+    menuWin.windowLevel = 10000009.0;
     menuWin.backgroundColor = [UIColor clearColor];
     menuWin.opaque = NO;
 
