@@ -7,6 +7,8 @@
 #import "MFDrawingLayer.h"
 #import "../Render/MFOverlayView.h"
 #import "../Kernel/MFKernel.h"
+#import "../Game/MFGameReader.h"
+#import "../Read/MFReadBackend.h"
 #import <objc/message.h>
 #include <string.h>
 
@@ -72,6 +74,39 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     gIsHUD = YES;
     NSLog(@"[MF][HUD] didFinish，开始建立双窗口");
     MFHUDLogLine(@"==== HUD didFinishLaunching 进来了 ====");
+
+    /*
+     * ★★ 审查修正（P0-2）★★
+     *
+     * 原来：控制台进程在「进程列表」里点一下，把 task port 写进【它自己】的
+     *       MFGameReader；而绘制跑在【这个】posix_spawn 出来的 HUD 进程里。
+     *       端口名字只在创建它的 IPC space 里有效 —— HUD 进程根本用不了那个号，
+     *       于是门条件永远不成立，绘制永远是空的。
+     *
+     * 现在：控制台把「目标 pid」落盘（NSUserDefaults 跨进程同容器可见），
+     *       HUD 进程启动时读回来，用 task_for_pid 为【自己】取一份端口。
+     */
+    {
+        NSInteger targetPid = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.target.pid"];
+        NSString *targetName = [[NSUserDefaults standardUserDefaults] stringForKey:@"mf.target.name"];
+        MFHUDLogLine(@"目标进程：pid=%ld name=%@", (long)targetPid, targetName ?: @"(未绑定)");
+
+        if (targetPid > 0) {
+            NSString *perr = nil;
+            uint32_t port = [MFKernel acquireTaskPortForPid:(int)targetPid error:&perr];
+            if (port != MACH_PORT_NULL) {
+                [MFGameReader shared].targetTaskPort = port;
+                [MFReadBackend shared].modeFlag = YES;
+                [[MFGameReader shared] loadBasesFromDefaults];   // 基址也一起读回来
+                MFHUDLogLine(@"✅ HUD 侧已取得目标端口 0x%x，读取链门条件=%d",
+                             port, [MFReadBackend shared].gateOpen);
+            } else {
+                MFHUDLogLine(@"❌ HUD 侧取端口失败：%@", perr ?: @"?");
+            }
+        } else {
+            MFHUDLogLine(@"⚠️ 还没有绑定目标进程 —— 先回控制台在「进程列表」点一个进程");
+        }
+    }
 
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
     // 分析已证：level = UIWindowLevelStatusBar + 20；opaque=NO；userInteractionEnabled=NO

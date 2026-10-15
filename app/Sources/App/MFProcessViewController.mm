@@ -261,18 +261,46 @@
     return c;
 }
 
-/// 点进程 = 绑定为读取目标（写 task port 到读取后端 → 开门条件）
+/// 点进程 = 绑定为读取目标（按需取 task port → 写进读取后端 → 开门条件）
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     MFProcessInfo *p = self.shown[ip.row];
-    if (p.taskPort == 0) {
-        [self alert:@"无法绑定" message:@"该进程没有有效的 task port"];
+
+    /*
+     * ★ 审查修正（P1-2）：枚举阶段不再预取端口（那会泄漏 N 个端口右）。
+     *   真正要读哪个进程，在这里为它单独取一次。
+     */
+    NSError *err = nil;
+    uint32_t port = [MFKernel acquireTaskPortForPid:p.pid error:(NSString **)&err];
+    if (port == MACH_PORT_NULL) {
+        [self alert:@"无法绑定"
+             message:[NSString stringWithFormat:
+                      @"为 %@ (pid %d) 取 task port 失败。\n\n%@\n\n"
+                      @"先确认：「启动内核」页的能力探测里 "
+                      @"task_for_pid(self) 那一行是不是成功。",
+                      p.name, p.pid, err.localizedDescription ?: @"(无错误信息)"]];
         return;
     }
 
     MFGameReader *r = [MFGameReader shared];
-    r.targetTaskPort = p.taskPort;
+
+    // 换目标前先把上一个端口还回去，避免累积
+    if (r.targetTaskPort != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), r.targetTaskPort);
+    }
+
+    r.targetTaskPort = port;
     [MFReadBackend shared].modeFlag = YES;
+
+    /*
+     * ★ 审查修正（P0-2）：绘制跑在【另一个进程】里（posix_spawn 出来的 HUD）。
+     *   端口名字只在创建它的 IPC space 有效，所以主进程拿到的端口
+     *   HUD 进程用不了。这里把目标 pid 记下来，
+     *   HUD 进程启动/读取时用同一个方法为它自己取一份端口。
+     */
+    [[NSUserDefaults standardUserDefaults] setInteger:p.pid forKey:@"mf.target.pid"];
+    [[NSUserDefaults standardUserDefaults] setObject:p.name forKey:@"mf.target.name"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 
     // 顺便把进程名写回当前档案，方便后续自动匹配
     MFGameProfile *prof = [MFOffsets shared].current;
@@ -286,10 +314,12 @@
     NSString *msg = [NSString stringWithFormat:
         @"已绑定：%@ (pid %d)\ntask port = 0x%x\n\n"
         @"门条件：%@\n\n"
-        @"下一步：回到悬浮窗看绘制层，或在这里往下拉刷新后\n"
-        @"在「启动内核」页点「能力探测」看读取统计。",
-        p.name, p.pid, p.taskPort,
-        [MFReadBackend shared].gateOpen ? @"✓ 已就绪" : @"× 未就绪"];
+        @"⚠️ 绘制跑在独立的 HUD 进程里，它拿不到这个端口号。\n"
+        @"已把目标 pid=%d 落盘，HUD 启动时会自己再取一份。\n\n"
+        @"下一步：启动悬浮窗，看绘制层是否出画面。",
+        p.name, p.pid, port,
+        [MFReadBackend shared].gateOpen ? @"✓ 已就绪" : @"× 未就绪",
+        p.pid];
     [self alert:@"绑定成功" message:msg];
 }
 

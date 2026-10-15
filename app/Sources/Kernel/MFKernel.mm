@@ -333,7 +333,7 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
     return NO;
 }
 
-/// 路 C：sysctl 拿 pid 列表 → task_for_pid 逐个换 task port
+/// 路 C：sysctl 拿 pid 列表（★ 不再逐个取 task port，见 acquireTaskPortForPid）
 - (NSArray<MFProcessInfo *> *)enumerateViaTaskForPid:(NSString **)err {
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     size_t len = 0;
@@ -359,11 +359,6 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
         int pid = procs[i].kp_proc.p_pid;
         if (pid <= 0) continue;
 
-        mach_port_t task = MACH_PORT_NULL;
-        if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS || task == MACH_PORT_NULL) {
-            continue;
-        }
-
         char path[0x400] = {0};
         proc_pidpath(pid, path, sizeof(path));
         char *base = strrchr(path, '/');
@@ -374,14 +369,32 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
         pi.name = (base[0] != '\0') ? ([NSString stringWithUTF8String:base] ?: @"?")
                                     : [NSString stringWithFormat:@"pid%d", pid];
         pi.path = (path[0] != '\0') ? ([NSString stringWithUTF8String:path] ?: @"?") : @"?";
-        pi.taskPort = task;
+        pi.taskPort = MACH_PORT_NULL;    // ★ 不再预取，点击时才 acquire
         [out addObject:pi];
     }
     free(procs);
 
-    NSLog(@"[MF][Kernel] 路 C：%zu 个 proc，成功拿到 %lu 个 task port",
-          n, (unsigned long)out.count);
+    NSLog(@"[MF][Kernel] 路 C：列出 %zu 个进程（未取端口）", n);
     return out;
+}
+
++ (uint32_t)acquireTaskPortForPid:(int)pid error:(NSString **)err {
+    if (pid <= 0) {
+        if (err) *err = @"pid 非法";
+        return MACH_PORT_NULL;
+    }
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
+        if (err) {
+            *err = [NSString stringWithFormat:
+                    @"task_for_pid(%d) kr=0x%x —— 多半是 task_for_pid-allow "
+                    @"entitlement 没生效，或该进程受 SIP/平台保护", pid, kr];
+        }
+        return MACH_PORT_NULL;
+    }
+    NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x", pid, task);
+    return task;
 }
 
 - (void)probeCapabilitiesWithCompletion:(void (^)(NSString *))completion {
@@ -535,7 +548,14 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
         pi.pid = pid;
         pi.name = [NSString stringWithUTF8String:base] ?: @"?";
         pi.path = [NSString stringWithUTF8String:path] ?: @"?";
-        pi.taskPort = tasks[i];
+        /*
+         * ★ 审查修正（P1-2）：processor_set_tasks 一次给了 taskCnt 个端口右，
+         *   以前全部攥在列表里从不释放 —— 每次刷新泄漏 N 个右，
+         *   而且持有别的进程的 task 端口会让那个 task 结构无法回收。
+         *   现在只留 pid/名字，端口立刻归还；要读时再 acquireTaskPortForPid:。
+         */
+        pi.taskPort = MACH_PORT_NULL;
+        mach_port_deallocate(mach_task_self(), tasks[i]);
         [out addObject:pi];
     }
     vm_deallocate(mach_task_self(), (vm_address_t)tasks, taskCnt * sizeof(mach_port_t));

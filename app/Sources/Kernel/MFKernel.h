@@ -76,8 +76,18 @@ typedef NS_ENUM(NSInteger, MFEnumRoute) {
 - (MFEnumRoute)detectRoute;
 
 /// 枚举全系统 task。route 传 0 = 自动选
+/// ★ 审查修正（P1-2）：枚举【不再】为每个进程预取 task port ——
+///   那样每次刷新会泄漏 N 个端口右，且持有别人的 task 端口会让其结构无法回收。
+///   现在只返回 pid / 名字 / 路径；真正要读某个进程时调 acquireTaskPortForPid:。
 - (NSArray<MFProcessInfo *> *)enumerateProcessesWithRoute:(MFEnumRoute)route
                                                     error:(NSString *_Nullable *_Nullable)err;
+
+/**
+ * 按需取一个进程的 task port。
+ * @return 端口；失败返回 MACH_PORT_NULL 并填 err。
+ *         调用方不用时必须 mach_port_deallocate(mach_task_self(), port)。
+ */
++ (uint32_t)acquireTaskPortForPid:(int)pid error:(NSString *_Nullable *_Nullable)err;
 
 /// 按进程名匹配（对标原实现 proc_pidpath + strrchr + strncmp 前缀匹配）
 - (nullable MFProcessInfo *)findProcessNamed:(NSString *)name;

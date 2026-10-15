@@ -6,11 +6,39 @@
 
 /// 删除前的保护名单 —— 路径里出现任一子串就不删
 /// （对齐分析结论：这层保护会让配置里 blacklist 的项不必然被删，例如 /var/jb 被长度保护挡下）
+///
+/// ★ 安全加固（审查 P0-4）：原分析解出的 6 条只有 {.pid, MGNH, .apple,
+///   com.apple.dfkr, killapps, leemin}。但真机上 /var/mobile/Library/Preferences
+///   在配置里是 default=blacklist —— 也就是说【不在白名单里的一律删】。
+///   而 com.opa334.TrollStore.plist 既不匹配这 6 条、也不在白名单里，
+///   会被递归删掉且【没有备份、没有回收站、不可撤销】——
+///   后果是 TrollStore 的偏好全丢（已装应用列表、设置），属于设备级数据丢失。
+///
+///   这里补上一层【我们不删自己赖以运行的东西】的保护：
+///     · TrollStore / TrollHelper / opa334 —— 我们就装在它上面
+///     · lsd / 系统偏好 —— 删了会影响系统外观与能力
+///     · 白米饭相关 —— 避免把参照实现的东西也清了
+///   保护只增不减，宁可不删，不可误删。
 static NSArray<NSString *> *MFProtectedSubstrings(void) {
     static NSArray *a;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        a = @[ @".pid", @"MGNH", @".apple", @"com.apple.dfkr", @"killapps", @"leemin" ];
+        a = @[
+            // —— 原分析解出的 6 条（保持字节一致，不动）——
+            @".pid", @"MGNH", @".apple", @"com.apple.dfkr", @"killapps", @"leemin",
+
+            // —— 安全加固（本项目新增）——
+            @"opa334",              // TrollStore 作者标识
+            @"TrollStore",          // TrollStore 本体/偏好
+            @"TrollHelper",         // TrollStore 安装器
+            @"com.apple.lsd",       // LaunchServices 标识库（防封要读写）
+            @"lsdidentifiers",      // 同上
+            @"ch.xxtou",            // 白米饭原版标识（HUD pid / 偏好）
+            @"mobile.Library.Preferences",  // 用户偏好总目录：整目录删=灾难
+            @"keychain-2.db",       // 钥匙串数据库
+            @".GlobalPreferences",  // 全局偏好
+            @"com.apple.springboard", @"com.apple.UIKit", @"com.apple.FrontBoard",
+        ];
     });
     return a;
 }
