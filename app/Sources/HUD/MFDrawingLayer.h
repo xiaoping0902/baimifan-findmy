@@ -1,10 +1,17 @@
 //
-//  MFDrawingLayer.h 鈥?閫忔槑缁樺埗灞傦紙ESP锛?//
-//  鎸傚湪 DrawingWindow 鐨?MFOverlayView 涓婏紝姣忓抚锛?//    鈶?璇荤浉鏈?鈫?鈶?璇诲疄浣?鐗╄祫 鈫?鈶?鎶曞奖 鈫?鈶?鐢?ImGui DrawList 鐢诲嚭鏉?//
-//  缁樺埗鍐呭瀵圭収銆婄櫧绫抽キ琛ュ厖鍒嗘瀽銆嬄? 鐨勮彍鍗曢」锛?//    浜烘満鏄剧ず / 鍚嶅瓧 / 澶寸敳 / 琛€閲?/ 璺濈 / 闃熶紞 / 灏勭嚎 / 鎵嬫寔 / 楠ㄩ
-//    鐗╄祫 / 鐩掑瓙 / 鐗╄祫鍚嶅瓧 / 缁熻绐楀彛
+//  MFDrawingLayer.h — 透明绘制层（ESP）
 //
-//  鈿狅笍 鍋忕Щ鏈牎鍑嗗墠锛歳eader 璇讳笉鍒扮浉鏈哄氨浼氭暣甯ц烦杩囷紝涓嶄細鐢婚敊涓滆タ銆?//     鏍″噯鍏ュ彛瑙?Game/Offsets.h + MFGameReader 鐨?rootObjectBase / entityArrayBase / lootArrayBase銆?//
+//  挂在 DrawingWindow 的 MFOverlayView 上，每帧：
+//    ① 读相机 → ② 读实体/物资 → ③ 投影 → ④ 用 ImGui DrawList 画出来
+//
+//  绘制内容对照《白米饭补充分析》§4 的菜单项：
+//    人机显示 / 名字 / 头甲 / 血量 / 距离 / 队伍 / 射线 / 手持 / 骨骼
+//    物资 / 盒子 / 物资名字 / 统计窗口
+//
+//  ⚠️ 偏移未校准前：reader 读不到相机就会整帧跳过，不会画错东西。
+//     校准入口见 Game/Offsets.h + MFGameReader 的
+//     rootObjectBase / entityArrayBase / lootArrayBase。
+//
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
@@ -16,15 +23,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak, nullable) MFOverlayView *overlay;
 
-/// 鍏ㄥ眬寮€鍏筹紙涓庤彍鍗曠殑銆屾€诲紑鍏炽€嶈仈鍔級
+/// 全局开关（与菜单的「总开关」联动）
 + (void)setEnabled:(BOOL)enabled;
 + (BOOL)enabled;
 
-/// 鏈抚缁熻锛堜緵鑿滃崟/鏃ュ織鏄剧ず锛?@property (nonatomic, readonly) NSUInteger lastEntityCount;
+/// 本帧统计（供菜单/日志显示）
+@property (nonatomic, readonly) NSUInteger lastEntityCount;
 @property (nonatomic, readonly) NSUInteger lastLootCount;
 @property (nonatomic, readonly) BOOL lastCameraOK;
 
-/// 璇婃柇锛氫竴甯х殑瀹屾暣璇绘暟杞偍锛堜緵鐪熸満鏍″噯鐪嬪亸绉诲涓嶅锛?- (NSString *)dumpFrameWithSize:(CGSize)size;
+/// 诊断：一帧的完整读数转储（供真机校准看偏移对不对）
+- (NSString *)dumpFrameWithSize:(CGSize)size;
 
 @end
 

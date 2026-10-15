@@ -755,6 +755,59 @@ def check_krw_size_granularity():
     ok(f"kread/kwrite 粒度检查完成，扫描 {checked} 个文件")
 
 
+# ------------------------------------------- 7.11 源文件编码 / 乱码（防止被编辑器写坏）
+def check_source_encoding():
+    """
+    2026-10-15 实际踩过：用 PowerShell 的 Get-Content -Raw + WriteAllText
+    改一行中文注释，结果 PS 按 GBK 读、按 UTF-8 写 → 整个文件变乱码，
+    更致命的是【换行被吃掉】，后面几行的 @property 被并进注释里，
+    Xcode 报 "no visible @interface declares the selector" —— 完全看不出是编码问题。
+
+    这里做两道检查：
+      ① 文件必须能按 UTF-8 解码（不能有非法字节）
+      ② 不出现典型的「UTF-8 被当 GBK 读」乱码字
+    """
+    MOJIBAKE = ["鈥", "锛", "鐨", "涓", "鏄", "鍒", "缁", "閫", "鎸", "瀹",
+                "鐢", "姣", "杈", "鍑", "瀵", "鏂", "浠", "鍔", "鑿", "缂"]
+    exts = (".h", ".m", ".mm", ".c", ".cpp", ".swift", ".plist", ".yml", ".yaml",
+            ".md", ".json", ".py")
+    bad_utf8, mojibake = [], []
+
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        low = dirpath.replace("/", os.sep).split(os.sep)
+        if any(p in (".git", "build", "dist", "imgui", "node_modules") for p in low):
+            continue
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            if fn == "preflight.py":      # 本脚本自己写着乱码模式表，跳过
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            try:
+                with open(p, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            try:
+                txt = raw.decode("utf-8")
+            except UnicodeDecodeError as e:
+                bad_utf8.append(f"{rel}: 不是合法 UTF-8（字节偏移 {e.start}: {e.reason}）")
+                continue
+            hits = [m for m in MOJIBAKE if m in txt]
+            if hits:
+                mojibake.append(f"{rel}: 出现乱码字 {'/'.join(hits[:4])} "
+                                f"—— 多半是用 PowerShell/记事本 按 GBK 读过又写回，"
+                                f"换行可能已被吃掉，务必用 git 恢复")
+
+    for m in bad_utf8:
+        err(m)
+    for m in mojibake:
+        err(m)
+    if not bad_utf8 and not mojibake:
+        ok("源文件编码检查通过（UTF-8 合法、无乱码字）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -802,6 +855,7 @@ def main():
     check_objcxx_traps()
     check_language_boundaries()
     check_krw_size_granularity()
+    check_source_encoding()
     check_project_paths()
     check_identity()
 
