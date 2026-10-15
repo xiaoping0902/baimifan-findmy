@@ -44,6 +44,9 @@
         ![report[@"pid"] isKindOfClass:NSNumber.class] || [report[@"pid"] intValue] != pid ||
         ![report[@"token"] isEqual:token]) return MFHUDStartupPending;
     if ([report[@"state"] isEqual:@"failed"]) return MFHUDStartupFailed;
+    // [M5.66] 用户在启动过程中点了「退出」/控制台结束悬浮窗：
+    // HUD 会自己写下 stopped，这里要当成「已退出」而不是继续等到超时。
+    if ([report[@"state"] isEqual:@"stopped"]) return MFHUDStartupExited;
     if (![report[@"state"] isEqual:@"ready"]) return MFHUDStartupPending;
     for (NSString *key in @[@"menuContextID", @"drawingContextID", @"menuRegistered",
                             @"drawingRegistered", @"menuFrame", @"drawingFrame"]) {

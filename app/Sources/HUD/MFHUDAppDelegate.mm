@@ -6,6 +6,7 @@
 #import "MFHUDWindowHost.h"
 #import "MFHUDStartupStatus.h"
 #import "MFHUDInputBridge.h"
+#import "MFHUDControl.h"
 #include <unistd.h>
 #include <stdlib.h>
 #import "MFHUDLog.h"
@@ -14,6 +15,7 @@
 #import "../Render/MFOverlayView.h"
 #import "../Kernel/MFKernel.h"
 #import "../Game/MFGameReader.h"
+#import "../Game/MFSettings.h"
 #import "../Read/MFReadBackend.h"
 #import <objc/message.h>
 #include <string.h>
@@ -48,6 +50,7 @@
 @property (nonatomic, strong) UIView *drawingContent;
 @property (nonatomic, strong) id<MFHUDOrientationObserver> orientationObserver;
 @property (nonatomic) UIInterfaceOrientation hudOrientation;
+@property (nonatomic) BOOL exitRequested;
 @end
 
 @implementation MFHUDAppDelegate
@@ -65,6 +68,23 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     [self publishStartupState:@"starting" error:nil];
     NSLog(@"[MF][HUD] didFinish，开始建立双窗口");
     MFHUDLogLine(@"==== HUD didFinishLaunching 进来了 ====");
+
+    /*
+     * ★ 退出通道（M5.66）★
+     *
+     * 控制台是 mobile(501)，HUD 子进程是 root(uid 0) ——
+     * mobile 给 root 发 SIGTERM 会被内核直接拒绝（EPERM），
+     * 这就是「控制台点结束悬浮窗一直失败、菜单里也没退出入口」的根因。
+     *
+     * 现在改成「HUD 收到请求后自己结束自己」：
+     *   ① Darwin 通知 com.mf.findmy.hud.exit
+     *   ② PID 文件看门狗（控制台删掉文件 = 下令退出）
+     * 两条都不需要跨 uid 权限，也不依赖信号。
+     *
+     * 监听本身在引导阶段（MFLaunchHUDRole）就装好了 —— 那里比这里早，
+     * 窗口还没建起来的时候用户也可能想取消。这里只记一条状态。
+     */
+    MFHUDLogLine(@"退出通道：%@ + PID 文件看门狗，已由引导阶段安装", MFHUDExitNotificationName);
 
     /*
      * ★★ 审查修正（P0-2）★★
@@ -162,6 +182,33 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
+
+    /*
+     * ★ 帧率策略（M5.66）★
+     *
+     * 之前两个 overlay 都是固定 60 帧：
+     *   · 菜单层 40 来个控件、内容不变，照样每帧问 GPU 要 drawable
+     *   · 真正吃性能的全屏绘制层却不受「刷新率」设置影响（那个选项只改了菜单层）
+     * 于是「菜单发烫 / 拖动发涩 / nextDrawable 卡 500ms」同时出现。
+     *
+     * 现在：菜单交互时满帧、空闲降到 12；绘制层跟设置走。
+     */
+    {
+        NSInteger rate = [MFSettings shared].refreshRate;
+        if (rate < 15) rate = 60;
+        menuView.preferredFPS = rate;
+        menuView.idleFPS = 12;
+        drawView.preferredFPS = rate;
+        __weak MFHUDAppDelegate *weakSelfForFPS = self;
+        [MFMenuUI setFrameRateApplier:^(NSInteger fps) {
+            MFHUDAppDelegate *owner = weakSelfForFPS;
+            owner.menuOverlay.preferredFPS = fps;
+            owner.drawingOverlay.preferredFPS = fps;
+            MFHUDLogLine(@"刷新率 → %ld 帧（菜单层 + 绘制层同时应用）", (long)fps);
+        }];
+        MFHUDLogLine(@"帧率：菜单 %ld/空闲 12，绘制 %ld", (long)rate, (long)rate);
+    }
+
     self.inputBridge = [[MFHUDInputBridge alloc] initWithOverlay:menuView window:menuWin];
     NSString *inputError = nil;
     if (![self.inputBridge installWithError:&inputError]) {
@@ -173,7 +220,11 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         MFHUDAppDelegate *owner = weakSelfForInput;
         BOOL empty = CGRectIsNull(rect) || CGRectIsEmpty(rect);
         owner.hudMenuWindow.hidden = empty;
-        if (empty) [owner.inputBridge cancelAll];
+        if (empty) {
+            [owner.inputBridge cancelAll];
+        } else {
+            [owner.menuOverlay requestRedraw];   // 重新出现时立刻画一帧
+        }
     };
     [self startObservingOrientation];
 
@@ -373,6 +424,52 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     // relying on the console being allowed to signal a root process.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ _exit(EXIT_FAILURE); });
+}
+
+#pragma mark - 退出
+
+/*
+ * 收到退出请求后的完整收尾。
+ *
+ * 关键点：退出动作由 HUD **自己**执行。
+ * 控制台（mobile）无论用 kill(SIGTERM) 还是别的信号，都越不过 uid 权限；
+ * 而进程结束自己不需要任何权限。
+ */
+- (void)shutdownForExitRequest {
+    if (self.exitRequested) return;
+    self.exitRequested = YES;
+
+    MFHUDLogLine(@"HUD 退出：撤窗口 → 停渲染 → 删 PID 文件 → 结束进程（pid=%d）", getpid());
+    [self publishStartupState:@"stopped" error:nil];
+
+    [self.inputBridge cancelAll];
+    self.menuOverlay.delegate = nil;
+    self.drawingOverlay.delegate = nil;
+    [self.menuOverlay stopRendering];
+    [self.drawingOverlay stopRendering];
+    [self.orientationObserver invalidate];
+    self.orientationObserver = nil;
+
+    self.hudMenuWindow.hidden = YES;
+    self.drawingWindow.hidden = YES;
+    self.hudMenuWindow = nil;
+    self.drawingWindow = nil;
+    self.menuHost = nil;
+    self.drawingHost = nil;
+
+    [[NSFileManager defaultManager] removeItemAtPath:MFHUDPIDFilePath error:NULL];
+    [MFHUDControl stopWatching];
+
+    // 给窗口服务器一点时间把两个 context 撤下来（否则可能留下残影），
+    // 然后再硬退出。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        MFHUDLogLine(@"HUD 进程结束（退出码 0）");
+        _exit(EXIT_SUCCESS);
+    });
+    // 兜底：主队列万一被渲染卡住，1.2 秒后从后台线程强制退出。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ _exit(EXIT_SUCCESS); });
 }
 
 - (void)handleFirstFrame:(NSString *)key error:(NSString *)error {

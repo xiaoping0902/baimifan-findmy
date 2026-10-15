@@ -4,6 +4,8 @@
 #import "MFHUDLauncher.h"
 #import "MFHUDLog.h"
 #import "MFHUDStartupStatus.h"
+#import "MFHUDControl.h"
+#import <mach/mach.h>
 #import <spawn.h>
 #import <signal.h>
 #import <sys/stat.h>
@@ -47,9 +49,10 @@ int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *attr, uid_t gid)
 
 extern char **environ;
 
-/// 原版 PID 路径是 /var/mobile/Library/Caches/ch.xxtou.hudapp.pid；
-/// 我们用自己的名字，避免与真白米饭冲突
-static NSString *const kPIDFile = @"/var/mobile/Library/Caches/mf.findmy.hud.pid";
+/// PID 文件路径的唯一权威定义在 MFHUDControl（HUD 侧的看门狗要用同一个路径）。
+/// 原版白米饭用 /var/mobile/Library/Caches/ch.xxtou.hudapp.pid，
+/// 我们用自己的名字，避免与真白米饭冲突。
+#define kPIDFile MFHUDPIDFilePath
 
 /*
  * ★★ 审查修正（HUD 报告 §1.7）：探活不能只用 kill(pid, 0) ★★
@@ -292,20 +295,91 @@ static BOOL MFPidAlive(pid_t p) {
     });
 }
 
+/*
+ * ★★ 退出通道改造（M5.66）★★
+ *
+ * 原来的实现是：
+ *     kill(p, SIGTERM) → 失败就报错
+ *
+ * 为什么一直失败：HUD 子进程是 persona + uid 0（root）拉起来的，
+ * 控制台是 mobile(501)。Unix 规则是「发送者的 real/effective uid 必须等于
+ * 目标的 real/saved uid」—— mobile 给 root 发信号，内核直接 EPERM。
+ * 用户看到的就是「结束失败 errno=1 (Operation not permitted)」，
+ * 菜单里也没有退出入口 —— HUD 起得来、退不掉。
+ *
+ * 现在的顺序：
+ *   ① Darwin 通知 + 删 PID 文件 → HUD 自己结束自己（不需要任何权限）
+ *   ② 等 2 秒
+ *   ③ 还活着就补一发 SIGTERM（记录真实 errno，不掩盖）
+ *   ④ 再不行用 task port 强制终止（靠 task_for_pid-allow）
+ */
++ (BOOL)forceTerminateWithTaskPort:(pid_t)pid {
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
+        MFHUDLogLine(@"兜底 task_for_pid(%d) 失败 kr=0x%x", pid, kr);
+        return NO;
+    }
+    kr = task_terminate(task);
+    mach_port_deallocate(mach_task_self(), task);
+    MFHUDLogLine(@"兜底 task_terminate(%d) kr=0x%x", pid, kr);
+    return kr == KERN_SUCCESS;
+}
+
 + (BOOL)stopHUDWithError:(NSString **)err {
     pid_t p = [self hudPID];
     if (p <= 0) {
         if (err) *err = @"HUD 未在运行";
         return NO;
     }
-    if (kill(p, SIGTERM) != 0) {
-        if (err) *err = [NSString stringWithFormat:@"kill 失败 errno=%d (%s)", errno, strerror(errno)];
-        return NO;
+
+    [MFHUDControl requestExit];   // 通知 + 删 PID 文件（双通道）
+
+    // ① 等 HUD 自己退出（看门狗最长 1 秒一轮，这里给 2 秒）
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 2.0;
+    while (NSProcessInfo.processInfo.systemUptime < deadline) {
+        if (!MFPidAlive(p)) {
+            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
+            NSLog(@"[MF][HUDLaunch] HUD 已按请求自行退出 pid=%d", p);
+            MFHUDLogLine(@"HUD 自行退出完成 pid=%d", p);
+            return YES;
+        }
+        usleep(50 * 1000);
     }
-    [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
-    NSLog(@"[MF][HUDLaunch] 已结束 HUD pid=%d", p);
-    MFHUDLogLine(@"已发 SIGTERM 结束 HUD pid=%d", p);
-    return YES;
+
+    // ② 通知没生效（例如 HUD 主线程卡住）→ 补发信号，记录真实错误码
+    int signalResult = kill(p, SIGTERM);
+    int signalError = (signalResult != 0) ? errno : 0;
+    MFHUDLogLine(@"HUD 未在 2 秒内自行退出，补发 SIGTERM：r=%d errno=%d(%s)",
+                 signalResult, signalError, strerror(signalError));
+
+    deadline = NSProcessInfo.processInfo.systemUptime + 1.0;
+    while (NSProcessInfo.processInfo.systemUptime < deadline) {
+        if (!MFPidAlive(p)) {
+            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
+            MFHUDLogLine(@"HUD 在 SIGTERM 后退出 pid=%d", p);
+            return YES;
+        }
+        usleep(50 * 1000);
+    }
+
+    // ③ 最后手段：拿 task port 直接终止（entitlement 里有 task_for_pid-allow）
+    if ([self forceTerminateWithTaskPort:p]) {
+        for (int i = 0; i < 20 && MFPidAlive(p); i++) usleep(50 * 1000);
+        if (!MFPidAlive(p)) {
+            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
+            MFHUDLogLine(@"HUD 已由 task_terminate 结束 pid=%d", p);
+            return YES;
+        }
+    }
+
+    if (err) {
+        *err = [NSString stringWithFormat:
+            @"悬浮窗（PID %d）没有响应退出请求。\n"
+            @"已尝试：Darwin 通知、删除 PID 文件、SIGTERM(errno=%d)、task_terminate。\n"
+            @"可以重开一次「查找」再点结束，或直接重启设备。", p, signalError];
+    }
+    return NO;
 }
 
 #pragma mark - [M5.26] root 助手

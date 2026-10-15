@@ -309,8 +309,12 @@ extern char **environ;
         self.navigationItem.prompt = nil;
         if (ready) {
             [self alert:@"悬浮窗初始化完成" message:[NSString stringWithFormat:
-                @"PID = %d\n\n窗口注册和首帧渲染已完成。\n"
-                @"如果菜单未显示或无法操作，请打开「其他 → HUD 日志」。",
+                @"PID = %d\n\n窗口注册和首帧渲染已完成。\n\n"
+                @"· 拖动「标题文字」那一行可以移动整个窗口\n"
+                @"·「收起」把小菜单缩成小圆球，点圆球再展开\n"
+                @"·「退出」彻底关闭悬浮窗（控制台也会同步显示未运行）\n"
+                @"· 菜单空白处不吃触摸，可以直接点到下面的游戏\n"
+                @"· 万一菜单没显示，打开「HUD 日志」看现场",
                 [MFHUDLauncher hudPID]]];
         } else {
             [self alert:@"悬浮窗启动未完成" message:error ?: @"未知错误，请查看 HUD 日志。"];
@@ -319,12 +323,37 @@ extern char **environ;
     }];
 }
 
+/*
+ * ★ [M5.66] 结束悬浮窗 ★
+ *
+ * 两处必须改对：
+ *
+ * ① 原来的 kill(SIGTERM) 对 root 子进程永远 EPERM（控制台是 mobile），
+ *    所以这里现在调用的是「通知 + 看门狗 + 兜底」的新链路，
+ *    由 HUD 自己执行退出。见 MFHUDLauncher.stopHUDWithError:。
+ *
+ * ② 新链路最长会等 2~3 秒（先等它自己退，再补信号）。
+ *    原来是主线程同步等 —— 会让界面在这几秒里假死，
+ *    用户看到的就是「点了没反应」。现在挪到后台队列，界面照常。
+ */
 - (void)stopHUDNow {
-    NSString *err = nil;
-    if (![MFHUDLauncher stopHUDWithError:&err]) {
-        [self alert:@"结束失败" message:err ?: @"未知错误"];
-    }
-    [self refreshStatus];
+    if (self.hudStarting) return;
+    self.hudStarting = YES;
+    self.navigationItem.prompt = @"正在结束悬浮窗…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *err = nil;
+        BOOL stopped = [MFHUDLauncher stopHUDWithError:&err];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.hudStarting = NO;
+            self.navigationItem.prompt = nil;
+            [self refreshStatus];
+            if (stopped) {
+                [self alert:@"悬浮窗已结束" message:@"菜单和绘制层都已经撤下。"];
+            } else {
+                [self alert:@"结束失败" message:err ?: @"未知错误"];
+            }
+        });
+    });
 }
 
 #pragma mark HUD 日志

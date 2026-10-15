@@ -33,6 +33,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) UIView *testColorView;
 
 + (BOOL)isHUDProcess;
+
+/// 收到退出请求（控制台通知 / 看门狗 / 菜单「退出」按钮）后：
+/// 停渲染 → 撤窗口 → 删 PID 文件 → 结束**本进程**。
+/// 之所以由 HUD 自己退：控制台是 mobile，给 root 子进程发信号会被内核拒绝。
+- (void)shutdownForExitRequest;
+
 @end
 
 NS_ASSUME_NONNULL_END

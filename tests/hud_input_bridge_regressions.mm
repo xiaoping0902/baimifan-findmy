@@ -229,6 +229,52 @@ static void TestNewFingerBeginCancelsAnExistingOwner(void) {
     w.hidden = YES;
 }
 
+/*
+ * ★ M5.66 真机现场（hud.log 03:27:47，pid 328）★
+ *
+ *     03:27:47.084 down=1        rawPaths=1 rawID=3 rawIndex=6 point={821, 498.5}
+ *     03:27:47.117 rangeLift=1   rawPaths=1 rawID=2 rawIndex=6 point={821, 498.5}
+ *     03:27:47.119 触摸路由=menu phase=2 id=2 handled=0     ← 松手被拒绝
+ *
+ * M5.65 的假设是「rawID 能稳定代表一次手势」，这条样本推翻了它。
+ * 新的所有权规则：原始 ID 相同，
+ *   **或者** 位置随时间连续（同一根手指不会瞬移）→ 视为同一次手势。
+ * 这个用例在旧实现下必然 FAIL（它只认原始 ID），是这次修复的 RED 用例。
+ */
+static void TestDeviceRawIdentityChangeReleasesWithContinuity(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    const CGPoint kDevicePoint = CGPointMake(80, 100);
+    Send(b, w, p, 3, 3, 0, kDevicePoint);
+    CHECK(p.imgui.presses == 1, "the device tap must reach ImGui as a press");
+    Send(b, w, p, 2, 2, 2, kDevicePoint);
+    CHECK(p.imgui.releases == 1,
+          "the device's raw identity changes 3 -> 2 inside one tap; it must still release");
+    // 松手之后再来的 range-out 不能变成第二次释放
+    Send(b, w, p, 2, 2, 3, kDevicePoint);
+    CHECK(p.imgui.releases == 1, "range-out after lift must not release twice");
+    // 下一次点击必须重新走完整的按下/释放
+    Send(b, w, p, 4, 3, 0, CGPointMake(120, 140));
+    Send(b, w, p, 5, 2, 2, CGPointMake(120, 140));
+    CHECK(p.imgui.presses == 2 && p.imgui.releases == 2,
+          "the next tap gets its own complete press and release");
+    w.hidden = YES;
+}
+
+/*
+ * 连续性兜底不能变成「谁都能释放主触点」：
+ * 另一根手指出现在别处，即使它的 identity 变了也无权结束这次手势。
+ */
+static void TestContinuityDoesNotTransferOwnershipAcrossTheScreen(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    Send(b, w, p, 3, 3, 0, CGPointMake(60, 80));
+    Send(b, w, p, 9, 9, 2, CGPointMake(300, 500));   // 远处、异 ID 的抬起
+    CHECK(p.imgui.releases == 0,
+          "a far-away contact must not end the primary gesture even when IDs change");
+    Send(b, w, p, 3, 2, 2, CGPointMake(60, 80));
+    CHECK(p.imgui.releases == 1, "the real owner must still be able to release");
+    w.hidden = YES;
+}
+
 @interface InputRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation InputRegressionDelegate
@@ -246,6 +292,8 @@ static void TestNewFingerBeginCancelsAnExistingOwner(void) {
         TestMetadataWrappersAndStandaloneFinger();
         TestMetadataDoesNotEndGestureButInvalidContactCancels();
         TestNewFingerBeginCancelsAnExistingOwner();
+        TestDeviceRawIdentityChangeReleasesWithContinuity();
+        TestContinuityDoesNotTransferOwnershipAcrossTheScreen();
         puts("PASS: production HID bridge releases device taps and drags with stable raw contact ownership");
         fflush(stdout); exit(0);
     });

@@ -3,8 +3,8 @@
 //
 //  自建 CAMetalLayer（不用 MTKView），依据 docs/imgui-集成调研.md §1.3：
 //    · 透明：isOpaque=NO + clearColor alpha=0
-//    · 按需重绘（无交互时可停）
-//    · 触摸只在菜单面板矩形内命中，其余区域透给底层
+//    · 按需重绘（无交互时降频）
+//    · 命中只在菜单面板内、且只在实际可交互控件上；空白区透给底层
 //
 #import <UIKit/UIKit.h>
 #import "MFImGuiContext.h"
@@ -14,7 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 @class MFOverlayView;
 
 @protocol MFOverlayViewDelegate <NSObject>
-/// 每帧构建 UI。实现方在里面 ImGui::Begin/End，并把主面板矩形写回 overlay.captureRect
+/// 每帧构建 UI。实现方在里面 ImGui::Begin/End，并把主面板矩形写回 overlay.captureRect；
+/// 菜单还要用 begin/add/endInteractiveRects 上报**真正可交互**的控件矩形。
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay;
 @end
 
@@ -34,11 +35,31 @@ NS_ASSUME_NONNULL_BEGIN
 /// The HUD uses a BKS/AX input bridge, so UIKit must not enqueue duplicate touches.
 @property (nonatomic, assign) BOOL usesExternalTouchInput;
 
+/// ★ 整窗穿透：置 YES 后本视图对窗口服务器完全不可命中，
+///   但 HUD 的 ImGui 输入走 BKSHIDEventRegisterEventCallback 全局事件流，
+///   所以菜单本身仍然能点、能拖。
+@property (nonatomic, assign) BOOL passthroughAll;
+
+/// ★ 可交互矩形集合（视图坐标）。
+///   菜单每帧把每个真实控件的位置上报进来；落在集合外的点会
+///   `hitTest` 返回 nil，事件因此穿透到下层 App。
+///   没上报过任何矩形时退化成「整个 captureRect 都可交互」（旧行为）。
+- (void)beginInteractiveRects;
+- (void)addInteractiveRect:(CGRect)rect;
+- (void)endInteractiveRects;
+@property (nonatomic, readonly) BOOL hasInteractiveRects;
+
 /// 暂停渲染（省电）
 @property (nonatomic, assign) BOOL paused;
 
-/// 目标帧率（默认 60）
+/// 满帧率（默认 60）
 @property (nonatomic, assign) NSInteger preferredFPS;
+/// 空闲帧率（默认 0 = 不降频）。菜单设成 ~12：不交互时不占 GPU。
+@property (nonatomic, assign) NSInteger idleFPS;
+/// 一次交互之后保持满帧的秒数（默认 0.6）
+@property (nonatomic, assign) NSTimeInterval activeWindow;
+/// 主动要求继续满帧渲染（设置变更、外部状态变更时调用）
+- (void)requestRedraw;
 
 /// HUD delays rendering until window hosting has been submitted.
 @property (nonatomic, assign) BOOL automaticallyStartsRendering;

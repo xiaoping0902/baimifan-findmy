@@ -15,6 +15,8 @@ static BOOL gDrawEnabled = YES;
 
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
+/// 这一帧有没有真正画出东西（决定绘制层是全速还是低频空转）
+- (void)noteDrawingActivity:(BOOL)active;
 - (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
@@ -111,29 +113,50 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
 #pragma mark - 每帧
 
+/*
+ * [M5.66] 绘制层的「有没有内容」反馈。
+ *
+ * 绘制层是全屏 2048×2732 的 Metal surface —— 每帧 clear + present 都要
+ * 真金白银的显存带宽。可它经常无事可做：总开关关着、还没绑定目标进程、
+ * 相机读不到、屏幕上没有敌人也没有物资。
+ *
+ * 这种时候把 overlay 的空闲帧率压到 20，有内容时立刻恢复满帧。
+ * 菜单层用的是同一套机制（交互满帧、空闲 12）。
+ */
+- (void)noteDrawingActivity:(BOOL)active {
+    MFOverlayView *overlay = self.overlay;
+    if (!overlay) return;
+    NSInteger want = active ? 0 : 20;      // 0 = 不降频，直接用满帧率
+    if (overlay.idleFPS != want) {
+        overlay.idleFPS = want;
+        NSLog(@"[MF][Draw] 绘制层空闲帧率 → %ld（%s）", (long)want, active ? "有内容" : "无内容");
+    }
+}
+
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
     _entCount = 0;
     _lootCount = 0;
     _camOK = NO;
 
     MFSettings *st = [MFSettings shared];
-    if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) return;
+    if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) { [self noteDrawingActivity:NO]; return; }
 
     const CGSize size = overlay.bounds.size;
-    if (size.width < 1 || size.height < 1) return;
+    if (size.width < 1 || size.height < 1) { [self noteDrawingActivity:NO]; return; }
 
     // ── 渲染自检：不碰游戏内存，纯合成数据 ──
     //   用途：在偏移校准之前，独立验证 ImGui → Metal → 透明层 → 投影 这条链。
     if (st.renderSelfTest) {
         [self runSelfTest:st overlay:overlay];
+        [self noteDrawingActivity:YES];
         return;
     }
 
-    if (!self.reader.ready) return;
+    if (!self.reader.ready) { [self noteDrawingActivity:NO]; return; }
 
     NSDictionary *frame = [self.reader readFrameWithSize:size];
     _camOK = [frame[@"cameraOK"] boolValue];
-    if (!_camOK) return;
+    if (!_camOK) { [self noteDrawingActivity:NO]; return; }
 
     MFCamera cam = {0};
     NSDictionary *cd = frame[@"camera"];
@@ -178,6 +201,9 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     // ── 物资统计窗（可选）──
     if (st.showLootStats) [self drawStats:st loot:loot];
+
+    // 有实体或物资就保持满帧；这一帧什么都没画就降到低频。
+    [self noteDrawingActivity:(_entCount + _lootCount) > 0];
 }
 
 #pragma mark - 人 / 盒子

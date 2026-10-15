@@ -75,6 +75,8 @@ static BOOL ReadContacts(CFTypeRef event, const MFHIDFunctions &api,
 
 @interface MFHUDInputBridge () <MFHUDTouchOutput>
 - (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt;
+- (BOOL)gestureContinuesAt:(CGPoint)global now:(CFTimeInterval)now;
+- (void)cancelAll;
 @end
 static __weak MFHUDInputBridge *sActiveBridge;
 static void MFHUDEventCallback(void *target, void *refcon, void *service, CFTypeRef event) {
@@ -104,6 +106,27 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     unsigned _loggedBegins, _loggedMoves, _loggedOther, _loggedLag, _loggedTraces;
     int _lockToken;
     BOOL _installed;
+
+    /*
+     * ★ 手势归一化（M5.66）★
+     *
+     * 真机证据（M5.65，hud.log 03:27:47）：
+     *     同一根手指、同一坐标 (821,498.5)、间隔 33ms
+     *     按下 rawID=3 → 抬起 rawID=2 → 路由器拒绝了松手 → 按钮一直按下
+     *
+     * 也就是说：这台设备上报的 digitizer identity **在一次手势内会变**，
+     * 不能当作所有权键。BackBoard 内部的 touchIdentifier 全程不变（420），
+     * 但那个值不在我们能拿到的字段里。
+     *
+     * 处理办法：HUD 内部给手势编一个自己的号，只要「原始 ID 相同」
+     * 或「位置+时间连续」就认为是同一根手指，对外统一用这个内部号。
+     * 连续性判据同时挡住了另一根手指的松手（它不会出现在原地）。
+     */
+    NSInteger _gestureID;        // 当前手势的内部编号（0 = 没有）
+    NSInteger _gestureRawID;     // 该手势最近一次观察到的原始 identity
+    NSInteger _gestureCounter;   // 只增，保证编号不重复
+    CGPoint _gestureLastPoint;   // 最近一次已知的屏幕坐标
+    CFTimeInterval _gestureLastTime;
 }
 - (instancetype)initWithOverlay:(MFOverlayView *)overlay window:(UIWindow *)window {
     if ((self = [super init])) {
@@ -136,11 +159,26 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     return YES;
 }
 - (void)dealloc { if (_lockToken != NOTIFY_TOKEN_INVALID) notify_cancel(_lockToken); }
-- (void)cancelAll { [_router cancelAll]; _dragIdentity = nil; }
+- (void)cancelAll { [_router cancelAll]; _dragIdentity = nil; _gestureID = 0; }
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down {
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
+    [_overlay requestRedraw];       // 有输入就保持满帧，静止时不烧 GPU
 }
-- (void)cancelTouch { [_overlay.imgui cancelTouch]; }
+- (void)cancelTouch {
+    [_overlay.imgui cancelTouch];
+    [_overlay requestRedraw];
+}
+
+/// 原始 identity 变了，但位置和时间都连续 → 还是同一根手指。
+- (BOOL)gestureContinuesAt:(CGPoint)global now:(CFTimeInterval)now {
+    if (_gestureID == 0) return NO;
+    CFTimeInterval dt = now - _gestureLastTime;
+    if (!(dt >= 0.0) || dt > 0.25) return NO;         // 太久了，不认
+    CGFloat dx = global.x - _gestureLastPoint.x;
+    CGFloat dy = global.y - _gestureLastPoint.y;
+    CGFloat slop = MIN(600.0, MAX(48.0, 4000.0 * dt));
+    return (dx * dx + dy * dy) <= (slop * slop);
+}
 - (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt {
     CFTimeInterval receivedAt = CACurrentMediaTime();
     CFTimeInterval delay = receivedAt - queuedAt;
@@ -185,23 +223,61 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     else return;  // Hover/range notifications are not finger lifts.
     CGPoint global = rep.location;
     if (!isfinite(global.x) || !isfinite(global.y) || identity <= 0) return;
+
+    const CFTimeInterval now = CACurrentMediaTime();
+
+    /*
+     * ── 手势归一化 ──
+     *
+     * 设备上 identity 在一次手势里会变（3 → 2），所以只要「原始 ID 相同」
+     * 或「位置 + 时间连续」就按同一根手指处理，对外统一用内部编号。
+     */
+    NSInteger token = identity;
+    if (_gestureID != 0 && identity != _gestureRawID &&
+        [self gestureContinuesAt:global now:now]) {
+        NSInteger previous = _gestureRawID;
+        _gestureRawID = identity;
+        token = _gestureID;
+        if (trace)
+            MFHUDLogLine(@"触点身份变化：raw %ld → %ld（同位置、%.0fms 内）→ 归一手势 #%ld",
+                         (long)previous, (long)identity,
+                         (now - _gestureLastTime) * 1000, (long)_gestureID);
+    } else if (_gestureID != 0 && identity == _gestureRawID) {
+        token = _gestureID;
+    }
+
     if (phase == MFHUDTouchBegan &&
-        ((_dragIdentity && _dragIdentity.integerValue != identity) ||
-         (_router.hasActiveTouch && ![_router ownsTouchID:identity]))) {
+        ((_dragIdentity && _dragIdentity.integerValue != token) ||
+         (_router.hasActiveTouch && ![_router ownsTouchID:token]))) {
         // A changed-only packet can introduce a second finger without carrying
         // the first. Cancel the previous press; never transfer it or click it.
         [self cancelAll]; return;
     }
+
     CGPoint inWindow = [window convertPoint:global fromCoordinateSpace:window.screen.fixedCoordinateSpace];
     CGPoint local = [overlay convertPoint:inWindow fromView:window];
 
-    CGRect dragRect = overlay.headerDragRect;
+    // 只有真正落在面板里的按下才占用手势编号（面板外的按下要穿透给下层）。
+    if (phase == MFHUDTouchBegan && _gestureID == 0) {
+        CGRect capture = overlay.captureRect;
+        if (!CGRectIsNull(capture) && !CGRectIsEmpty(capture) &&
+            CGRectContainsPoint(capture, local)) {
+            _gestureID = ++_gestureCounter;
+            _gestureRawID = identity;
+            token = _gestureID;
+        }
+    }
+    _gestureLastPoint = global;
+    _gestureLastTime = now;
+
+    CGRect dragRect = CGRectStandardize(overlay.headerDragRect);
     if (phase == MFHUDTouchBegan && !_dragIdentity && !_router.hasActiveTouch &&
-        !CGRectIsNull(dragRect) && CGRectContainsPoint(dragRect, local)) {
-        _dragIdentity = @(identity); _dragStart = global; _windowStart = window.center;
+        !CGRectIsNull(dragRect) && !CGRectIsEmpty(dragRect) &&
+        CGRectContainsPoint(dragRect, local)) {
+        _dragIdentity = @(token); _dragStart = global; _windowStart = window.center;
     }
     if (_dragIdentity) {
-        if (_dragIdentity.integerValue != identity) return;
+        if (_dragIdentity.integerValue != token) return;
         CGPoint center = CGPointMake(_windowStart.x + global.x - _dragStart.x,
                                      _windowStart.y + global.y - _dragStart.y);
         CGRect screen = window.screen.fixedCoordinateSpace.bounds;
@@ -209,14 +285,22 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         center.x = MIN(CGRectGetMaxX(screen) - halfW, MAX(CGRectGetMinX(screen) + halfW, center.x));
         center.y = MIN(CGRectGetMaxY(screen) - halfH, MAX(CGRectGetMinY(screen) + halfH, center.y));
         window.center = center;
-        if (phase == MFHUDTouchEnded) _dragIdentity = nil;
+        [_overlay requestRedraw];
+        if (phase == MFHUDTouchEnded) {
+            _dragIdentity = nil;
+            if (token == _gestureID) _gestureID = 0;
+        }
         if (trace) MFHUDLogLine(@"触摸路由=drag phase=%ld local=%@ center=%@",
             (long)phase, NSStringFromCGPoint(local), NSStringFromCGPoint(center));
         return;
     }
-    BOOL handled = [_router handleTouchID:identity point:local phase:phase captureRect:overlay.captureRect];
-    if (trace) MFHUDLogLine(@"触摸路由=menu phase=%ld id=%ld local=%@ handled=%d header=%@",
-        (long)phase, (long)identity, NSStringFromCGPoint(local), handled,
+
+    BOOL handled = [_router handleTouchID:token point:local phase:phase captureRect:overlay.captureRect];
+    if (phase == MFHUDTouchEnded || phase == MFHUDTouchCancelled) {
+        if (token == _gestureID) _gestureID = 0;
+    }
+    if (trace) MFHUDLogLine(@"触摸路由=menu phase=%ld token=%ld raw=%ld local=%@ handled=%d header=%@",
+        (long)phase, (long)token, (long)identity, NSStringFromCGPoint(local), handled,
         NSStringFromCGRect(overlay.headerDragRect));
 }
 @end

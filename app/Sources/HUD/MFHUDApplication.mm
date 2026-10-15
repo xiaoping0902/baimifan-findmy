@@ -1,5 +1,6 @@
 #import "MFHUDApplication.h"
 #import "MFHUDAppDelegate.h"
+#import "MFHUDControl.h"
 #import "MFHUDLog.h"
 
 #import <objc/message.h>
@@ -7,6 +8,7 @@
 #import <objc/objc.h>
 #import <string.h>       // strstr（勘探那块用）
 #import <stdlib.h>       // malloc / free
+#import <unistd.h>       // getpid / _exit（退出通道）
 #import <dlfcn.h>        // dlsym
 
 /*
@@ -242,6 +244,23 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
     sDelegate = [[MFHUDAppDelegate alloc] init];
     [app setDelegate:sDelegate];
     MFHUDLogLine(@"   delegate 已设并强引用保住：%@", (app.delegate == sDelegate) ? @"✓ 一致" : @"⚠️ 不一致");
+
+    /*
+     * ★ 退出通道必须在这里就装好 ★
+     *
+     * 控制台（mobile）杀不动这个 root 子进程，所以退出只能由 HUD 自己执行。
+     * 越早装越好：窗口还没建起来的时候用户也可能想取消，
+     * 那时候如果没有监听，就只能干等启动超时。
+     */
+    [MFHUDControl watchForExitRequest:^{
+        MFHUDAppDelegate *delegate = sDelegate;
+        if (delegate) {
+            [delegate shutdownForExitRequest];
+        } else {
+            MFHUDLogLine(@"退出请求到达时窗口尚未建立，直接结束进程（pid=%d）", getpid());
+            _exit(EXIT_SUCCESS);
+        }
+    }];
 
     /*
      * ⑦ _accessibilityInit —— TrollSpeed 有这一步
