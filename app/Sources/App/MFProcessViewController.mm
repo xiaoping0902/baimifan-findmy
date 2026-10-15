@@ -147,6 +147,60 @@
 
 - (void)startKernel {
     /*
+     * ⛔️ [M5.19] 加一道确认闸门 —— 因为这个按钮会让【整台 iPad 内核 panic 重启】。
+     *
+     * 真机证据（设备 /Panics 目录，2026-10-15 一晚）：
+     *     panic-full-2026-10-15-214255.000.ips   ← 21:42:55
+     *     panic-full-2026-10-15-223149.0002.ips  ← 22:31:49
+     *     panic-full-2026-10-15-224435.000.ips   ← 22:44:35
+     *     panic-full-2026-10-15-225826.000.ips   ← 22:58:26
+     * 每个 panic 都配一个 ResetCounter（重启计数器）—— 四次都是整机重启。
+     *
+     * 内核 panic 内容（四次一致）：
+     *     pmap_map_cpu_windows_copy_internal:
+     *         attempted to map a managed page @pmap.c:10917
+     * 这是 vm_copy 碰到 KFD 制造的悬空页时的典型后果。
+     *
+     * 而且 panic 重启比正常重启慢很多（要落 panic 日志 + iOS 走额外诊断），
+     * 连崩四次就是用户感觉的「重启要很久很久」。
+     *
+     * ★ 好消息：主线根本不需要内核。
+     *   读取链走查确认零 KFD 依赖（MFReadBackend/MFGameReader/MFModuleLocator），
+     *   门条件只看 task port，而 task port 来自 task_for_pid + entitlement。
+     *   用「★ 一键开始」就够。
+     */
+    NSInteger panics = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kernel.panicWarned"];
+    UIAlertController *warn = [UIAlertController
+        alertControllerWithTitle:@"⛔️ 这个按钮会重启整台设备"
+                         message:[NSString stringWithFormat:
+                                 @"设备日志里已经有【4 次内核 panic】：\n"
+                                 @"  21:42:55 · 22:31:49 · 22:44:35 · 22:58:26\n"
+                                 @"每次 panic = 一次整机重启，而且比正常重启慢很多。\n\n"
+                                 @"原因：\n"
+                                 @"  KFD 制造的悬空页被 vm_copy 碰到时，\n"
+                                 @"  内核报 pmap_map_cpu_windows_copy_internal\n"
+                                 @"  attempted to map a managed page @pmap.c:10917\n\n"
+                                 @"★ 主线不需要内核：\n"
+                                 @"  「★ 一键开始」走 task_for_pid + mach_vm_remap，\n"
+                                 @"  完全不碰 KFD —— 不会 panic。\n\n"
+                                 @"确定要继续启动内核吗？%@",
+                                 panics > 0 ? @"\n（你已经被告知过一次了）" : @""]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [warn addAction:[UIAlertAction actionWithTitle:@"取消（推荐）"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+    [warn addAction:[UIAlertAction actionWithTitle:@"仍要启动内核"
+                                             style:UIAlertActionStyleDestructive
+                                           handler:^(UIAlertAction *_) {
+        [[NSUserDefaults standardUserDefaults] setInteger:panics + 1
+                                                   forKey:@"mf.kernel.panicWarned"];
+        [self reallyStartKernel];
+    }]];
+    [self presentViewController:warn animated:YES completion:nil];
+}
+
+- (void)reallyStartKernel {
+    /*
      * ★ [M5.14] 一点就走 —— 不再弹选择框。
      *
      * 用户的原话：「为什么要我选择呢 不能直接我点击启动就直接自己选择启动呀」

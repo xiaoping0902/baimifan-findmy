@@ -147,7 +147,7 @@ extern char **environ;
                                 detail:@"找游戏 → 绑定 → 定位模块 → 解析 UE4（不用内核，不会崩）"
                                 action:@"actOneClick"]];
     [s1.rows addObject:[self actionRow:@"启动内核"
-                                detail:@"⚠️ 可选：KFD 已导致过 panic，主线不需要它"
+                                detail:@"⛔️ 别点！KFD 已让设备 panic 重启 4 次，主线不需要它"
                                 action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];

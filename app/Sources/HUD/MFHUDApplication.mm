@@ -92,7 +92,6 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
     typedef void (*mf_instantiate_t)(Class);
     mf_instantiate_t instantiate = NULL;
 
-    // RTLD_DEFAULT 在已加载的镜像里找
     instantiate = (mf_instantiate_t)dlsym(RTLD_DEFAULT,
                                           "UIApplicationInstantiateSingleton");
     if (instantiate == NULL) {
@@ -106,45 +105,62 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([MFHUDAppDelegate class]));
     }
 
+    /*
+     * ★★★ [M5.19] delegate 必须用【静态强引用】保住 ★★★
+     *
+     * 真机日志（M5.18，pid 365 / 373，两次完全一致）：
+     *     ① UIApplicationInstantiateSingleton = 0x1aafad2e8
+     *     ② MFHUDApplication 已实例化
+     *     ③ delegate 已设置：MFHUDAppDelegate → ✓
+     *     ← 然后进程在 400ms 内消失，④ 那行【从没出现过】
+     *
+     * 原因：原来写成
+     *         @autoreleasepool {
+     *             MFHUDAppDelegate *del = [[MFHUDAppDelegate alloc] init];
+     *             [app setDelegate:del];     // UIApplication.delegate 是 weak/assign
+     *         }                              // ← del 在这里被释放
+     *         @autoreleasepool {
+     *             id del = app.delegate;     // ← 悬垂指针 → 崩
+     *         }
+     *
+     * UIApplication 不持有 delegate（和 NSURLSession 那些不一样），
+     * 所以 delegate 必须由我们自己保活 —— 这是 UIApplicationMain 内部做的事，
+     * 我们绕开它就得自己补上。
+     */
+    static MFHUDAppDelegate *sDelegate = nil;   // ★ 进程生命周期强引用
+
     @autoreleasepool {
         // ② 实例化 App 单例（不走 scene 协商）
         instantiate([MFHUDApplication class]);
         UIApplication *app = [UIApplication sharedApplication];
-        MFHUDLogLine(@"② MFHUDApplication 已实例化：%@", app ? NSStringFromClass(app.class) : @"★ nil");
+        MFHUDLogLine(@"② MFHUDApplication 已实例化：%@",
+                     app ? NSStringFromClass(app.class) : @"★ nil");
         if (app == nil) {
             MFHUDLogLine(@"✗ sharedApplication 仍是 nil，放弃");
             return 1;
         }
 
-        // ③ 设 delegate
-        MFHUDAppDelegate *del = [[MFHUDAppDelegate alloc] init];
-        [app setDelegate:del];
-        MFHUDLogLine(@"③ delegate 已设置：%@ → %@",
-                     NSStringFromClass(del.class), app.delegate ? @"✓" : @"★ 没设上");
-    }
+        // ③ 设 delegate（强引用存进 static）
+        sDelegate = [[MFHUDAppDelegate alloc] init];
+        [app setDelegate:sDelegate];
+        MFHUDLogLine(@"③ delegate 已设置并强引用保住：%@ → %@",
+                     NSStringFromClass(sDelegate.class),
+                     (app.delegate == sDelegate) ? @"✓ 一致" : @"⚠️ 不一致");
 
-    @autoreleasepool {
-        UIApplication *app = [UIApplication sharedApplication];
-        id del = app.delegate;
-
-        /*
-         * ④ 手动触发 didFinishLaunchingWithOptions
-         *
-         * 标准流程里这一步由 UIApplicationMain 在 scene 就绪后调用。
-         * 我们绕开了那一步，所以自己调。
-         */
+        // ④ 手动触发 didFinishLaunchingWithOptions
+        //    标准流程里这一步由 UIApplicationMain 在 scene 就绪后调用；
+        //    我们绕开了它，所以自己调。
         MFHUDLogLine(@"④ 手动调用 didFinishLaunchingWithOptions…");
         BOOL ok = NO;
         SEL s = sel_registerName("application:didFinishLaunchingWithOptions:");
-        if (del && [del respondsToSelector:s]) {
-            ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(del, s, app, @{});
+        if ([sDelegate respondsToSelector:s]) {
+            ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(sDelegate, s, app, @{});
         }
         MFHUDLogLine(@"④ didFinishLaunching 返回 %d", ok);
 
-        // 顺便把 main() 的 argv 交过去（有些实现会读它）
         SEL s2 = sel_registerName("application:willFinishLaunchingWithOptions:");
-        if (del && [del respondsToSelector:s2]) {
-            ((BOOL (*)(id, SEL, id, id))objc_msgSend)(del, s2, app, @{});
+        if ([sDelegate respondsToSelector:s2]) {
+            ((BOOL (*)(id, SEL, id, id))objc_msgSend)(sDelegate, s2, app, @{});
             MFHUDLogLine(@"   已调 willFinishLaunching");
         }
     }
