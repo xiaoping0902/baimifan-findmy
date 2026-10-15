@@ -8,7 +8,8 @@
 #import "../Game/MFGameReader.h"
 #import "../Read/MFReadBackend.h"
 #import "../Game/Offsets.h"
-#import <mach/mach.h>          // mach_task_self / mach_port_deallocate
+#import <mach/mach.h>
+#import <sys/sysctl.h>       // sysctlbyname（读 hw.memsize）          // mach_task_self / mach_port_deallocate
 
 @interface MFProcessViewController () <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 

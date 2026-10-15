@@ -1108,6 +1108,65 @@ def check_libkfd_hook_signatures():
     ok(f"libkfd 宿主钩子签名检查完成（{len(hooks)} 个钩子）")
 
 
+# ------------------ 7.18 用到系统符号却没引对应头文件
+def check_system_symbol_headers():
+    """
+    2026-10-15 构建 #40 实际踩过：
+        MFProcessViewController.mm:168: use of undeclared identifier 'sysctlbyname'
+
+    sysctlbyname 需要 <sys/sysctl.h>。本机没有 iOS SDK，
+    这类错误只能靠规则拦。
+
+    只列「经常忘、且不会通过其他头间接引入」的几个。
+    """
+    # 符号 → 需要的头
+    NEEDS = {
+        "sysctlbyname":        "sys/sysctl.h",
+        "sysctl":              "sys/sysctl.h",
+        "os_proc_available_memory": "os/proc.h",
+        "task_for_pid":        "mach/mach.h",
+        "mach_port_deallocate":"mach/mach.h",
+        "pthread_create":      "pthread.h",
+        "posix_spawn":         "spawn.h",
+        "dlopen":              "dlfcn.h",
+        "dlsym":               "dlfcn.h",
+        "mlock":               "sys/mman.h",
+        "vm_region_64":        "mach/vm_region.h",
+        "arc4random_uniform":  "stdlib.h",
+        "uname":               "sys/utsname.h",
+    }
+    # 这些头通常会被一并引入，出现即认为满足
+    COMMON = ("UIKit/UIKit.h", "Foundation/Foundation.h", "mach/mach.h")
+
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in ("imgui", "vendor")):
+            continue
+        for fn in filenames:
+            if not fn.endswith((".m", ".mm", ".c", ".cpp")):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            code = strip_code(raw)
+            incs = set(re.findall(r'#\s*(?:import|include)\s*[<"]([^>"]+)[>"]', raw))
+            for sym, hdr in NEEDS.items():
+                if not re.search(r'\b' + re.escape(sym) + r'\s*\(', code):
+                    continue
+                if hdr in incs:
+                    continue
+                # mach/* 的头大多由 mach/mach.h 带出
+                if hdr.startswith("mach/") and "mach/mach.h" in incs:
+                    continue
+                if any(c in incs for c in COMMON) and hdr in ("stdlib.h", "pthread.h"):
+                    continue
+                err(f"{rel}: 用到 {sym}() 但没 import <{hdr}>"
+                    f" —— 会报 undeclared identifier（构建 #40 踩过）")
+                checked += 1
+    ok(f"系统符号头文件检查完成（{checked} 处疑似缺失）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -1162,6 +1221,7 @@ def main():
     check_offsets_constants_reachable()
     check_kfd_free_not_in_failure_path()
     check_libkfd_hook_signatures()
+    check_system_symbol_headers()
     check_project_paths()
     check_identity()
 
