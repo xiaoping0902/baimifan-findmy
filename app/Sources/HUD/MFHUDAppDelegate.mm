@@ -6,6 +6,7 @@
 #import "MFHUDWindowHost.h"
 #import "MFHUDStartupStatus.h"
 #include <unistd.h>
+#include <stdlib.h>
 #import "MFHUDLog.h"
 #import "MFMenuUI.h"
 #import "MFDrawingLayer.h"

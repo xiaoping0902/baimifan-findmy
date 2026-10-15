@@ -3,6 +3,8 @@
 #import "MFHUDStartupStatus.h"
 #import "MFHUDLog.h"
 #include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +33,13 @@ static void LaunchFixture(const char *mode, BOOL wantReady) {
         failure = error;
         wasRunning = [MFHUDLauncher isHUDRunning];
         // Always clean a leaked fixture, including when running against the bug.
-        if (wasRunning) [MFHUDLauncher stopHUDWithError:NULL];
+        if (wasRunning) {
+            pid_t leftover = [MFHUDLauncher hudPID];
+            [MFHUDLauncher stopHUDWithError:NULL];
+            // This cleanup is test-only, so a regression cannot leave a fixture
+            // process running on the CI host with inherited blocked signals.
+            if (leftover > 0) { kill(leftover, SIGKILL); waitpid(leftover, NULL, 0); }
+        }
         finished = YES;
     }];
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:16];
@@ -43,6 +51,7 @@ static void LaunchFixture(const char *mode, BOOL wantReady) {
     Check(gotReady == wantReady, "reported readiness must match the child startup result");
     if (wantReady) Check(wasRunning, "a ready child's lifetime must cover its completion");
     else {
+        if (wasRunning) fprintf(stderr, "Startup error before cleanup: %s\n", failure.UTF8String);
         Check(failure.length > 0, "failed startup must return an error");
         Check(!wasRunning, "failed or timed-out startup must end its child and allow retry");
     }

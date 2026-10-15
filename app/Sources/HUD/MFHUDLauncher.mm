@@ -167,7 +167,16 @@ static BOOL MFPidAlive(pid_t p) {
     MFHUDLogLine(@"persona 设定：np=%d uid=%d gid=%d（0 表示成功）", pr1, pr2, pr3);
 
     posix_spawnattr_setpgroup(&attr, 0);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    // GCD worker threads can block signals. Do not pass that mask into the
+    // long-lived HUD child, otherwise SIGTERM cannot stop a failed startup.
+    sigset_t emptyMask, defaultSignals;
+    sigemptyset(&emptyMask);
+    sigemptyset(&defaultSignals);
+    sigaddset(&defaultSignals, SIGTERM);
+    sigaddset(&defaultSignals, SIGINT);
+    posix_spawnattr_setsigmask(&attr, &emptyMask);
+    posix_spawnattr_setsigdefault(&attr, &defaultSignals);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
 
     pid_t pid = 0;
     int rc = posix_spawn(&pid, path, NULL, &attr, argv, environ);
