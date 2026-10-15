@@ -38,6 +38,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t base;          // 加载基址（★ 就是我们要的 sLibBase）
 @property (nonatomic, assign) uint64_t size;          // 大小（mach_vm_region 才有，路 A 为 0）
 @property (nonatomic, assign) BOOL     isMain;        // 是否主可执行文件
+
+/// 人类可读大小（"381.2 MB" / "12.3 KB"）；路 A 拿不到大小时返回 "—"
+- (NSString *)sizeText;
 @end
 
 @interface MFModuleLocator : NSObject
