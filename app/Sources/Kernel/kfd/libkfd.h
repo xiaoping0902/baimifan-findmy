@@ -190,6 +190,21 @@ u64 kopen(u64 puaf_pages, u64 puaf_method, u64 kread_method, u64 kwrite_method)
 
     struct kfd* kfd = kfd_init(puaf_pages, puaf_method, kread_method, kwrite_method);
 
+    /*
+     * [MF PATCH 08] ★ 把 kfd 指针登记给宿主，供失败钩子回收。
+     *
+     * 为什么必须这么做（真机紫屏的根源，2026-10-15 实测）：
+     *   失败的路径是 mf_kfd_fail_hook() -> longjmp 回 mf_kopen()，
+     *   这【绕过了本函数后面所有的清理代码】——
+     *     · puaf_run 制造的内核悬空页从没被 puaf_free 释放
+     *     · krkw_run 开的 ~10000 个 fd 从没被 krkw_free 关闭
+     *   之后用户一重试，内核里就再叠一份。累积几次后物理页分配器
+     *   把仍被引用的页发出去 -> use-after-free -> kernel panic。
+     *
+     *   登记之后，钩子在 longjmp 前会先调 kfd_free() 尽力回收。
+     */
+    mf_kfd_register_active(kfd);
+
     // [MF PATCH 07] 上游的 `goto retry` 是【无限循环】：若 landa 在这台机器上恒定
     //   失败（例如 PUAF 页没喷满、或 16GB 机型），kopen 会永不返回，
     //   App 表现为卡死在「启动内核」。这里加次数上限。
@@ -203,11 +218,20 @@ retry:
     if(fail && (puaf_method == puaf_landa)) {
         if (++mf_retry_count >= mf_retry_max) {
             print_failure("landa retry limit reached (%d attempts), giving up", mf_retry_count);
+            /* [MF PATCH 08] 先解登记，避免钩子里重复回收；再由钩子统一处理 */
+            mf_kfd_register_active(NULL);
+            kfd_free(kfd);     /* ★ 尽力回收：至少把 fd 关掉、把 PUAF 页还回去 */
             mf_kfd_fail_hook("landa retry limit reached", __FILE__, __LINE__);
             return 0;      /* 0 = 失败，mf_kopen 会转成 -1 */
         }
-        // Thanks: m1zole / dunkeyyfong
+        /*
+         * [MF PATCH 09] ★ 上游这里只 puaf_free + info_free，然后 bzero 整个结构 ——
+         *   把 krkw 那部分（含 ~10000 个 fd 的号码）一起清零了，
+         *   那些 fd 从此再也关不掉。
+         *   补上 krkw_free：它会走 method 的 free 把 fd 逐个 close。
+         */
         puaf_free(kfd);
+        krkw_free(kfd);        /* ★ [MF PATCH 09] 上游缺失，补上 */
         info_free(kfd);
         bzero(kfd, sizeof(struct kfd));
         info_init(kfd);
@@ -220,6 +244,8 @@ retry:
     info_run(kfd);
     perf_run(kfd);
     puaf_cleanup(kfd);
+
+    mf_kfd_register_active(NULL);   /* [MF PATCH 08] 成功路径解登记 */
 
     timer_end();
     return (u64)(kfd);

@@ -134,6 +134,21 @@ typedef uintptr_t usize;
 
 extern void mf_kfd_fail_hook(const char* what, const char* file, int line);
 
+/*
+ * [MF PATCH 08] 登记「当前正在跑的 kfd 实例」，供失败钩子在 longjmp 之前回收。
+ *
+ * 起因（2026-10-15 真机紫屏）：
+ *   失败 = mf_kfd_fail_hook() -> longjmp 回 mf_kopen()。
+ *   longjmp 绕过了 kopen 后半段所有清理 —— puaf_run 制造的悬空页、
+ *   krkw_run 开的约一万个 fd，全都留在原地。用户一重试就再叠一份，
+ *   累积几轮后内核 panic。
+ *
+ * 现在 kopen() 在 kfd_init 之后调用本函数登记指针，
+ * 钩子在 longjmp 前调 kfd_free() 尽力回收（用嵌套 setjmp 兜住回收自身的断言）。
+ * 传 NULL 表示解登记。
+ */
+extern void mf_kfd_register_active(void* kfd);
+
 #define assert(condition)                                                   \
     do {                                                                    \
         if (!(condition)) {                                                 \

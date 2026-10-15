@@ -108,10 +108,60 @@ static void mf_set_stage(const char *fmt, ...)
 /* 1) 失败钩子 —— 把上游的 exit(1) 变成可恢复的错误                 */
 /* ================================================================ */
 
+/* 正在跑的 kfd 实例，供失败钩子回收（[MF PATCH 08]）*/
+static void *g_active_kfd = NULL;
+
+/* 回收用的嵌套跳转点：kfd_free() 自己也可能断言 */
+static jmp_buf g_cleanup_jmp;
+static volatile int g_cleanup_armed = 0;
+
+void mf_kfd_register_active(void *kfd)
+{
+    g_active_kfd = kfd;
+}
+
+/*
+ * 尽力回收当前 kfd 实例。
+ *
+ * ★★ 为什么需要它（2026-10-15 真机紫屏的根因）★★
+ *
+ *   失败的路径是：assert -> mf_kfd_fail_hook -> longjmp 回 mf_kopen。
+ *   longjmp 会【跳过 kopen 后半段所有代码】——包括正常返回前的清理：
+ *       info_run / perf_run / puaf_cleanup
+ *   于是留在内核里的东西有两样，谁都不要了：
+ *       · puaf_run 制造的 2048 个悬空页（PUAF = 悬空页）
+ *       · krkw_run 开的约 10000 个 fd（以及靠这些 fd 保活的内核对象）
+ *
+ *   用户一重试就再叠一份；累积几轮后物理页分配器把【仍被引用】的页
+ *   发给别的进程 -> use-after-free -> kernel panic。
+ *   设备上的 panic-full-2026-10-15-120617 / 120947 就是这条链的终点。
+ *
+ *   kfd_free() 内部正好是 perf_free / krkw_free / puaf_free / info_free，
+ *   四样全还。它自己也可能断言，所以用嵌套 setjmp 兜住 ——
+ *   回收失败也必须让进程继续走完 longjmp，不能挂在里面。
+ */
+static void mf_kfd_cleanup_active(void)
+{
+    if (g_active_kfd == NULL) return;
+
+    void *k = g_active_kfd;
+    g_active_kfd = NULL;      /* 先摘掉，避免钩子重入时无限递归 */
+
+    if (setjmp(g_cleanup_jmp) == 0) {
+        g_cleanup_armed = 1;
+        kfd_free((struct kfd *)k);
+        g_cleanup_armed = 0;
+        fprintf(stderr, "[mf] 🔧 失败后回收完成（fd + 悬空页已归还内核）\n");
+    } else {
+        g_cleanup_armed = 0;
+        fprintf(stderr, "[mf] ⚠️ 回收过程中又踩断言 —— 已尽力，请重启 App\n");
+    }
+}
+
 /*
  * 由 [MF PATCH 01] 打进 libkfd/common.h 的 assert 宏调用。
  * 上游行为：print -> sleep(30) -> exit(1)。
- * 现在：记录诊断 ->（若已 armed）longjmp 回 mf_kopen。
+ * 现在：记录诊断 -> 尽力回收 ->（若已 armed）longjmp 回 mf_kopen。
  *
  * 若没有 armed（例如有人把 libkfd 单独拿去编译），退化为上游行为，
  * 不静默吞掉错误。
@@ -127,8 +177,19 @@ void mf_kfd_fail_hook(const char *what, const char *file, int line)
 
     if (g_verbose) fprintf(stderr, "[kfd] 🔴 %s\n", g_err);
 
+    /*
+     * 回收阶段自己踩断言：跳回 cleanup 的落点，让 kfd_free 那条路收尾。
+     * 不这么处理的话，cleanup 里的断言会一路走到 sleep(30)+exit(1)。
+     */
+    if (g_cleanup_armed) {
+        g_cleanup_armed = 0;
+        longjmp(g_cleanup_jmp, 1);
+    }
+
     if (g_fail_armed) {
         g_fail_armed = 0;
+        /* ★ 关键：先尽力回收，再跳走 —— 跳走之后就没机会了 */
+        mf_kfd_cleanup_active();
         longjmp(g_fail_jmp, 1);
     }
 

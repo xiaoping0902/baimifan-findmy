@@ -103,8 +103,33 @@ extern "C" {
 
 #pragma mark - 启动
 
+/*
+ * ★ 进程级「已失败，禁止再试」闸门（[MF PATCH 10]）
+ *
+ * 2026-10-15 真机紫屏的教训：KFD 一旦失败一次，这个进程就已经不干净了 ——
+ *   · fd 表被 kread_sem_open 占掉一大半（kpopen 失败路径也会留下残留）
+ *   · 内核态可能还有没回收干净的 PUAF 页
+ * 再点一次「启动内核」，等于往内核里再叠一份泄漏，几轮之后必然 panic。
+ *
+ * 所以：失败过一次就直接锁死，只允许退出 App 重来。
+ * 这是一道【代码层】的闸门 —— 光靠弹窗提醒是不够的，用户会点「稍后」。
+ */
+static BOOL gMFKernelPoisoned = NO;
+
 - (void)startWithPuafPages:(uint64_t)pages
                 completion:(void (^)(BOOL, NSString *))completion {
+    if (gMFKernelPoisoned) {
+        NSString *msg =
+            @"本次运行已经失败过一次，为安全起见【禁止再次尝试】。\n\n"
+            @"原因：KFD 失败时会在内核里留下未回收的悬空页、并占住约 1 万个 fd。\n"
+            @"原地重试会叠加泄漏，几次之后内核会崩（你已经遇到过紫屏）。\n\n"
+            @"请完全退出本 App（上滑杀掉），再重新打开。";
+        self.lastError = msg;
+        NSLog(@"[MF][Kernel] ⛔ 已锁定，拒绝再次尝试");
+        if (completion) completion(NO, msg);
+        return;
+    }
+
     if (self.state == MFKernelStateRunning && [self isOpen]) {
         if (completion) completion(YES, @"内核已在运行");
         return;
@@ -152,8 +177,10 @@ extern "C" {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (rc != 0) {
                 self.state = MFKernelStateFailed;
+                /* ★ 上锁：本次运行内不允许再试，见 gMFKernelPoisoned 说明 */
+                gMFKernelPoisoned = YES;
                 self.lastError = [NSString stringWithUTF8String:mf_last_error() ?: "kopen 失败"];
-                NSLog(@"[MF][Kernel] kopen 失败: %@", self.lastError);
+                NSLog(@"[MF][Kernel] kopen 失败: %@ —— 已上锁，需重启 App", self.lastError);
                 if (completion) completion(NO, self.lastError);
                 return;
             }
