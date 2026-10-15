@@ -671,6 +671,90 @@ def check_project_paths():
         warn("project.yml 里没解析到任何 `- path:` 条目 —— 检查缩进格式是否变了")
 
 
+# ------------------------------------------------- 7.10 kread/kwrite 的 size 粒度
+def check_krw_size_granularity():
+    """
+    libkfd 的 kread/kwrite 落到：
+        #define kread_from_method(type, method)
+            u64 type_size = ((size) / (sizeof(type)));
+            for (u64 i = 0; i < type_size; i++) { ... }
+
+    sem_open 后端用的 type 是 u64（sizeof = 8）。
+    所以 size < 8 或不是 8 的倍数时：
+        · size = 4  →  4/8 = 0  →  【一次循环都不进，缓冲区原封不动】
+        · size = 12 →  12/8 = 1 →  只读前 8 字节，后 4 字节静默丢失
+
+    这是最阴的一类 bug：不报错、不崩溃，只是数据不对。
+    真机上表现为 patchfinder 读到的全是 0，最后报 "run_kfd_patchfinder failed"。
+
+    规则：本工程代码里直接调 kread()/kwrite() 时，size 必须是 8 的倍数，
+          或显式走 mf_kread / kread_sem_open_kread_u32 这类已做兜底的封装。
+    """
+    FOUR_BYTE = {"uint32_t", "u32", "i32", "int", "int32_t", "float",
+                 "unsigned int", "unsigned"}
+    EIGHT_BYTE = {"uint64_t", "u64", "i64", "size_t", "double", "void*", "long",
+                  "unsigned long"}
+
+    exts = (".m", ".mm", ".c")
+    skip = {"imgui", "vendor", "kfd"}          # kfd 是上游代码，本身是对的
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in skip):
+            continue
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            checked += 1
+
+            # 先建本文件的整型变量类型表，才能解析 sizeof(v) 里的 v 是什么类型
+            var_types = {}
+            for vm in re.finditer(
+                r"\b(uint32_t|uint64_t|u32|u64|i32|i64|int32_t|int64_t|"
+                r"uint16_t|u16|int|unsigned|float|double|size_t|long)\s+"
+                r"\*?\s*(\w+)\s*[;=,)]", body):
+                var_types[vm.group(2)] = vm.group(1)
+
+            for m in re.finditer(r"\b(kread|kwrite)\s*\(((?:[^()]|\([^()]*\))*)\)\s*;", body):
+                call, args = m.group(1), m.group(2)
+                last = args.rsplit(",", 1)[-1].strip()
+                line_no = body[:m.start()].count("\n") + 1
+
+                sm = re.match(r"sizeof\s*\(\s*([^)]+?)\s*\)", last)
+                if sm:
+                    raw = sm.group(1).strip()
+                    # sizeof(*out) → 取 out 的声明类型
+                    ident = raw.lstrip("*").strip()
+                    t = var_types.get(ident, raw)
+
+                    if t in EIGHT_BYTE:
+                        continue
+                    if t in FOUR_BYTE:
+                        err(f"{rel}:{line_no}: {call}(...) 的 size 是 "
+                            f"sizeof({raw})（{t}，4 字节级）"
+                            f"—— kread_from_method 按 sizeof(u64)=8 取整，"
+                            f"4 字节时循环次数为 0，缓冲区不会被写！"
+                            f"改走 mf_kread / kread_sem_open_kread_u32，或读 8 字节再截断")
+                        continue
+                    # 解析不出来：如果变量名对不上任何已知 8 字节类型，提醒一下
+                    if ident not in var_types and not raw.startswith("*"):
+                        warn(f"{rel}:{line_no}: {call}(...) 的 size 是 sizeof({raw})，"
+                             f"无法确定 {ident} 的类型 —— 请人工确认它是 8 字节的")
+                    continue
+
+                nm = re.match(r"(\d+)\b", last)
+                if nm:
+                    n = int(nm.group(1))
+                    if n % 8 != 0:
+                        err(f"{rel}:{line_no}: {call}(...) 的 size 字面量 {n} "
+                            f"不是 8 的倍数 —— 尾部字节会被静默丢弃"
+                            f"（size=4 时甚至一次都不读）")
+    ok(f"kread/kwrite 粒度检查完成，扫描 {checked} 个文件")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -717,6 +801,7 @@ def main():
     check_ios_spi()
     check_objcxx_traps()
     check_language_boundaries()
+    check_krw_size_granularity()
     check_project_paths()
     check_identity()
 

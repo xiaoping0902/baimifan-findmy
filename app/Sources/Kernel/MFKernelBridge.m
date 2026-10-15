@@ -365,23 +365,70 @@ int mf_is_open(void)
 /* 3) 读写                                                           */
 /* ================================================================ */
 
+/*
+ * ★★ kread/kwrite 的 size 必须是 8 的倍数 ★★
+ *
+ * 原因见 MFLibkfdKRead4 上方那段注释：
+ *   kread 落到 kread_from_method(u64, ...)，
+ *   type_size = size / sizeof(u64)。
+ *   size < 8 或不是 8 的倍数时，尾数部分【会被静默丢弃】，
+ *   甚至 size=4 时一次循环都不进（缓冲区原封不动）。
+ *
+ * 这是最阴的一类 bug：不报错、不崩溃，只是数据不对。
+ * 所以这两个入口做兜底：把非 8 倍数的情况显式处理掉，绝不静默。
+ */
+
 int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
 {
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kread: not open");
         return -1;
     }
+    if (uaddr == NULL) {
+        mf_strlcpy(g_err, sizeof(g_err), "mf_kread: uaddr is NULL");
+        return -2;
+    }
     if (size == 0) {
         return 0;
     }
 
-    if (setjmp(g_fail_jmp) == 0) {
-        g_fail_armed = 1;
-        kread((u64)(uintptr_t)g_kfd, kaddr, uaddr, size);
-        g_fail_armed = 0;
-    } else {
-        g_fail_armed = 0;
-        return -1;
+    /* 整 8 字节：直接走后端，最快 */
+    if ((size & 7u) == 0) {
+        if (setjmp(g_fail_jmp) == 0) {
+            g_fail_armed = 1;
+            kread((u64)(uintptr_t)g_kfd, kaddr, uaddr, size);
+            g_fail_armed = 0;
+        } else {
+            g_fail_armed = 0;
+            return -1;
+        }
+        return 0;
+    }
+
+    /*
+     * 非 8 倍数：按 8 字节逐块读，最后一块只拷需要的字节。
+     * 这样不会像直接传 size 那样把尾巴丢掉。
+     */
+    unsigned char *out = (unsigned char *)uaddr;
+    uint64_t done = 0;
+    while (done < size) {
+        uint64_t chunk = 0;
+        if (setjmp(g_fail_jmp) == 0) {
+            g_fail_armed = 1;
+            kread((u64)(uintptr_t)g_kfd, kaddr + done, &chunk, sizeof(chunk));
+            g_fail_armed = 0;
+        } else {
+            g_fail_armed = 0;
+            if (g_verbose) {
+                fprintf(stderr, "[mf] mf_kread: 非8倍数分块读失败 @ done=%llu/%llu\n",
+                        (unsigned long long)done, (unsigned long long)size);
+            }
+            return -1;
+        }
+        uint64_t take = size - done;
+        if (take > 8) take = 8;
+        memcpy(out + done, &chunk, (size_t)take);
+        done += take;
     }
     return 0;
 }
@@ -392,17 +439,62 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
         mf_strlcpy(g_err, sizeof(g_err), "mf_kwrite: not open");
         return -1;
     }
+    if (uaddr == NULL) {
+        mf_strlcpy(g_err, sizeof(g_err), "mf_kwrite: uaddr is NULL");
+        return -2;
+    }
     if (size == 0) {
         return 0;
     }
 
-    if (setjmp(g_fail_jmp) == 0) {
-        g_fail_armed = 1;
-        kwrite((u64)(uintptr_t)g_kfd, uaddr, kaddr, size);
-        g_fail_armed = 0;
-    } else {
-        g_fail_armed = 0;
-        return -1;
+    /* 整 8 字节：直接写 */
+    if ((size & 7u) == 0) {
+        if (setjmp(g_fail_jmp) == 0) {
+            g_fail_armed = 1;
+            kwrite((u64)(uintptr_t)g_kfd, uaddr, kaddr, size);
+            g_fail_armed = 0;
+        } else {
+            g_fail_armed = 0;
+            return -1;
+        }
+        return 0;
+    }
+
+    /*
+     * 非 8 倍数：读-改-写。
+     * kwrite 后端是按 8 字节对象表达的，直接截断写会把尾部清零。
+     * 所以先读回原 8 字节，只替换要改的字节，再整体写回。
+     *
+     * 注意：若目标原本是 0（kwrite 写 0 是上游已知的限制），
+     *       这里会读回 0 再写回 0，可能失败 —— 如实返回错误。
+     */
+    unsigned char *in = (unsigned char *)uaddr;
+    uint64_t done = 0;
+    while (done < size) {
+        uint64_t chunk = 0;
+        uint64_t take = size - done;
+        if (take > 8) take = 8;
+
+        int partial = (take < 8);
+
+        if (setjmp(g_fail_jmp) == 0) {
+            g_fail_armed = 1;
+            if (partial) {
+                /* 先读回，再局部覆盖 */
+                kread((u64)(uintptr_t)g_kfd, kaddr + done, &chunk, sizeof(chunk));
+            }
+            memcpy(&chunk, in + done, (size_t)take);
+            kwrite((u64)(uintptr_t)g_kfd, &chunk, kaddr + done, sizeof(chunk));
+            g_fail_armed = 0;
+        } else {
+            g_fail_armed = 0;
+            if (g_verbose) {
+                fprintf(stderr, "[mf] mf_kwrite: 非8倍数分块写失败 @ done=%llu/%llu (partial=%d)\n",
+                        (unsigned long long)done, (unsigned long long)size, partial);
+            }
+            return -1;
+        }
+        done += take;
     }
     return 0;
 }
@@ -429,7 +521,14 @@ int mf_kread32(uint64_t kaddr, uint32_t *out)
         if (g_kfd->kread.krkw_method_ops.kread == kread_sem_open_kread) {
             *out = kread_sem_open_kread_u32(g_kfd, kaddr);
         } else {
-            kread((u64)(uintptr_t)g_kfd, kaddr, out, sizeof(*out));
+            /*
+             * 兜底分支：读 8 字节再截断。
+             * 【不能】写成 kread(..., sizeof(uint32_t)) —— size=4 会让
+             * kread_from_method 的 type_size 算成 0，缓冲区原封不动。
+             */
+            uint64_t chunk = 0;
+            kread((u64)(uintptr_t)g_kfd, kaddr, &chunk, sizeof(chunk));
+            *out = (uint32_t)(chunk & 0xFFFFFFFFu);
         }
         g_fail_armed = 0;
     } else {
@@ -619,14 +718,29 @@ void mf_set_verbose(int enabled)
 /* ================================================================ */
 
 /*
- * 与 fun/krw.m 的 early_kreadbuf()（L51-70）逐字节等价：
- *   从 kaddr 起每 4 字节调一次 libkfd 的 kread()，
- *   按小端铺进输出缓冲，末尾不足 4 字节按需截断。
+ * ★★ 这里有一个曾经致命的细节，改之前务必看懂 ★★
  *
- * 之所以不一次读完整 size：sem_open 后端的 64-bit 读法在页边界会连带
- * 读到上一页（writeups/exploiting-puafs.md L182-188）。逐 4 字节能把
- * 每次读限制在同一个 16K 页内。libdimentio 的 pfinder_* 全靠它
- * 在内核内存里遍历 __TEXT_EXEC.__text 与 __TEXT.__cstring。
+ * kread() 最终落到 krkw.h 的这个宏：
+ *
+ *     #define kread_from_method(type, method)                  \
+ *         u64 type_size = ((size) / (sizeof(type)));           \
+ *         for (u64 i = 0; i < type_size; i++) { ... }          \
+ *
+ *   kread_sem_open 后端用的 type 是 u64（sizeof = 8）。
+ *   所以 size 必须是 8 的倍数，否则 type_size 会算成 0 ——
+ *   【一次循环都不进，输出缓冲区原封不动】。
+ *
+ *   size=4  →  4/8 = 0  →  什么都没读，缓冲区保持调用者原值（通常是 0）
+ *
+ * 上游 fun/krw.m 的 early_kreadbuf 之所以正确，是因为它走
+ *   early_kread32 → early_kread64 → kread(..., sizeof(uint64_t))
+ * 也就是「读 8 字节，再截成 32 位」。
+ *
+ * 第一版移植直接写了 kread(..., 4)，结果整个 patchfinder 读到的全是 0，
+ * pfinder_init_kernel 看到 mh64.magic != MH_MAGIC_64 直接失败 ——
+ * 真机上表现为 "run_kfd_patchfinder failed at krkw.h:230"。
+ *
+ * 教训：在 header-only 的宏后端上，「等价实现」必须看宏展开，不能看调用名。
  */
 void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
 {
@@ -638,11 +752,11 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
     size_t written = 0;
 
     for (uint64_t cur = kaddr; written < size; cur += 4) {
-        uint32_t chunk = 0;
-        kread((u64)kfd, cur, &chunk, sizeof(chunk));
+        /* 读 8 字节（必须），只取低 4 字节用 —— 与上游 early_kread32 等价 */
+        uint64_t chunk64 = 0;
+        kread((u64)kfd, cur, &chunk64, sizeof(chunk64));
 
-        /* 小端铺字节（iOS 目标为 little-endian，与上游一致）。 */
-        const unsigned char *b = (const unsigned char *)&chunk;
+        const unsigned char *b = (const unsigned char *)&chunk64;
         for (int i = 0; i < 4 && written < size; i++) {
             out[written++] = b[i];
         }
