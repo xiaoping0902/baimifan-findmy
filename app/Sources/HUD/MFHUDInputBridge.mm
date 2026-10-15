@@ -73,6 +73,16 @@ static BOOL ReadContacts(CFTypeRef event, const MFHIDFunctions &api,
     return YES;
 }
 
+/*
+ * 重绘请求的防御性包装。
+ *
+ * 生产里的 overlay 一定是 MFOverlayView，但回归夹具用普通 UIView/InputPanel
+ * 冒充它（模拟器里不起 Metal）。缺一个选择器不该让整条输入链崩掉。
+ */
+static void MFRequestOverlayRedraw(MFOverlayView *overlay) {
+    if ([overlay respondsToSelector:@selector(requestRedraw)]) [overlay requestRedraw];
+}
+
 @interface MFHUDInputBridge () <MFHUDTouchOutput>
 - (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt;
 - (BOOL)gestureContinuesAt:(CGPoint)global now:(CFTimeInterval)now;
@@ -162,11 +172,11 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
 - (void)cancelAll { [_router cancelAll]; _dragIdentity = nil; _gestureID = 0; }
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down {
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
-    [_overlay requestRedraw];       // 有输入就保持满帧，静止时不烧 GPU
+    MFRequestOverlayRedraw(_overlay);   // 有输入就保持满帧，静止时不烧 GPU
 }
 - (void)cancelTouch {
     [_overlay.imgui cancelTouch];
-    [_overlay requestRedraw];
+    MFRequestOverlayRedraw(_overlay);
 }
 
 /// 原始 identity 变了，但位置和时间都连续 → 还是同一根手指。
@@ -285,7 +295,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         center.x = MIN(CGRectGetMaxX(screen) - halfW, MAX(CGRectGetMinX(screen) + halfW, center.x));
         center.y = MIN(CGRectGetMaxY(screen) - halfH, MAX(CGRectGetMinY(screen) + halfH, center.y));
         window.center = center;
-        [_overlay requestRedraw];
+        MFRequestOverlayRedraw(_overlay);
         if (phase == MFHUDTouchEnded) {
             _dragIdentity = nil;
             if (token == _gestureID) _gestureID = 0;

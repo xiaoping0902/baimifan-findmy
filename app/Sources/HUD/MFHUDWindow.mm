@@ -1,6 +1,6 @@
 #import "MFHUDAppDelegate.h"
-#import "../Render/MFOverlayView.h"
 #import "MFHUDLog.h"
+#import <objc/message.h>
 
 // System/secure flags follow TrollSpeed's HUDMainWindow implementation.
 @implementation MFHUDWindow
@@ -16,12 +16,17 @@
  * 这是窗口服务器层面最快的一条排除路径（M5.64 就是靠它在绘制窗上
  * 让系统日志里的命中次数变成 0）。局部穿透仍由下面的 hitTest 负责 ——
  * 系统对托管窗口的命中判定会落到窗口自己的 hitTest 上。
+ *
+ * ★ 这里刻意【不引用 MFOverlayView 类型】，改用选择器问一句：
+ *   hud_uikit_regressions 只链接 MFHUDWindow.mm（模拟器夹具用普通 UIView
+ *   冒充内容视图），一旦引用具体类就会把整条渲染链拖进测试的链接阶段。
  */
 - (BOOL)_ignoresHitTest {
     UIView *content = self.interactiveView;
     if (!content) return YES;
-    if ([content isKindOfClass:[MFOverlayView class]])
-        return [(MFOverlayView *)content passthroughAll];
+    SEL selector = NSSelectorFromString(@"passthroughAll");
+    if ([content respondsToSelector:selector])
+        return ((BOOL (*)(id, SEL))objc_msgSend)(content, selector);
     return NO;
 }
 

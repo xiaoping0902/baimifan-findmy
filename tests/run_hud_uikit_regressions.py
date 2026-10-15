@@ -57,10 +57,17 @@ def main():
                 "UILaunchScreen": {},
             }))
             architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
-            sources = ([ROOT / "tests/hud_uikit_regressions.mm", source]
-                       if args.suite == "windows" else [ROOT / "tests/hud_input_bridge_regressions.mm",
+            if args.suite == "windows":
+                sources = [ROOT / "tests/hud_uikit_regressions.mm", source]
+                # M5.66：MFHUDWindow 会记录「窗口命中 / 窗口穿透」，
+                # 于是窗口实现多了一个 MFHUDLogLine 依赖，这里显式链上。
+                log_source = ROOT / "app/Sources/HUD/MFHUDLog.m"
+                if log_source.exists():
+                    sources.append(log_source)
+            else:
+                sources = [ROOT / "tests/hud_input_bridge_regressions.mm",
                            ROOT / "app/Sources/HUD/MFHUDInputBridge.mm",
-                           ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"])
+                           ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"]
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),

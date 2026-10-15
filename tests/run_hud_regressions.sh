@@ -12,9 +12,17 @@ clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
 "$binary"
 sudo mkdir -p /var/mobile/Library/Caches /var/mobile/Media/mf-debug
 sudo chmod 777 /var/mobile/Library/Caches /var/mobile/Media/mf-debug
-clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -framework Foundation -lproc \
-    tests/hud_launcher_regressions.mm app/Sources/HUD/MFHUDLauncher.mm \
-    app/Sources/HUD/MFHUDStartupStatus.mm -o "$(dirname "$binary")/hud-launcher-regressions"
+# M5.66：停止链路改成「通知 + 看门狗」，所以 MFHUDLauncher 现在依赖
+# MFHUDControl（需要 QuartzCore 的 CACurrentMediaTime）。缺了它会报
+# Undefined symbols: _MFHUDPIDFilePath / _OBJC_CLASS_$_MFHUDControl。
+launcher_sources=(tests/hud_launcher_regressions.mm app/Sources/HUD/MFHUDLauncher.mm
+                  app/Sources/HUD/MFHUDStartupStatus.mm)
+for source in app/Sources/HUD/MFHUDControl.mm; do
+    if [[ -f "$source" ]]; then launcher_sources+=("$source"); fi
+done
+clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
+    -framework Foundation -framework QuartzCore -lproc \
+    "${launcher_sources[@]}" -o "$(dirname "$binary")/hud-launcher-regressions"
 "$(dirname "$binary")/hud-launcher-regressions"
 touch_sources=(tests/hud_touch_regressions.mm)
 if [[ -f app/Sources/HUD/MFHUDTouchRouter.mm ]]; then

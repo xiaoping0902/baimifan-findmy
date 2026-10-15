@@ -65,12 +65,18 @@ static AXFixtureEvent *currentAX;
 @end
 
 // A real UIView supplies UIKit coordinate conversion, without starting Metal.
+// M5.66: the production bridge asks the overlay for a redraw after every input
+// event, so the fixture stands in for that too (a real MFOverlayView throttles
+// itself down to an idle frame rate).
 @interface InputPanel : UIView
 @property CGRect captureRect, headerDragRect;
 @property BOOL hasCompletedFrame;
 @property (strong) TouchRecorder *imgui;
+@property NSUInteger redrawRequests;
+- (void)requestRedraw;
 @end
 @implementation InputPanel
+- (void)requestRedraw { self.redrawRequests++; }
 @end
 
 void MFHUDLogLine(NSString *format, ...) { }
@@ -246,6 +252,8 @@ static void TestDeviceRawIdentityChangeReleasesWithContinuity(void) {
     const CGPoint kDevicePoint = CGPointMake(80, 100);
     Send(b, w, p, 3, 3, 0, kDevicePoint);
     CHECK(p.imgui.presses == 1, "the device tap must reach ImGui as a press");
+    CHECK(p.redrawRequests > 0,
+          "an active touch must keep the overlay at its full frame rate");
     Send(b, w, p, 2, 2, 2, kDevicePoint);
     CHECK(p.imgui.releases == 1,
           "the device's raw identity changes 3 -> 2 inside one tap; it must still release");
