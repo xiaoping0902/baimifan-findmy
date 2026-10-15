@@ -213,10 +213,66 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
     }
 
     // ④ 绑到窗口
+    //
+    // ★★★ [M5.25] 这一步必须用 FBSCAContextSceneLayer 包一层 ★★★
+    //
+    // 真机崩溃（FindMy-2026-10-16-001751.ips）：
+    //     EXC_CRASH SIGABRT
+    //       libc++abi  std::terminate()
+    //       libobjc    _objc_terminate()
+    //       libdispatch _dispatch_client_callout
+    //       FindMy      MFLaunchHUDRole +0x11700
+    // 就在上一行日志（CAContext.contextId = 0xf4adfeba）之后 ——
+    // 说明 _setBoundContext: 收到裸 CAContext 时抛了异常。
+    //
+    // 勘探结果里有答案：
+    //     [FBSCAContextSceneLayer] 共 12 个方法
+    //         - initWithCAContext:                       ← 接受 CAContext
+    //         - initWithCAContextID:level:               ← 或直接给 ID + level
+    //         - _initWithCAContext:contextID:fallbackLevel:
+    //         - CAContext / contextID / isCAContextLayer
+    // _setBoundContext: 要的是「scene layer」而不是 context 本身。
+    //
+    // 另：整段包 @try/@catch —— 这个进程不能因为一个私有 API 不配合就 abort，
+    //     它还得继续建窗口、托管、绘制。
     SEL bindSel = sel_registerName("_setBoundContext:");
     if ([window respondsToSelector:bindSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(window, bindSel, ctx);
-        MFHUDLogLine(@"  [%@] window._setBoundContext: ✓", tag);
+        id bindee = ctx;
+
+        Class sceneLayerCls = NSClassFromString(@"FBSCAContextSceneLayer");
+        if (sceneLayerCls) {
+            SEL wrapSel = sel_registerName("initWithCAContextID:level:");
+            if ([sceneLayerCls instancesRespondToSelector:wrapSel]) {
+                @try {
+                    id sl = ((id (*)(id, SEL, uint32_t, double))objc_msgSend)(
+                                 [sceneLayerCls alloc], wrapSel, ctxId,
+                                 (double)window.windowLevel);
+                    if (sl) { bindee = sl; MFHUDLogLine(@"  [%@] 已用 FBSCAContextSceneLayer 包装 ✓", tag); }
+                } @catch (NSException *e) {
+                    MFHUDLogLine(@"  [%@] FBSCAContextSceneLayer(CAContextID) 异常：%@", tag, e.reason);
+                }
+            }
+            if (bindee == ctx) {
+                SEL wrapSel2 = sel_registerName("initWithCAContext:");
+                if ([sceneLayerCls instancesRespondToSelector:wrapSel2]) {
+                    @try {
+                        id sl = ((id (*)(id, SEL, id))objc_msgSend)([sceneLayerCls alloc], wrapSel2, ctx);
+                        if (sl) { bindee = sl; MFHUDLogLine(@"  [%@] 已用 FBSCAContextSceneLayer(CAContext) 包装 ✓", tag); }
+                    } @catch (NSException *e) {
+                        MFHUDLogLine(@"  [%@] FBSCAContextSceneLayer(CAContext) 异常：%@", tag, e.reason);
+                    }
+                }
+            }
+        } else {
+            MFHUDLogLine(@"  [%@] 没有 FBSCAContextSceneLayer 类", tag);
+        }
+
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(window, bindSel, bindee);
+            MFHUDLogLine(@"  [%@] window._setBoundContext: ✓", tag);
+        } @catch (NSException *e) {
+            MFHUDLogLine(@"  [%@] ★ _setBoundContext: 异常（已吞，不 abort）：%@", tag, e.reason);
+        }
     } else {
         MFHUDLogLine(@"  [%@] ★ 窗口没有 _setBoundContext:", tag);
     }
@@ -243,6 +299,67 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
 id MFAttachContextToWindow(UIWindow *window, NSString *tag) {
     if (window == nil) return nil;
     return MFCreateAndBindContext(window, tag);
+}
+
+/*
+ * ★★★ [M5.25] 自造 context 的登记表 ★★★
+ *
+ * 为什么需要：
+ *   MFHostWindow 里原来读的是 window._contextId —— 那个值在没有 scene 时恒为 0，
+ *   所以托管永远拿 0 去登记，静默无效。
+ *
+ *   但我们【自己造出了有效的 context】：
+ *       真机日志：CAContext.contextId = 0xf4adfeba
+ *
+ *   所以把「窗 → context 对象 + contextId」记下来，
+ *   托管时直接用这个 ID，不再绕 window._contextId。
+ *
+ * 顺带解决另一位的提醒：context 对象必须有长期引用，
+ * 否则函数一返回就被释放，登记的 context 可能一并失效。
+ */
+static NSMutableDictionary<NSString *, id>        *gMFContexts   = nil;
+static NSMutableDictionary<NSString *, NSNumber *> *gMFContextIds = nil;
+static void MFContextRegistryInit(void) {
+    if (gMFContexts == nil)   gMFContexts   = [NSMutableDictionary dictionary];
+    if (gMFContextIds == nil) gMFContextIds = [NSMutableDictionary dictionary];
+}
+
+id MFContextForTag(NSString *tag) {
+    MFContextRegistryInit();
+    return gMFContexts[tag];
+}
+
+uint32_t MFContextIdForTag(NSString *tag) {
+    MFContextRegistryInit();
+    NSNumber *n = gMFContextIds[tag];
+    return n ? (uint32_t)n.unsignedIntValue : 0;
+}
+
+/// 造 context、绑窗口、登记，返回 contextId（0 = 失败）
+uint32_t MFPrepareContextForWindow(UIWindow *window, NSString *tag) {
+    MFContextRegistryInit();
+    if (tag == nil) tag = @"?";
+
+    // 先清掉旧的
+    [gMFContexts removeObjectForKey:tag];
+    [gMFContextIds removeObjectForKey:tag];
+
+    id ctx = MFAttachContextToWindow(window, tag);
+    if (ctx == nil) {
+        MFHUDLogLine(@"  [%@] 登记失败：context 为 nil", tag);
+        return 0;
+    }
+
+    SEL ctxIdSel = sel_registerName("contextId");
+    uint32_t cid = 0;
+    if ([ctx respondsToSelector:ctxIdSel]) {
+        cid = ((uint32_t (*)(id, SEL))objc_msgSend)(ctx, ctxIdSel);
+    }
+
+    gMFContexts[tag]   = ctx;               // ★ 强引用，保住生命周期
+    gMFContextIds[tag] = @(cid);
+    MFHUDLogLine(@"  [%@] 已登记：context=%p contextId=0x%x", tag, ctx, cid);
+    return cid;
 }
 
 #pragma mark - 运行时 API 勘探

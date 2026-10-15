@@ -100,9 +100,9 @@ static void MFMarkWindowServerHostingManaged(UIWindow *w) {
 ///   原因：原来失败时只 NSLog，而 NSLog 进 syslog 不进我们的日志文件 ——
 ///   结果「托管失败」时我在文件里什么都看不到，只能看到一句笼统的结论。
 ///   真机配过一次（pid 307 活着但窗口不出来），现场全空。
-static BOOL MFHostWindow(UIWindow *window) {
+static BOOL MFHostWindow(UIWindow *window, NSString *tag) {
     if (window == nil) {
-        MFHUDLogLine(@"  MFHostWindow: 窗口为 nil，跳过");
+        MFHUDLogLine(@"  MFHostWindow[%@]: 窗口为 nil，跳过", tag);
         return NO;
     }
 
@@ -125,12 +125,27 @@ static BOOL MFHostWindow(UIWindow *window) {
 
     SEL ctxSel = sel_registerName("_contextId");
     BOOL hasCtx = [window respondsToSelector:ctxSel];
-    MFHUDLogLine(@"  MFHostWindow: UIWindow 有 _contextId = %d", hasCtx);
-    if (!hasCtx) return NO;
+    MFHUDLogLine(@"  MFHostWindow[%@]: UIWindow 有 _contextId = %d", tag, hasCtx);
 
-    uint32_t ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(window, ctxSel);
-    MFHUDLogLine(@"  MFHostWindow: _contextId = 0x%x  level = %.0f",
-                 ctxId, (double)window.windowLevel);
+    /*
+     * ★★★ [M5.25] 优先用【我们自己造的】context ID ★★★
+     *
+     * 原来读 window._contextId —— 没有 scene 时它恒为 0，
+     * 于是 registerWindowWithContextID:0 静默无效，窗口永远不显示。
+     *
+     * 但我们自己造出了有效 context（真机实测 CAContext.contextId = 0xf4adfeba）。
+     * 那就直接拿它去登记 —— 这才是正解。
+     * window._contextId 只作为回退（万一哪天绑成功了）。
+     */
+    uint32_t ctxId = MFContextIdForTag(tag);
+    if (ctxId != 0) {
+        MFHUDLogLine(@"  MFHostWindow[%@]: 用自造 context ID 0x%x（登记表）", tag, ctxId);
+    } else if (hasCtx) {
+        ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(window, ctxSel);
+        MFHUDLogLine(@"  MFHostWindow[%@]: 回退用 window._contextId = 0x%x", tag, ctxId);
+    }
+    MFHUDLogLine(@"  MFHostWindow[%@]: 最终 _contextId = 0x%x  level = %.0f",
+                 tag, ctxId, (double)window.windowLevel);
 
     if (ctxId == 0) {
         MFHUDLogLine(@"  ★★ _contextId == 0 —— registerWindowWithContextID:0 会静默无效");
@@ -387,16 +402,20 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
          *     UIWindow      - _setBoundContext: / setKeepContextInBackground:
          * 先自己建 context 并绑上，再去托管 —— 否则 _contextId=0，托管必然无效。
          */
-        MFHUDLogLine(@"---- 自造 CAContext（核心修复）----");
-        /*
+        MFHUDLogLine(@"---- 自造 CAContext（核心修复）----");        /*
          * [M5.24] context 存进属性，生命周期覆盖整个悬浮窗显示期
          * （采纳另一位分析者建议：原来只放局部变量，函数返回就没，存在隐患）
          */
         self.menuContext    = MFAttachContextToWindow(self.hudMenuWindow, @"菜单");
         self.drawingContext = MFAttachContextToWindow(self.drawingWindow, @"绘制");
-        MFHUDLogLine(@"---- 自造结束（菜单=%@ 绘制=%@），准备托管 ----",
-                     self.menuContext ? @"成功" : @"失败",
-                     self.drawingContext ? @"成功" : @"失败");
+
+        /*
+         * [M5.25] 走登记表 —— 拿到自造 context 的真实 ID 并强引用保住
+         */
+        MFHUDLogLine(@"---- 登记自造 context ----");
+        uint32_t menuCid = MFPrepareContextForWindow(self.hudMenuWindow, @"菜单");
+        uint32_t drawCid = MFPrepareContextForWindow(self.drawingWindow, @"绘制");
+        MFHUDLogLine(@"---- 登记完成：菜单=0x%x 绘制=0x%x ----", menuCid, drawCid);
 
         for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
                                self.drawingWindow ?: (id)[NSNull null] ]) {
@@ -409,8 +428,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
                          ctx ? [NSString stringWithFormat:@"0x%x", [ctx unsignedIntValue]] : @"nil");
         }
 
-        BOOL a = MFHostWindow(self.hudMenuWindow);
-        BOOL b = MFHostWindow(self.drawingWindow);
+        BOOL a = MFHostWindow(self.hudMenuWindow, @"菜单");
+        BOOL b = MFHostWindow(self.drawingWindow, @"绘制");
         NSLog(@"[MF][HUD] 托管结果：菜单窗=%d 绘制窗=%d", a, b);
         MFHUDLogLine(@"托管结果：菜单窗=%d 绘制窗=%d", a, b);
 

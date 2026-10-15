@@ -65,6 +65,21 @@ void MFDumpWindowAPI(void);
 id MFAttachContextToWindow(UIWindow *window, NSString *tag);
 
 /*
+ * [M5.25] 造 context + 绑窗口 + 登记，返回 contextId（0 = 失败）。
+ *
+ * 为什么要有登记表：
+ *   MFHostWindow 原来读 window._contextId —— 没 scene 时恒为 0，
+ *   托管永远拿 0 去登记，静默无效。
+ *   但我们自己造出了有效 context（真机实测 0xf4adfeba），
+ *   所以要把它记下来给托管步骤直接用。
+ *
+ * 同时解决 context 生命周期：登记表持有强引用，不会函数一返回就释放。
+ */
+uint32_t MFPrepareContextForWindow(UIWindow *window, NSString *tag);
+id       MFContextForTag(NSString *tag);
+uint32_t MFContextIdForTag(NSString *tag);
+
+/*
  * 给窗口打上「系统窗口 / 安全窗口」标记。
  *
  * 白米饭的 Info.plist 里有这两个键：
