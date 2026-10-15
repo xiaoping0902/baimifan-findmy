@@ -17,8 +17,11 @@ typedef CFTypeRef (*CreateDigitizer)(CFAllocatorRef, uint64_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double,
     Boolean, Boolean, uint32_t);
 typedef void (*AppendEvent)(CFTypeRef, CFTypeRef, uint32_t);
+typedef CFTypeRef (*CreateVendor)(CFAllocatorRef, uint64_t, uint16_t, uint16_t,
+    uint32_t, const uint8_t *, uint32_t, uint32_t);
 static CreateDigitizer createDigitizer;
 static AppendEvent appendEvent;
+static CreateVendor createVendor;
 
 @interface MFHUDInputBridge (Regression)
 - (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt;
@@ -90,20 +93,26 @@ static CFTypeRef Hand(uint32_t identity, BOOL touch, uint32_t secondary = 0, BOO
     }
     return parent;
 }
-static void Send(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
-                 uint32_t identity, unsigned char axIdentity, NSInteger phase,
-                 CGPoint local, uint32_t secondary = 0) {
+static void Deliver(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
+                    CFTypeRef event, unsigned char axIdentity, NSInteger phase,
+                    CGPoint local, NSUInteger axPaths = 1) {
     currentAX = [AXFixtureEvent new];
     currentAX.handInfo = [AXFixtureHand new];
     AXFixturePath *path = [AXFixturePath new]; path.pathIdentity = axIdentity;
-    currentAX.handInfo.paths = secondary ? @[path, path] : @[path];
+    currentAX.handInfo.paths = axPaths == 0 ? @[] : (axPaths == 1 ? @[path] : @[path, path]);
     currentAX.location = [panel convertPoint:local toCoordinateSpace:window.screen.fixedCoordinateSpace];
     currentAX.isTouchDown = phase == 0;
     currentAX.isMove = phase == 1;
     currentAX.isLift = phase == 2;
     currentAX.isInRangeLift = phase == 3;
-    CFTypeRef event = Hand(identity, phase < 2, secondary, phase != 3);
     [bridge receiveHIDEvent:event queuedAt:CACurrentMediaTime()];
+}
+static void Send(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
+                 uint32_t identity, unsigned char axIdentity, NSInteger phase,
+                 CGPoint local, uint32_t secondary = 0, BOOL axSeesSecondary = YES) {
+    CFTypeRef event = Hand(identity, phase < 2, secondary, phase != 3);
+    Deliver(bridge, window, panel, event, axIdentity, phase, local,
+            secondary && axSeesSecondary ? 2 : 1);
     CFRelease(event);
 }
 static MFHUDInputBridge *NewBridge(UIWindow **windowOut, InputPanel **panelOut) {
@@ -169,6 +178,54 @@ static void TestMultipleContactsCancelWithoutActivating(void) {
           "multi-contact aggregate coordinates must cancel without activating a control");
     Send(b, w, p, 421, 2, 2, CGPointMake(180, 200));
     CHECK(p.imgui.releases == 0, "a secondary lift after cancellation must not activate a control");
+    Send(b, w, p, 422, 3, 0, CGPointMake(80, 100));
+    Send(b, w, p, 422, 3, 1, CGPointMake(80, 100), 423, NO);
+    CHECK(p.imgui.cancellations == 2 && p.imgui.releases == 0,
+          "two raw fingers must cancel even if AX reports only one aggregate path");
+    w.hidden = YES;
+}
+static CFTypeRef Metadata(void) {
+    uint8_t byte = 0;
+    CFTypeRef event = createVendor(kCFAllocatorDefault, 0, 0xFF00, 1, 0, &byte, 1, 0);
+    CHECK(event, "the test must create real non-digitizer metadata events");
+    return event;
+}
+static void TestMetadataWrappersAndStandaloneFinger(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    CFTypeRef wrapper = Metadata(), hand = Hand(424, YES), metadata = Metadata();
+    // The first hand child is a vendor event; the contact is further down.
+    appendEvent(wrapper, metadata, 0); appendEvent(wrapper, hand, 0);
+    CFRelease(metadata); CFRelease(hand);
+    Deliver(b, w, p, wrapper, 3, 0, CGPointMake(80, 100)); CFRelease(wrapper);
+    CFTypeRef finger = Contact(424, NO, NO);
+    Deliver(b, w, p, finger, 2, 3, CGPointMake(80, 100)); CFRelease(finger);
+    CHECK(p.imgui.presses == 1 && p.imgui.releases == 1,
+          "non-digitizer wrappers must not hide a contact, and a standalone finger range-out must release it");
+    w.hidden = YES;
+}
+static void TestMetadataDoesNotEndGestureButInvalidContactCancels(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    Send(b, w, p, 420, 3, 0, CGPointMake(80, 100));
+    CFTypeRef metadata = Metadata();
+    Deliver(b, w, p, metadata, 0, 4, CGPointMake(80, 100), 0); CFRelease(metadata);
+    CHECK(p.imgui.cancellations == 0 && p.imgui.releases == 0,
+          "a metadata-only BKS notification must preserve the active gesture");
+    Send(b, w, p, 420, 2, 2, CGPointMake(80, 100));
+    CHECK(p.imgui.releases == 1, "the primary must still release after metadata");
+    Send(b, w, p, 421, 3, 0, CGPointMake(80, 100));
+    Send(b, w, p, 0, 3, 2, CGPointMake(80, 100));
+    CHECK(p.imgui.cancellations == 1 && p.imgui.releases == 1,
+          "an explicit digitizer contact without an identity must cancel without clicking");
+    w.hidden = YES;
+}
+static void TestNewFingerBeginCancelsAnExistingOwner(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    Send(b, w, p, 420, 3, 0, CGPointMake(80, 100));
+    Send(b, w, p, 676, 3, 0, CGPointMake(180, 200));
+    Send(b, w, p, 676, 2, 2, CGPointMake(180, 200));
+    Send(b, w, p, 420, 2, 2, CGPointMake(80, 100));
+    CHECK(p.imgui.cancellations == 1 && p.imgui.presses == 1 && p.imgui.releases == 0,
+          "a new different finger must cancel the existing press even in a single-child change packet");
     w.hidden = YES;
 }
 
@@ -180,11 +237,15 @@ static void TestMultipleContactsCancelWithoutActivating(void) {
         dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_GLOBAL);
         createDigitizer = (CreateDigitizer)dlsym(RTLD_DEFAULT, "IOHIDEventCreateDigitizerEvent");
         appendEvent = (AppendEvent)dlsym(RTLD_DEFAULT, "IOHIDEventAppendEvent");
-        CHECK(createDigitizer && appendEvent, "real IOKit event factories must be available");
+        createVendor = (CreateVendor)dlsym(RTLD_DEFAULT, "IOHIDEventCreateVendorDefinedEvent");
+        CHECK(createDigitizer && appendEvent && createVendor, "real IOKit event factories must be available");
         TestDeviceTapReleasesDespiteChangingAXIdentity();
         TestDifferentRawContactCannotReleasePrimary();
         TestTitleDragEndsWithTheSameRawContact();
         TestMultipleContactsCancelWithoutActivating();
+        TestMetadataWrappersAndStandaloneFinger();
+        TestMetadataDoesNotEndGestureButInvalidContactCancels();
+        TestNewFingerBeginCancelsAnExistingOwner();
         puts("PASS: production HID bridge releases device taps and drags with stable raw contact ownership");
         fflush(stdout); exit(0);
     });

@@ -10,6 +10,7 @@
     return self;
 }
 - (BOOL)hasActiveTouch { return _identity != nil; }
+- (BOOL)ownsTouchID:(NSInteger)identity { return _identity && _identity.integerValue == identity; }
 - (BOOL)handleTouchID:(NSInteger)identity point:(CGPoint)point
                phase:(MFHUDTouchPhase)phase captureRect:(CGRect)rect {
     if (CGRectIsNull(rect) || CGRectIsEmpty(rect)) { [self cancelAll]; return NO; }

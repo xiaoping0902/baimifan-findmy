@@ -14,6 +14,7 @@ typedef NS_ENUM(NSInteger, MFHUDTouchPhase) {
 /// This controls input to ImGui; OS pass-through is the window host's job.
 @interface MFHUDTouchRouter : NSObject
 @property (nonatomic, readonly) BOOL hasActiveTouch;
+- (BOOL)ownsTouchID:(NSInteger)identity;
 - (instancetype)initWithOutput:(id<MFHUDTouchOutput>)output;
 - (BOOL)handleTouchID:(NSInteger)identity point:(CGPoint)point
                phase:(MFHUDTouchPhase)phase captureRect:(CGRect)rect;
