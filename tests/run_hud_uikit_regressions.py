@@ -65,6 +65,7 @@ def main():
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
                 "-framework", "UIKit", "-framework", "QuartzCore", "-framework", "Foundation",
+                "-framework", "CoreGraphics",
                 *(str(path) for path in sources),
                 "-o", str(app / "HUDRegression"))
             run("codesign", "--force", "--sign", "-", str(app))

@@ -72,20 +72,20 @@ static AXFixtureEvent *currentAX;
 
 void MFHUDLogLine(NSString *format, ...) { }
 
-static CFTypeRef Contact(uint32_t identity, BOOL touch) {
+static CFTypeRef Contact(uint32_t identity, BOOL touch, BOOL range) {
     CFTypeRef event = createDigitizer(kCFAllocatorDefault, 0, 2, 12, identity,
-        2, 0, 0.3, 0.4, 0, touch ? 1 : 0, 0, true, touch, 0);
+        2, 0, 0.3, 0.4, 0, touch ? 1 : 0, 0, range, touch, 0);
     CHECK(event, "the test must create real IOKit digitizer contacts");
     return event;
 }
-static CFTypeRef Hand(uint32_t identity, BOOL touch, uint32_t secondary = 0) {
+static CFTypeRef Hand(uint32_t identity, BOOL touch, uint32_t secondary = 0, BOOL range = YES) {
     CFTypeRef parent = createDigitizer(kCFAllocatorDefault, 0, 3, 0, 0,
-        2, 0, 0.3, 0.4, 0, 0, 0, true, touch, 0);
+        2, 0, 0.3, 0.4, 0, 0, 0, range, touch, 0);
     CHECK(parent, "the test must create a real IOKit hand collection");
-    CFTypeRef child = Contact(identity, touch);
+    CFTypeRef child = Contact(identity, touch, range);
     appendEvent(parent, child, 0); CFRelease(child);
     if (secondary) {
-        child = Contact(secondary, YES);
+        child = Contact(secondary, YES, YES);
         appendEvent(parent, child, 0); CFRelease(child);
     }
     return parent;
@@ -102,7 +102,7 @@ static void Send(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
     currentAX.isMove = phase == 1;
     currentAX.isLift = phase == 2;
     currentAX.isInRangeLift = phase == 3;
-    CFTypeRef event = Hand(identity, phase < 2, secondary);
+    CFTypeRef event = Hand(identity, phase < 2, secondary, phase != 3);
     [bridge receiveHIDEvent:event queuedAt:CACurrentMediaTime()];
     CFRelease(event);
 }
@@ -130,6 +130,10 @@ static void TestDeviceTapReleasesDespiteChangingAXIdentity(void) {
     Send(b, w, p, 421, 2, 3, CGPointMake(180, 200));
     CHECK(p.imgui.presses == 2 && p.imgui.releases == 2 && p.imgui.lastPoint.x == 180,
           "the next tap at another control must get its own complete press and release");
+    Send(b, w, p, 0x800001A4u, 3, 0, CGPointMake(100, 150));
+    Send(b, w, p, 0x800001A4u, 2, 3, CGPointMake(100, 150));
+    CHECK(p.imgui.presses == 3 && p.imgui.releases == 3,
+          "a contact with bit 31 set must remain a valid positive full-width ID");
     w.hidden = YES;
 }
 static void TestDifferentRawContactCannotReleasePrimary(void) {
