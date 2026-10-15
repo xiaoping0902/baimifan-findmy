@@ -15,3 +15,5 @@ jobs:
         run: bash tests/run_hud_regressions.sh
       - name: Exercise real UIKit window initialization
         run: python3 tests/run_hud_uikit_regressions.py
+      - name: Replay device touches through the production HID bridge
+        run: python3 tests/run_hud_uikit_regressions.py --suite input

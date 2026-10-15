@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-source", type=Path,
                         default=ROOT / "app/Sources/HUD/MFHUDWindow.mm")
+    parser.add_argument("--suite", choices=["windows", "input"], default="windows")
     args = parser.parse_args()
     sdk = run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path", capture=True).stdout.strip()
     devices = json.loads(run("xcrun", "simctl", "list", "devices", "available", "-j", capture=True).stdout)
@@ -34,7 +35,7 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="hud-uikit-") as directory:
             source = args.window_source
-            if not source.exists():
+            if args.suite == "windows" and not source.exists():
                 # Older revisions kept the window implementation inside the
                 # delegate. Compile those exact bytes for the RED comparison.
                 delegate = (ROOT / "app/Sources/HUD/MFHUDAppDelegate.mm").read_text()
@@ -56,11 +57,15 @@ def main():
                 "UILaunchScreen": {},
             }))
             architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
+            sources = ([ROOT / "tests/hud_uikit_regressions.mm", source]
+                       if args.suite == "windows" else [ROOT / "tests/hud_input_bridge_regressions.mm",
+                           ROOT / "app/Sources/HUD/MFHUDInputBridge.mm",
+                           ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"])
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
                 "-framework", "UIKit", "-framework", "QuartzCore", "-framework", "Foundation",
-                str(ROOT / "tests/hud_uikit_regressions.mm"), str(source),
+                *(str(path) for path in sources),
                 "-o", str(app / "HUDRegression"))
             run("codesign", "--force", "--sign", "-", str(app))
             if booted_here:
@@ -72,7 +77,8 @@ def main():
                                     text=True, capture_output=True, timeout=90)
             print(result.stdout, end="")
             print(result.stderr, end="")
-            if result.returncode or "PASS: real UIKit" not in result.stdout or "FAIL:" in result.stderr:
+            marker = "PASS: real UIKit" if args.suite == "windows" else "PASS: production HID bridge"
+            if result.returncode or marker not in result.stdout or "FAIL:" in result.stderr:
                 raise SystemExit("UIKit window regression failed")
     finally:
         subprocess.run(["xcrun", "simctl", "uninstall", device_id, bundle_id], capture_output=True)
