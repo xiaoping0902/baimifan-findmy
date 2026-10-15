@@ -897,6 +897,58 @@ def check_objcpp_void_casts():
     ok(f"ObjC++ void* 转换检查完成，扫描 {checked} 个 .mm")
 
 
+# --------------------------------- 7.14 只存在于 Linux/其他平台的头文件
+def check_linux_only_headers():
+    """
+    2026-10-15 构建 #28 实际踩过：
+        MFEnvCheck.mm:13: fatal error: 'sys/statfs.h' file not found
+
+    iOS SDK 里没有 sys/statfs.h（那是 Linux/glibc 的）。
+    iOS 上 statfs/statfs64 声明在 <sys/mount.h>。
+
+    这类「别的平台有、iOS 没有」的头，光看代码是看不出来的 ——
+    本机没有 iOS SDK，所以要靠规则拦。
+    """
+    BAD = {
+        "sys/statfs.h":      "<sys/mount.h>（iOS 的 statfs 在这里）",
+        "sys/vfs.h":         "<sys/mount.h>",
+        "sys/sysinfo.h":     "iOS 没有；用 sysctl 或 mach 接口",
+        "sys/prctl.h":       "iOS 没有",
+        "sys/epoll.h":       "iOS 没有；用 kqueue",
+        "sys/inotify.h":     "iOS 没有；用 kqueue / FSEvents",
+        "linux/limits.h":    "iOS 没有；用 <limits.h>",
+        "bits/stat.h":       "glibc 内部头，iOS 没有",
+        "elf.h":             "iOS 没有；用 <mach-o/*>",
+        "link.h":            "iOS 没有",
+        "sys/auxv.h":        "iOS 没有",
+        "malloc.h":          "iOS 没有；用 <stdlib.h>",
+        "error.h":           "glibc 扩展，iOS 没有",
+        "endian.h":          "iOS 没有；用 <libkern/OSByteOrder.h> 或 CFByteOrder",
+        "sys/random.h":      "iOS 没有；用 <Security/SecRandom.h> 或 arc4random",
+    }
+    exts = (".m", ".mm", ".c", ".cpp", ".h")
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in ("imgui", "vendor")):
+            continue
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f, 1):
+                    m = re.search(r'#\s*(?:import|include)\s*[<"]([^>"]+)[>"]', line)
+                    if not m:
+                        continue
+                    h = m.group(1).strip()
+                    if h in BAD:
+                        err(f"{rel}:{i}: iOS SDK 没有 <{h}>（构建 #28 踩过）"
+                            f" —— 改用 {BAD[h]}")
+                    checked += 1
+    ok(f"平台头文件检查完成，扫描 {checked} 条 #import")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -947,6 +999,7 @@ def main():
     check_source_encoding()
     check_mach_headers()
     check_objcpp_void_casts()
+    check_linux_only_headers()
     check_project_paths()
     check_identity()
 

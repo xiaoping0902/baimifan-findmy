@@ -10,8 +10,7 @@
 #import <sys/sysctl.h>
 #import <sys/resource.h>
 #import <sys/stat.h>
-#import <sys/statfs.h>
-#import <sys/mount.h>
+#import <sys/mount.h>      /* statfs 在这里（iOS 没有 sys/statfs.h，那是 Linux 的） */
 #import <unistd.h>
 #import <fcntl.h>
 #import <dirent.h>
