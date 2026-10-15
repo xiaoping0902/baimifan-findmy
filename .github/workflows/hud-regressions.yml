@@ -2,6 +2,11 @@ name: HUD regression tests
 on:
   workflow_dispatch:
     inputs:
+      suite:
+        description: Run all regressions or one focused suite
+        type: choice
+        options: [all, native, input, windows, menu, overlay, game-reader]
+        default: all
       baseline_renderer:
         description: Reproduce renderer wait failures using the pre-fix implementations
         type: boolean
@@ -10,7 +15,7 @@ on:
     branches: [fix/hud-context-startup, fix/hud-reliability]
 jobs:
   native:
-    if: ${{ !inputs.baseline_renderer }}
+    if: ${{ !inputs.baseline_renderer && (inputs.suite == '' || inputs.suite == 'all' || inputs.suite == 'native') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -20,13 +25,13 @@ jobs:
       - name: Exercise context ownership and startup reports
         run: bash tests/run_hud_regressions.sh
   uikit:
-    if: ${{ !inputs.baseline_renderer }}
+    if: ${{ !inputs.baseline_renderer && inputs.suite != 'native' }}
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        suite: [input, windows, menu, overlay, game-reader]
+        suite: ${{ inputs.suite && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["input", "windows", "menu", "overlay", "game-reader"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Replay device touches through the production HID bridge

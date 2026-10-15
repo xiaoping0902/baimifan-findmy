@@ -83,11 +83,14 @@ static void Check(BOOL condition, const char *message) {
 
 static BOOL PumpUntil(BOOL (^condition)(void), NSTimeInterval timeout) {
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + timeout;
-    while (!condition() && NSProcessInfo.processInfo.systemUptime < deadline) {
+    for (;;) {
+        // A condition may consume waitpid's one exit result. Preserve the
+        // first success instead of evaluating it again after leaving the loop.
+        if (condition()) return YES;
+        if (NSProcessInfo.processInfo.systemUptime >= deadline) return NO;
         [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
                               beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
     }
-    return condition();
 }
 
 static BOOL ProcessHasPath(pid_t pid) {
