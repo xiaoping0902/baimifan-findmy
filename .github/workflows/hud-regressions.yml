@@ -1,0 +1,12 @@
+name: HUD regression tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/hud-context-startup]
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise context ownership and startup reports
+        run: bash tests/run_hud_regressions.sh
