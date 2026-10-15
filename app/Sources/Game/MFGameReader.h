@@ -64,7 +64,7 @@ NS_ASSUME_NONNULL_BEGIN
 ///   · 又当「实体数组起始」直接加偏移（实体/物资路走这条）
 ///   同一个值不可能同时成立，所以校准对了也只有一条路能通。拆成独立字段。
 ///
-/// 校准顺序（真机调试面板里逐项填）：
+/// 校准检查顺序（地址须由调试取得；当前无输入面板）：
 ///   1) rootObjectBase  —— 从它按 rootChain 走一步，能读出合理的相机指针
 ///   2) entityArrayBase —— 从它 + entityCountOffset 能读出合理的实体数量（1..500）
 ///   3) lootArrayBase   —— 同上
@@ -93,7 +93,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// ②③ 读实体列表 + 逐个投影到屏幕
 - (NSArray<MFEntity *> *)readEntitiesWithCamera:(MFCamera)camera screen:(MFScreen)screen;
 
-/// ④ 读物资（含等级/价值/名称）
+/// ④ 读物资（含等级/价值；真实名称读取尚未实现）
 - (NSArray<MFEntity *> *)readLootWithCamera:(MFCamera)camera screen:(MFScreen)screen;
 
 /// 一次性拿齐

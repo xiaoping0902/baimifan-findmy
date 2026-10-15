@@ -1,7 +1,7 @@
 # 白米饭复刻 · FindMy
 
 一个 iOS 工具 App：**伪装成系统「查找」**，带主界面控制台、悬浮 HUD（C++ ImGui/Metal）、内核读取链与系统清理功能。
-目标机：**iPad Pro M2 · iPadOS 16.6.1 · TrollStore**。构建全程在 Windows 上完成（GitHub Actions 云编译）。
+本轮实际验证设备：**iPad8,11 / A12Z · iPadOS 16.6.1 · TrollStore**。源码在 Windows 上维护，Apple SDK 编译与 simulator 回归在 GitHub Actions macOS 执行。
 
 > 本工程为**独立重写**，参考对象是 `白米饭无验证.ipa` 的静态逆向分析结论（见 `docs/复刻总方案.md` §3）。
 > 不含任何授权校验、联网上报或设备指纹采集。
@@ -10,7 +10,12 @@
 
 ## 当前进度
 
-**M0–M4 全部完成并构建通过。**
+最新 HUD 修复位于 `fix/hud-reliability`。启动、输入、布局、渲染和停止流程正在按生产类回归及真机证据验收；历史构建成功不能代替设备触摸和游戏数据验证。
+
+- [本轮 HUD 稳定性修复与验收](docs/HUD稳定性修复与验收-2026-10-16.md)：现场旧 PID 误认、根因、修复、实际测试及安装记录。
+- [功能差距审查](docs/功能差距审查-2026-10-16.md)：真实名称、骨骼、物资分类、偏移、UE4 衔接及 root 业务等剩余缺口。
+
+下表是 M0–M4 的历史源码与构建里程碑，功能可用性以当前审查和逐项设备结果为准。
 
 | 里程碑 | 内容 | 状态 | 构建 |
 |---|---|---|---|
@@ -23,19 +28,20 @@
 📋 **[复刻版验证状态](docs/复刻版验证状态.md)** —— 哪些已证、哪些未证、哪些做不到（诚实盘点）
 📋 **[kfd-移植清单](docs/kfd-移植清单.md)** —— 20 文件闭包 + 7 处 patch + 风险清单
 
-### 还没做的（缺前提，不是没做）
+### 待验证与待完成
 
-- ⏳ **装机验证** —— 需要 iPad（entitlements 是否真生效、悬浮窗能否托管、内核链能否跑起来）
+- ⏳ **本轮修复真机验收** —— iPad 已连接；新版本交互、穿透、退出与重启需逐项确认。
 - ⛔ **游戏偏移校准** —— 需要**目标游戏本体**（进程名/模块名/对象链/骨骼拓扑都是游戏的逆向结果）
 
 ### 本地自检
 
 ```bash
-python scripts/preflight.py        # 116 项预检，推 GitHub 之前先跑
+python -X utf8 scripts/preflight.py # 当前 154 项通过，Windows 使用 UTF-8 输出
 python scripts/verify_ipa.py dist/FindMy-unsigned.ipa   # IPA 验货（含 entitlements 逐条核对）
 python scripts/make_icon.py        # 重新生成图标
 python scripts/make_font.py        # 重新生成中文子集字体（加了新文案就跑一遍）
 python scripts/serve_ipa.py        # 局域网分发 IPA，iPad 上 Safari 直接下
+```
 
 ---
 

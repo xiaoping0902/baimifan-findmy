@@ -178,7 +178,15 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     return YES;
 }
 - (void)dealloc { if (_lockToken != NOTIFY_TOKEN_INVALID) notify_cancel(_lockToken); }
-- (void)cancelAll { [_router cancelAll]; _dragIdentity = nil; _gestureIdentity = 0; _dragMoved = NO; }
+- (void)cancelAll {
+    // A completed tap can still have position/down/up queued in ImGui after
+    // the router has released its owner. Clear that queue on every cancel,
+    // while letting an active router send its one existing cancellation.
+    BOOL routerWillCancel = _router.hasActiveTouch;
+    [_router cancelAll];
+    if (!routerWillCancel) [self cancelTouch];
+    _dragIdentity = nil; _gestureIdentity = 0; _dragMoved = NO;
+}
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down {
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
     MFRequestOverlayRedraw(_overlay);   // 有输入就保持满帧，静止时不烧 GPU
