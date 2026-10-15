@@ -1,4 +1,5 @@
 #import "MFUEReader.h"
+#import "Offsets.h"                       /* kMF_Deg2Rad / kMFBehindAngleDeg 等常量在这 */
 #import "../Read/MFReadBackend.h"
 #include <math.h>
 

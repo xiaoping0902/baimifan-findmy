@@ -957,6 +957,61 @@ def check_linux_only_headers():
     ok(f"平台头文件检查完成，扫描 {checked} 条 #import")
 
 
+# -------------------------------- 7.15 用了 Offsets.h 的常量却没引它
+def check_offsets_constants_reachable():
+    """
+    2026-10-15 构建 #33 实际踩过：
+        MFUEReader.mm:304: use of undeclared identifier 'kMF_Deg2Rad'
+        MFUEReader.mm:309: use of undeclared identifier 'kMFBehindAngleDeg'
+
+    这两个常量定义在 Game/Offsets.h。用它们的文件必须（直接或经同目录头
+    间接）引到 Offsets.h，否则编译报 undeclared identifier。
+
+    这类错误的特征：本机没有 iOS SDK，光看代码看不出来 —— 只能靠规则拦。
+    """
+    off = os.path.join(APP, "Sources", "Game", "Offsets.h")
+    if not os.path.exists(off):
+        return
+    with open(off, encoding="utf-8", errors="replace") as f:
+        head = f.read()
+
+    # Offsets.h 里定义的 kMF* 常量名
+    consts = set(re.findall(r'\b(kMF[A-Za-z0-9_]+)\b', head))
+    if not consts:
+        return
+    # 排除 Offsets.h 自己所在目录之外的弱引用
+    pat = re.compile(r'\b(' + "|".join(sorted(consts, key=len, reverse=True)) + r')\b')
+
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in ("imgui", "vendor")):
+            continue
+        for fn in filenames:
+            if not fn.endswith((".m", ".mm", ".h")):
+                continue
+            p = os.path.join(dirpath, fn)
+            if os.path.abspath(p) == os.path.abspath(off):
+                continue
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                txt = f.read()
+
+            used = set(m.group(1) for m in pat.finditer(txt))
+            if not used:
+                continue
+            checked += 1
+
+            # 引了 Offsets.h 吗（同目录裸名 或 相对路径都算）
+            imports_offsets = bool(re.search(
+                r'#\s*(?:import|include)\s*[<"](?:[^">/]+/)*Offsets\.h[>"]', txt))
+            if not imports_offsets:
+                sample = sorted(used)[:3]
+                err(f"{rel}: 用到 Offsets.h 的常量 {', '.join(sample)}"
+                    f"{'…' if len(used) > 3 else ''}（共 {len(used)} 个），"
+                    f"但没 import Offsets.h —— 会报 undeclared identifier（构建 #33 踩过）")
+    ok(f"Offsets.h 常量可达性检查完成，扫描 {checked} 个引用文件")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -1008,6 +1063,7 @@ def main():
     check_mach_headers()
     check_objcpp_void_casts()
     check_linux_only_headers()
+    check_offsets_constants_reachable()
     check_project_paths()
     check_identity()
 
