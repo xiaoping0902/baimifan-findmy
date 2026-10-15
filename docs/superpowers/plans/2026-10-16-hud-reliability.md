@@ -45,7 +45,7 @@ Files: `MFOverlayView.*`, `MFImGuiContext.*`; root integrates `MFDrawingLayer.mm
 - [x] Move only drawable acquisition off main, permit at most one pending acquisition per overlay, bound GPU frames and clear lifecycle generations on stop.
 - [x] Maintain actual ImGui DeltaTime and adaptive frame rate; avoid stale frames after a resize.
 - [x] Expose `acceptsInteractionAtPoint:` as the shared input geometry, clip/reject malformed rectangles, and keep existing public capture APIs compatible.
-- [ ] Run the real overlay regression and review context thread ownership.
+- [x] Run the real overlay regression and review context thread ownership.
 
 ## Task 4: Repair interaction/layout (root)
 
@@ -61,9 +61,9 @@ Files: `MFHUDInputBridge.mm`, `MFHUDWindow.mm`, `MFMenuUI.*`, `MFHUDAppDelegate.
 
 ## Task 5: Integrated verification and delivery (root + independent reviewer)
 
-- [ ] Run font generation, source preflight, Python tests, diff whitespace checks and all cloud native/IOHID/UIKit/menu/render regressions.
-- [ ] Resolve independent review findings and re-run only affected tests plus final integration checks.
-- [ ] Build and verify an IPA for the reviewed SHA; save hash, build logs and an accurate install/acceptance report.
+- [x] Run font generation, source preflight, Python tests, diff whitespace checks and all cloud native/IOHID/UIKit/menu/render regressions.
+- [x] Resolve independent review findings and re-run only affected tests plus final integration checks.
+- [x] Build and verify an IPA for the reviewed SHA; save hash, build logs and an accurate install/acceptance report.
 - [ ] Inspect fresh USB device state when available and perform authorized targeted runtime checks.
 - [x] Write a current functional-gap audit based on source consumers, separating historical claims and unverified gameplay.
 
@@ -73,3 +73,9 @@ Files: `MFHUDInputBridge.mm`, `MFHUDWindow.mm`, `MFMenuUI.*`, `MFHUDAppDelegate.
 - Existing feature branch is the working isolation boundary. No main-branch edits or force pushes.
 - Parallel implementers own disjoint files; root alone edits the app delegate, menu and shared workflow.
 - Cloud jobs and compile results do not replace device acceptance.
+- Candidate app SHA is `3859ba12739c75e6360cdece616ba9ea8303b96c` (M5.69). Native/windows/input/game-reader/overlay passed in run `38809198137`; the menu job failed in the simulator screenshot utility with an empty PNG, so the complete run is not green.
+- Overlay diagnostic run `38809725731` passed without relaxing deadlines; an earlier intermittent first-frame failure remains recorded, not silently declared resolved.
+- Test-only commit `53a254b` replaces the menu preview's fixed lifetime with a screenshot acknowledgement, preserves fixture output on utility failures, and rejects incomplete PNGs. Run `38810544740` still timed out in screenshot; its saved report confirms CPU checks and GPU READY, but no suite PASS. Test-only `7d162c6` isolates any remaining launch CLI before capture; run `38811206407` passed with a complete PNG and a new fixture PASS. The CLI had already exited (status 0), so launch-lock causation is unproven. The actual screenshot took about 25.4 seconds, exceeding the old fixed eight-second preview lifetime.
+- All six production suites now have passing records for identical app code: five in `38809198137`, menu in `38811206407` with test-only lifecycle changes. The original run retains its failure status. The actual Metal screenshot was visually checked; Chinese labels and fixed controls are intact.
+- Independent final review found no remaining production blocker, confirmed the P2 fix and rejected false-green paths in screenshot acknowledgement; physical device acceptance remains separate.
+- USB still reports M5.67. Verified M5.69 IPA and a local install URL have been provided for TrollStore installation; physical installation and touch acceptance remain pending.
