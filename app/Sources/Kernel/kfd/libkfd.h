@@ -254,11 +254,24 @@ u64 kopen(u64 puaf_pages, u64 puaf_method, u64 kread_method, u64 kwrite_method)
      */
     mf_kfd_register_active(kfd);
 
-    // [MF PATCH 07] 上游的 `goto retry` 是【无限循环】：若 landa 在这台机器上恒定
-    //   失败（例如 PUAF 页没喷满、或 16GB 机型），kopen 会永不返回，
-    //   App 表现为卡死在「启动内核」。这里加次数上限。
+    /*
+     * [MF PATCH 07 —— 已调整]
+     *
+     * 上游的 `goto retry` 是【无限循环】：若 landa 在这台机器上恒定失败
+     * （例如 PUAF 页没喷满、或内存压力大），kopen 会永不返回，
+     * App 表现为卡死在「启动内核」。所以要有上限。
+     *
+     * ★ 上限从 3 提到 6（[M5.9]）：
+     *   真机日志显示失败点是 krkw_helper_grab_free_pages ——
+     *   它数「2048 个悬空页里还剩多少个没被回收」，凑不够 512 就放弃。
+     *   这是内存压力问题，而 landa 本身有随机性（每次重喷的分布不同），
+     *   多试几次的成功率明显高于只试 3 次。
+     *
+     * ★ 每次重试前 sleep 1 秒：让系统回收压力缓一缓，
+     *   也给上一轮的 vm_copy 造成的瞬时占用一点时间落地。
+     */
     int mf_retry_count = 0;
-    const int mf_retry_max = 3;
+    const int mf_retry_max = 6;
 
 retry:
     puaf_run(kfd);
@@ -273,6 +286,11 @@ retry:
             mf_kfd_fail_hook("landa retry limit reached", __FILE__, __LINE__);
             return 0;      /* 0 = 失败，mf_kopen 会转成 -1 */
         }
+        print_string("retrying landa");
+        printf("[mf] landa 重试 %d/%d —— 上一轮 krkw_run 失败（通常是悬空页被回收得太多）\n",
+               mf_retry_count, mf_retry_max);
+        fflush(stdout);
+        sleep(1);          /* [M5.9] 缓一缓内存压力 */
         /*
          * [MF PATCH 09 —— 已回退]
          *
