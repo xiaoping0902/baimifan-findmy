@@ -54,15 +54,29 @@ static NSString *const kCalibrationFile = @"mf_offsets_calibrated.plist";
 - (void)buildProfiles {
     NSMutableArray *arr = [NSMutableArray array];
 
-    // 三角洲行动 —— 先做这个（防封模块已证它是目标之一）
+    /*
+     * 三角洲行动 —— 主目标。
+     *
+     * ★ 进程名从【未证】变【已证】：
+     *   mingyun 2.0.4（三角洲行动 iOS 版 ESP，样本 SHA-256
+     *   5383b9759685dd5fd2b89123093db277f6cdc14a8b9cbde7ef2b7a470ead75a1）
+     *   的 AttachIfNeeded() @ 0x100010970 里写着：
+     *       strcpy(v7, "DeltaForceClient");
+     *       sLibBase = pzesa3a1tbpsun4w0j7();   // 取主模块加载基址
+     *
+     *   白米饭的分析报告曾把「目标游戏进程名」列为【未证】——
+     *   原话是「运行时解密，静态全表扫描为空」。现在这行字给了答案。
+     *
+     *   证据强度：反编译原文，非推断。但仍需真机确认进程名大小写/后缀一致。
+     */
     MFGameProfile *dfm = [[MFGameProfile alloc] init];
     dfm.bundleID    = @"com.tencent.tmgp.dfm";
     dfm.displayName = @"三角洲行动";
-    dfm.processName = @"";                       // 【未证】运行时探测
-    dfm.moduleName  = @"";                       // 【未证】
+    dfm.processName = @"DeltaForceClient";
+    dfm.moduleName  = @"";       // 主模块名运行时探测（通常就是主可执行名）
     [arr addObject:dfm];
 
-    // 其余三个：架构留位，偏移待各自校准
+    // 其余三个：架构留位，偏移与进程名待各自校准
     NSArray *others = @[
         @[ @"com.tencent.tmgp.pubgmhd", @"和平精英" ],
         @[ @"com.tencent.mf.uam",       @"暗区突围" ],

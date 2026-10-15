@@ -17,6 +17,8 @@
 #import "MFDebugExport.h"
 #import "../HUD/MFDrawingLayer.h"
 #import "../Kernel/MFKernel.h"
+#import "../Kernel/MFModuleLocator.h"
+#import "../Game/Offsets.h"
 #import "../Game/MFGameReader.h"
 
 #import <mach-o/dyld.h>
@@ -138,6 +140,7 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
     [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media，电脑一条命令拉走" action:@"actExportDiagnostics"]];
     [s1.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒/权限/fd/越狱/内核链 一次性体检" action:@"actEnvCheck"]];
+    [s1.rows addObject:[self actionRow:@"模块定位" detail:@"找游戏进程 + 取主模块基址（UE4 链的起点）" action:@"actLocateModule"]];
     [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
     [secs addObject:s1];
 
@@ -348,6 +351,63 @@ extern char **environ;
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+#pragma mark 模块定位
+
+/// 从「进程名」一路拿到「模块加载基址」—— UE4 对象图的起点。
+///
+/// 为什么必须有它：UE4 的一切都是「模块基址 + 固定偏移」，例如
+///     GWorld = Read<u64>(sLibBase + 0x178AA5E0);
+/// 白米饭用一个全局变量存这个基址（原地址 0x100FF65D0），
+/// 那个全局的写入点在静态分析里没查到 —— 现在清楚了：它存的就是模块基址。
+- (void)actLocateModule {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        MFGameProfile *prof = [MFOffsets shared].current;
+        NSString *pname = prof.processName;
+        NSMutableString *out = [NSMutableString string];
+
+        if (pname.length == 0) {
+            [out appendFormat:@"当前档案「%@」没有进程名，无法定位。\n", prof.displayName];
+        } else {
+            NSError *e = nil;
+            NSString *err = nil;
+            MFModuleInfo *m = [MFModuleLocator locateProcess:pname error:&err];
+            [out appendFormat:@"%@\n\n", [MFModuleLocator lastReport]];
+            if (m) {
+                [out appendFormat:
+                    @"★ 模块基址 = 0x%llx\n\n"
+                    @"这个值就是 UE4 链的起点 sLibBase。\n"
+                    @"下一步该做的是「UE4 对象图读取」——\n"
+                    @"    GWorld = Read(sLibBase + 0x178AA5E0)\n",
+                    m.base];
+                // 存下来，供后续 UE4 读取用
+                [[NSUserDefaults standardUserDefaults] setObject:@(m.base) forKey:@"mf.game.libbase"];
+                [[NSUserDefaults standardUserDefaults] setObject:m.name forKey:@"mf.game.module"];
+                [[NSUserDefaults standardUserDefaults] setInteger:
+                    [MFModuleLocator pidForProcessName:pname] forKey:@"mf.game.pid"];
+            } else {
+                [out appendFormat:@"✗ 定位失败：%@\n", err ?: @"未知"];
+            }
+            (void)e;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"模块定位"
+                                 message:out
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = out;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 #pragma mark 环境检测
