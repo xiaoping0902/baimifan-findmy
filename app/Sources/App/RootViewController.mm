@@ -19,6 +19,7 @@
 #import "../Kernel/MFKernel.h"
 #import "../Kernel/MFModuleLocator.h"
 #import "../Game/Offsets.h"
+#import "../Game/MFUEReader.h"
 #import "../Game/MFGameReader.h"
 
 #import <mach-o/dyld.h>
@@ -141,6 +142,7 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media，电脑一条命令拉走" action:@"actExportDiagnostics"]];
     [s1.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒/权限/fd/越狱/内核链 一次性体检" action:@"actEnvCheck"]];
     [s1.rows addObject:[self actionRow:@"模块定位" detail:@"找游戏进程 + 取主模块基址（UE4 链的起点）" action:@"actLocateModule"]];
+    [s1.rows addObject:[self actionRow:@"UE4 链解析" detail:@"GWorld → 玩家 → 相机 → Actors 逐级验证" action:@"actUEResolve"]];
     [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
     [secs addObject:s1];
 
@@ -353,6 +355,50 @@ extern char **environ;
     [self presentViewController:a animated:YES completion:nil];
 }
 
+#pragma mark UE4 链解析
+
+/// 走 UE4 标准对象图：GWorld → GameInstance → LocalPlayers → PlayerController
+///   → Pawn / CameraManager → PlayerState(队伍) → ULevel → Actors[]
+///
+/// 依据 mingyun 2.0.4 的反编译（RefreshControllerChain @ 0x100010b3c /
+/// GetEnemyThread @ 0x100010c0c / ESPReadMeshWorldPos @ 0x1000118ac）。
+/// 逐级验证，断在哪一环会明确写出来。
+- (void)actUEResolve {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        MFUEReader *ur = [MFUEReader shared];
+
+        // 如果还没定位过模块，先自动做一次
+        if (ur.libBase == 0) {
+            NSNumber *saved = [[NSUserDefaults standardUserDefaults] objectForKey:@"mf.game.libbase"];
+            if (saved) {
+                ur.libBase = [saved unsignedLongLongValue];
+            } else {
+                NSString *pname = [MFOffsets shared].current.processName;
+                MFModuleInfo *m = pname.length ? [MFModuleLocator locateProcess:pname error:NULL] : nil;
+                if (m) ur.libBase = m.base;
+            }
+        }
+
+        NSString *rep = [ur diagnosticReport];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"UE4 链解析"
+                                 message:rep
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = rep;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
+}
+
 #pragma mark 模块定位
 
 /// 从「进程名」一路拿到「模块加载基址」—— UE4 对象图的起点。
@@ -384,8 +430,11 @@ extern char **environ;
                 // 存下来，供后续 UE4 读取用
                 [[NSUserDefaults standardUserDefaults] setObject:@(m.base) forKey:@"mf.game.libbase"];
                 [[NSUserDefaults standardUserDefaults] setObject:m.name forKey:@"mf.game.module"];
-                [[NSUserDefaults standardUserDefaults] setInteger:
-                    [MFModuleLocator pidForProcessName:pname] forKey:@"mf.game.pid"];
+                pid_t gpid = [MFModuleLocator pidForProcessName:pname];
+                [[NSUserDefaults standardUserDefaults] setInteger:gpid forKey:@"mf.game.pid"];
+                // ★ 直接接进 UE4 读取器 —— 不用再手动填
+                [MFUEReader shared].libBase = m.base;
+                NSLog(@"[MF][Module] 已把 libBase=0x%llx 交给 MFUEReader", m.base);
             } else {
                 [out appendFormat:@"✗ 定位失败：%@\n", err ?: @"未知"];
             }
