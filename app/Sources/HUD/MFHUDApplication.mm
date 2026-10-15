@@ -151,6 +151,13 @@ void MFDumpWindowAPI(void) {
 #pragma mark - HUD 引导
 
 int MFLaunchHUDRole(int argc, char *argv[]) {
+    static MFHUDAppDelegate *sDelegate = nil;
+    // Register before any UIKit/private initialization can block. The control
+    // queue arms a hard exit deadline before asking main to release windows.
+    [MFHUDControl watchForExitRequest:^{
+        if (sDelegate) [sDelegate shutdownForExitRequest];
+        else _exit(EXIT_SUCCESS);
+    }];
     MFHUDLogLine(@"---- HUD 引导开始（对齐 TrollSpeed / ch.xxtou.hudapp）----");
 
     /*
@@ -234,8 +241,6 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([MFHUDAppDelegate class]));
     }
 
-    static MFHUDAppDelegate *sDelegate = nil;   // ★ 进程级强引用，见 [M5.19]
-
     instantiate([MFHUDApplication class]);
     UIApplication *app = [UIApplication sharedApplication];
     MFHUDLogLine(@"   已实例化：%@", app ? NSStringFromClass(app.class) : @"★ nil");
@@ -244,23 +249,6 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
     sDelegate = [[MFHUDAppDelegate alloc] init];
     [app setDelegate:sDelegate];
     MFHUDLogLine(@"   delegate 已设并强引用保住：%@", (app.delegate == sDelegate) ? @"✓ 一致" : @"⚠️ 不一致");
-
-    /*
-     * ★ 退出通道必须在这里就装好 ★
-     *
-     * 控制台（mobile）杀不动这个 root 子进程，所以退出只能由 HUD 自己执行。
-     * 越早装越好：窗口还没建起来的时候用户也可能想取消，
-     * 那时候如果没有监听，就只能干等启动超时。
-     */
-    [MFHUDControl watchForExitRequest:^{
-        MFHUDAppDelegate *delegate = sDelegate;
-        if (delegate) {
-            [delegate shutdownForExitRequest];
-        } else {
-            MFHUDLogLine(@"退出请求到达时窗口尚未建立，直接结束进程（pid=%d）", getpid());
-            _exit(EXIT_SUCCESS);
-        }
-    }];
 
     /*
      * ⑦ _accessibilityInit —— TrollSpeed 有这一步

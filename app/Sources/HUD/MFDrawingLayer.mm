@@ -176,6 +176,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
     if (!dl) return;
 
+    const int initialVertices = dl->VtxBuffer.Size;
     const ImVec2 screen((float)size.width, (float)size.height);
 
     // ── 人/盒子 ──
@@ -202,8 +203,8 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     // ── 物资统计窗（可选）──
     if (st.showLootStats) [self drawStats:st loot:loot];
 
-    // 有实体或物资就保持满帧；这一帧什么都没画就降到低频。
-    [self noteDrawingActivity:(_entCount + _lootCount) > 0];
+    // Base activity on generated content after visibility/settings filters.
+    [self noteDrawingActivity:(dl->VtxBuffer.Size > initialVertices || st.showLootStats)];
 }
 
 #pragma mark - 人 / 盒子

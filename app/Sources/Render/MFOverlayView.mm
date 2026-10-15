@@ -4,19 +4,27 @@
 #import "MFOverlayView.h"
 #import "../HUD/MFHUDLog.h"
 #import <QuartzCore/CAMetalLayer.h>
+#include <cmath>
 
 /// 每帧上报的可交互矩形上限。菜单控件约 40 个，256 足够且不占内存。
 static const NSUInteger kMFOverlayMaxInteractiveRects = 256;
-/// 命中判定容差（点）：手指比鼠标粗，给控件外扩一点更好点。
-static const CGFloat kMFOverlayHitSlop = 6.0;
-/// nextDrawable 等待超过这个值就停一帧，别把主线程钉在等 GPU 上。
-static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
+// Reserve a credit before acquisition, then return it only on GPU completion
+// (or discard). With three layer drawables this leaves one for the compositor.
+static const long kMFOverlayFrameCredits = 2;
+
+static BOOL MFValidInteractiveRect(CGRect rect) {
+    return std::isfinite(rect.origin.x) && std::isfinite(rect.origin.y) &&
+        std::isfinite(rect.size.width) && std::isfinite(rect.size.height) &&
+        rect.size.width > 0 && rect.size.height > 0 &&
+        std::isfinite(CGRectGetMaxX(rect)) && std::isfinite(CGRectGetMaxY(rect));
+}
 
 @interface MFOverlayView ()
-/// 点是否落在「真正可交互」的区域（控件 / 标题拖动区 / 面板）
-- (BOOL)isInteractivePoint:(CGPoint)point;
 /// 按「是否刚交互过」切换满帧率与空闲帧率
 - (void)applyAdaptiveFrameRate;
+- (void)invalidateRenderingGeneration;
+- (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
+                 size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits;
 - (CGPoint)centerOfTouches:(NSSet<UITouch *> *)touches;
 - (void)sendPos:(UITouch *)t down:(BOOL)down;
 - (void)maybeRelease:(NSSet<UITouch *> *)touches;
@@ -34,6 +42,14 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
     BOOL _loggedMissingDrawable;
     unsigned _loggedDrawableLag;
 
+    // These flags/counters are owned by main. Only nextDrawable runs on the
+    // serial acquisition queue; it captures immutable size/generation values.
+    dispatch_queue_t _drawableQueue;
+    dispatch_semaphore_t _frameCredits;
+    BOOL _rendering;
+    BOOL _drawablePending;
+    uint64_t _renderGeneration;
+
     // ── 局部命中（穿透）──────────────────────────────────
     CGRect _interactiveRects[kMFOverlayMaxInteractiveRects];
     NSUInteger _interactiveRectCount;
@@ -42,7 +58,6 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 
     // ── 自适应帧率 ──────────────────────────────────────
     NSTimeInterval _activeUntil;
-    unsigned _drawableBackoff;
 }
 
 + (Class)layerClass {
@@ -63,6 +78,8 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
         _captureRect = CGRectNull;
         _headerDragRect = CGRectNull;
         _passthroughAll = NO;
+        _drawableQueue = dispatch_queue_create("org.baimifan.hud.drawable", DISPATCH_QUEUE_SERIAL);
+        _frameCredits = dispatch_semaphore_create(kMFOverlayFrameCredits);
 
         self.backgroundColor = [UIColor clearColor];
         self.opaque = NO;
@@ -79,7 +96,7 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
         ml.opaque = NO;
         ml.backgroundColor = [UIColor clearColor].CGColor;
         ml.allowsNextDrawableTimeout = YES;
-        // 三个 drawable + 不等待事务：把「等 GPU 回收纹理」的阻塞压到最小。
+        // nextDrawable can still block. It is called only on _drawableQueue.
         ml.maximumDrawableCount = 3;
         ml.presentsWithTransaction = NO;
         if (@available(iOS 16.0, *)) { /* drawableSize 在 layoutSubviews 里同步 */ }
@@ -92,9 +109,12 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat scale = self.window.screen.scale ?: UIScreen.mainScreen.scale ?: 2.0;
-    CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
-    if (px.width > 0 && px.height > 0) {
+    CGSize px = CGSizeMake(std::ceil(self.bounds.size.width * scale),
+                           std::ceil(self.bounds.size.height * scale));
+    if (std::isfinite(px.width) && std::isfinite(px.height) && px.width > 0 && px.height > 0 &&
+        !CGSizeEqualToSize(self.metalLayer.drawableSize, px)) {
         self.metalLayer.drawableSize = px;
+        [self invalidateRenderingGeneration];
     }
 }
 
@@ -111,6 +131,7 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 #pragma mark - 渲染循环
 
 - (BOOL)startRenderingWithError:(NSString **)err {
+    NSAssert(NSThread.isMainThread, @"Overlay rendering is owned by main");
     if (!_ready) {
         NSString *e = nil;
         if (![self.imgui setupWithError:&e]) {
@@ -123,6 +144,9 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
     // ImGui readiness and display-link liveness are separate. A view that has
     // left and rejoined its window must recreate the invalidated display link.
     if (_link) return YES;
+    [self invalidateRenderingGeneration];
+    [self.imgui resetFrameTime];
+    _rendering = YES;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
     _link.preferredFramesPerSecond = _preferredFPS;
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -134,8 +158,20 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 }
 
 - (void)stopRendering {
+    NSAssert(NSThread.isMainThread, @"Overlay rendering is owned by main");
+    _rendering = NO;
+    [self invalidateRenderingGeneration];
     [_link invalidate];
     _link = nil;
+}
+
+- (void)invalidateRenderingGeneration {
+    _renderGeneration++;
+    _firstFrameReported = NO;
+    _firstFramePending = NO;
+    _hasCompletedFrame = NO;
+    // Do not clear _drawablePending: the old driver's wait still occupies the
+    // one acquisition slot, even across stop/resize/restart.
 }
 
 - (void)reportFirstFrameError:(NSString *)error {
@@ -148,106 +184,138 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 }
 
 - (void)tick:(CADisplayLink *)link {
-    if (self.paused || !self.window) return;
+    NSAssert(NSThread.isMainThread, @"Overlay ticks are owned by main");
+    if (!_rendering || self.paused || !self.window || self.window.hidden || self.hidden) return;
     if (!_ready) return;
     if (self.bounds.size.width < 1 || self.bounds.size.height < 1) return;
 
     [self applyAdaptiveFrameRate];
 
-    // 上一次 nextDrawable 让我们等了很久 → 主动让出一帧。
-    // 这比「继续等」更好：主线程还有触摸解析和 ImGui 构建要做。
-    if (_drawableBackoff > 0) { _drawableBackoff--; return; }
-
     CAMetalLayer *ml = self.metalLayer;
-    if (ml.drawableSize.width < 1) [self layoutSubviews];
-
-    @autoreleasepool {
-        CFTimeInterval drawableStart = CACurrentMediaTime();
-        id<CAMetalDrawable> drawable = [ml nextDrawable];
-        CFTimeInterval drawableDelay = CACurrentMediaTime() - drawableStart;
-        if (drawableDelay > kMFOverlayDrawableBackoffThreshold) {
-            _drawableBackoff = 2;
-            if (_loggedDrawableLag++ < 8)
-                MFHUDLogLine(@"%@ nextDrawable 等待 %.0fms hidden=%d → 让出 2 帧抢回主线程",
-                    self.interactive ? @"菜单" : @"绘制", drawableDelay * 1000, self.window.hidden);
-        }
-        if (!drawable) {
-            if (!_loggedMissingDrawable) {
-                _loggedMissingDrawable = YES;
-                MFHUDLogLine(@"%@：nextDrawable 为 nil，等待窗口合成器（drawableSize=%@）",
-                             self.interactive ? @"菜单" : @"绘制", NSStringFromCGSize(ml.drawableSize));
+    [self layoutSubviews];
+    if (_drawablePending || dispatch_semaphore_wait(_frameCredits, DISPATCH_TIME_NOW) != 0) return;
+    _drawablePending = YES;
+    uint64_t generation = _renderGeneration;
+    CGSize size = self.bounds.size;
+    CGSize pixels = ml.drawableSize;
+    CGFloat scale = self.window.screen.scale ?: UIScreen.mainScreen.scale ?: 2.0;
+    dispatch_semaphore_t credits = _frameCredits;
+    __weak MFOverlayView *weakSelf = self;
+    dispatch_async(_drawableQueue, ^{
+        @autoreleasepool {
+            CFTimeInterval started = CACurrentMediaTime();
+            id<CAMetalDrawable> drawable = nil;
+            NSString *exceptionError = nil;
+            @try { drawable = [ml nextDrawable]; }
+            @catch (NSException *exception) {
+                exceptionError = [NSString stringWithFormat:@"Metal drawable 获取异常：%@", exception.reason];
             }
-            return;
+            CFTimeInterval delay = CACurrentMediaTime() - started;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MFOverlayView *owner = weakSelf;
+                if (!owner) { dispatch_semaphore_signal(credits); return; }
+                owner->_drawablePending = NO;
+                if (!owner->_rendering || generation != owner->_renderGeneration || owner.paused ||
+                    !owner.window || owner.window.hidden || owner.hidden ||
+                    !CGSizeEqualToSize(size, owner.bounds.size) ||
+                    !CGSizeEqualToSize(pixels, owner.metalLayer.drawableSize)) {
+                    dispatch_semaphore_signal(credits);
+                    return;
+                }
+                if (exceptionError) {
+                    dispatch_semaphore_signal(credits);
+                    [owner reportFirstFrameError:exceptionError];
+                    [owner stopRendering];
+                    return;
+                }
+                if (delay > 0.06 && owner->_loggedDrawableLag++ < 8)
+                    MFHUDLogLine(@"%@ drawable 获取 %.0fms（独立队列，主线程未等待）",
+                        owner.interactive ? @"菜单" : @"绘制", delay * 1000);
+                if (!drawable) {
+                    dispatch_semaphore_signal(credits);
+                    if (!owner->_loggedMissingDrawable) {
+                        owner->_loggedMissingDrawable = YES;
+                        MFHUDLogLine(@"%@：nextDrawable 为 nil，等待窗口合成器（drawableSize=%@）",
+                            owner.interactive ? @"菜单" : @"绘制", NSStringFromCGSize(pixels));
+                    }
+                    return;
+                }
+                if (drawable.texture.width != (NSUInteger)pixels.width ||
+                    drawable.texture.height != (NSUInteger)pixels.height) {
+                    dispatch_semaphore_signal(credits);
+                    return;
+                }
+                [owner renderDrawable:drawable generation:generation size:size scale:scale credits:credits];
+            });
         }
+    });
+}
 
-        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = drawable.texture;
-        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-        rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);  // ★ 透明
-        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        id<MTLCommandBuffer> cb = [self.imgui.queue commandBuffer];
-        if (!cb) {
-            [self reportFirstFrameError:@"Metal commandBuffer 创建失败"];
-            [self stopRendering];
-            return;
-        }
-
-        CGFloat scale = self.window.screen.scale ?: UIScreen.mainScreen.scale ?: 2.0;
-        [self.imgui beginFrameWithSize:self.bounds.size scale:scale descriptor:rp];
-        [self.imgui buildUI:^{
-            if (self.delegate) [self.delegate overlayBuildUI:self.imgui overlay:self];
-        }];
-
-        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-        if (!enc) {
-            [self reportFirstFrameError:@"Metal renderCommandEncoder 创建失败"];
-            [self stopRendering];
-            return;
-        }
-        [self.imgui endFrameWithCommandBuffer:cb encoder:enc];
-        [enc endEncoding];
-        [cb presentDrawable:drawable];
-        if (!_firstFrameReported && !_firstFramePending) {
-            _firstFramePending = YES;
-            __weak MFOverlayView *weakSelf = self;
-            [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-                NSString *error = completed.status == MTLCommandBufferStatusCompleted ? nil :
-                    (completed.error.localizedDescription ?: @"Metal 首帧执行失败");
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [weakSelf reportFirstFrameError:error];
-                });
-            }];
-        }
-        [cb commit];
+- (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
+                 size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits {
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = drawable.texture;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [self.imgui.queue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [cb renderCommandEncoderWithDescriptor:rp];
+    if (!cb || !encoder) {
+        dispatch_semaphore_signal(credits);
+        [self reportFirstFrameError:cb ? @"Metal renderCommandEncoder 创建失败" : @"Metal commandBuffer 创建失败"];
+        [self stopRendering];
+        return;
     }
+    [self.imgui beginFrameWithSize:size scale:scale descriptor:rp];
+    [self.imgui buildUI:^{
+        if (self.delegate) [self.delegate overlayBuildUI:self.imgui overlay:self];
+    }];
+    // UI actions may synchronously collapse/resize or stop the view. End the
+    // CPU frame without presenting the drawable from the previous geometry.
+    if (!_rendering || generation != _renderGeneration || self.paused ||
+        !CGSizeEqualToSize(size, self.bounds.size)) {
+        [self.imgui discardFrame];
+        [encoder endEncoding];
+        dispatch_semaphore_signal(credits);
+        return;
+    }
+    [self.imgui endFrameWithCommandBuffer:cb encoder:encoder];
+    [encoder endEncoding];
+    [cb presentDrawable:drawable];
+    BOOL reportFirstFrame = !_firstFrameReported && !_firstFramePending;
+    if (reportFirstFrame) _firstFramePending = YES;
+    __weak MFOverlayView *weakSelf = self;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        dispatch_semaphore_signal(credits);
+        if (!reportFirstFrame) return;
+        NSString *error = completed.status == MTLCommandBufferStatusCompleted ? nil :
+            (completed.error.localizedDescription ?: @"Metal 首帧执行失败");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MFOverlayView *owner = weakSelf;
+            if (!owner || !owner->_rendering || generation != owner->_renderGeneration) return;
+            owner->_firstFramePending = NO;
+            [owner reportFirstFrameError:error];
+            if (error) [owner stopRendering];
+        });
+    }];
+    [cb commit];
 }
 
 #pragma mark - 触摸：主触点策略（调研 §2.3）
 
-/*
- * ★★ 局部命中（穿透）★★
- *
- * 之前：pointInside 只看 captureRect —— 整个 348×520 面板矩形都吃掉触摸，
- *       面板透明的地方点下去也是菜单接住，下层 App（游戏）收不到。
- *
- * 现在：菜单每帧把「真正可交互的控件矩形」上报进来，只有落在这些矩形
- *       （或标题拖动区）上的点才算命中；其余点 hitTest 返回 nil，
- *       窗口服务器把它交给下层窗口。
- *
- * 为什么能这样做：HUD 的 ImGui 输入来自 BKSHIDEventRegisterEventCallback
- * 全局事件流，不依赖 UIKit 的事件分发 —— 所以命中范围缩到控件上
- * 不会让菜单自己点不了。
- */
-- (BOOL)isInteractivePoint:(CGPoint)point {
+// This is local geometry, shared by UIKit and HID. Cross-process delivery is
+// still a window-server behavior; a local nil hit alone cannot prove it.
+- (BOOL)acceptsInteractionAtPoint:(CGPoint)point {
+    if (!self.interactive || self.passthroughAll || !std::isfinite(point.x) ||
+        !std::isfinite(point.y) || !MFValidInteractiveRect(self.bounds)) return NO;
     CGRect capture = self.captureRect;
-    if (CGRectIsNull(capture) || CGRectIsEmpty(capture)) return NO;
+    if (!MFValidInteractiveRect(capture)) return NO;
+    capture = CGRectIntersection(capture, self.bounds);
     if (!CGRectContainsPoint(capture, point)) return NO;
 
-    // 标题拖动区永远可交互：那是窗口唯一的手柄。
-    CGRect drag = CGRectStandardize(self.headerDragRect);
-    if (!CGRectIsNull(drag) && !CGRectIsEmpty(drag) &&
-        CGRectContainsPoint(CGRectInset(drag, -kMFOverlayHitSlop, -kMFOverlayHitSlop), point)) {
+    CGRect drag = self.headerDragRect;
+    if (MFValidInteractiveRect(drag) &&
+        CGRectContainsPoint(CGRectIntersection(drag, capture), point)) {
         return YES;
     }
 
@@ -255,16 +323,14 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
     if (!_rectsReportedOnce) return YES;
 
     for (NSUInteger i = 0; i < _interactiveRectCount; i++) {
-        CGRect r = CGRectInset(_interactiveRects[i], -kMFOverlayHitSlop, -kMFOverlayHitSlop);
+        CGRect r = CGRectIntersection(_interactiveRects[i], capture);
         if (CGRectContainsPoint(r, point)) return YES;
     }
     return NO;
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    if (!self.interactive) return NO;                    // 绘制层完全穿透
-    if (self.passthroughAll) return NO;                  // 整窗穿透模式
-    return [self isInteractivePoint:point];
+    return [self acceptsInteractionAtPoint:point];
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -287,8 +353,9 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 
 - (void)addInteractiveRect:(CGRect)rect {
     if (_interactiveRectCount >= kMFOverlayMaxInteractiveRects) return;
-    rect = CGRectStandardize(rect);
-    if (rect.size.width < 1.0 || rect.size.height < 1.0) return;   // 空/负尺寸直接丢
+    if (!MFValidInteractiveRect(rect) || !MFValidInteractiveRect(self.bounds)) return;
+    rect = CGRectIntersection(rect, self.bounds);
+    if (!MFValidInteractiveRect(rect)) return;
     _interactiveRects[_interactiveRectCount++] = rect;
 }
 
@@ -301,6 +368,7 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 - (BOOL)hasInteractiveRects { return _rectsReportedOnce; }
 
 - (void)setCaptureRect:(CGRect)rect {
+    if (!MFValidInteractiveRect(rect)) rect = CGRectNull;
     // 每帧都写同一个矩形时不再回调 —— 原来每帧都会去动 window.hidden。
     if (_captureRectInitialized && CGRectEqualToRect(_captureRect, rect)) return;
     _captureRectInitialized = YES;
@@ -421,7 +489,10 @@ static const CFTimeInterval kMFOverlayDrawableBackoffThreshold = 0.06;
 }
 
 - (void)setPaused:(BOOL)paused {
+    if (_paused == paused) return;
     _paused = paused;
+    [self invalidateRenderingGeneration];
+    [self.imgui resetFrameTime];
     if (!paused) {
         [self.imgui addFocus:YES];
         [self requestRedraw];

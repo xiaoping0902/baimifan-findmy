@@ -54,14 +54,43 @@ static void TestProductionMenuLayout(void) {
     ImGui::DestroyContext();
 }
 
+// Capture the actual Metal-rendered production menu after the CPU layout
+// checks, so the release's header/footer and Chinese labels can be inspected.
+static UIWindow *sPreviewWindow;
+static MFOverlayView *sPreviewOverlay;
+static MFMenuUI *sPreviewMenu;
+static void PreviewProductionMenu(void) {
+    sPreviewWindow = [[UIWindow alloc] initWithFrame:CGRectMake(16, 90, 348, 520)];
+    sPreviewWindow.rootViewController = [UIViewController new];
+    sPreviewWindow.rootViewController.view.frame = sPreviewWindow.bounds;
+    sPreviewOverlay = [[MFOverlayView alloc] initWithFrame:sPreviewWindow.bounds interactive:YES];
+    sPreviewOverlay.automaticallyStartsRendering = NO;
+    sPreviewMenu = [MFMenuUI new]; sPreviewMenu.overlay = sPreviewOverlay;
+    sPreviewOverlay.delegate = sPreviewMenu;
+    [sPreviewWindow.rootViewController.view addSubview:sPreviewOverlay];
+    sPreviewWindow.hidden = NO;
+    [sPreviewWindow makeKeyAndVisible];
+    [sPreviewWindow layoutIfNeeded]; [sPreviewOverlay layoutIfNeeded];
+    sPreviewOverlay.firstFrameCompletion = ^(NSString *error) {
+        CHECK(error == nil, "the production menu must complete a real GPU frame");
+        puts("READY: menu screenshot"); fflush(stdout);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [sPreviewOverlay stopRendering]; sPreviewWindow.hidden = YES;
+            puts("PASS: production menu layout, clipping, collapse and Metal preview"); fflush(stdout);
+            exit(0);
+        });
+    };
+    NSString *error = nil;
+    CHECK([sPreviewOverlay startRenderingWithError:&error], "the production menu renderer must start");
+}
+
 @interface MenuRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation MenuRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
         TestProductionMenuLayout();
-        puts("PASS: production menu layout, clipping and collapse");
-        exit(0);
+        PreviewProductionMenu();
     });
     return YES;
 }

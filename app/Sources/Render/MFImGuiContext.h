@@ -35,6 +35,11 @@ NS_ASSUME_NONNULL_BEGIN
                      scale:(CGFloat)scale
                 descriptor:(MTLRenderPassDescriptor *)descriptor;
 
+/// 重启/恢复渲染时重置计时基准；连续帧使用真实单调时间间隔。
+- (void)resetFrameTime;
+/// 构建期间窗口停止或改尺寸时结束 CPU 帧，不提交旧内容。
+- (void)discardFrame;
+
 /// 每帧：构建 UI（在 begin 与 end 之间调用）
 - (void)buildUI:(void (^)(void))block;
 

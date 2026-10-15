@@ -72,9 +72,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t entityArrayBase;  // 实体数组起始（实体路）
 @property (nonatomic, assign) uint64_t lootArrayBase;    // 物资数组起始
 
-/// ★ 审查修正 F1：这三个基址原本全工程 0 个写点 —— 读取链永远不可达。
-/// 现在提供持久化：存 NSUserDefaults，启动时自动读回。
-/// 真机校准时在「进程列表 → 基址校准」里填十六进制值。
+/// 保存的是当前运行实例的绝对地址，不能跨游戏重启复用。
+/// 使用独立的版本化 NSUserDefaults 快照；仅在目标 task 的 PID、完整路径、
+/// 启动时间都能确认且一致时恢复，身份不足/不匹配/格式错误时清零。
+/// 这两个方法不会自动定位或校准地址，也不使用 UE4 的 mf.game.libbase。
+/// 当前尚无基址校准 UI；目标端口切换也会先清空旧地址。
 - (void)loadBasesFromDefaults;
 - (void)saveBasesToDefaults;
 /// 校准状态摘要（给自检报告用）

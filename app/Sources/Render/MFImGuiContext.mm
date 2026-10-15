@@ -7,10 +7,12 @@
 #include "imgui_internal.h"           // ImLerp 等
 #include "MFImGuiInput.h"
 #include "backends/imgui_impl_metal.h"
+#include <cmath>
 
 @implementation MFImGuiContext {
     ImGuiContext *_ctx;
     BOOL _initialized;
+    CFTimeInterval _previousFrameTime;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device {
@@ -61,6 +63,7 @@
     }
 
     _initialized = YES;
+    [self resetFrameTime];
     NSLog(@"[MF][ImGui] 上下文就绪 (device=%@)", _device.name);
     return YES;
 }
@@ -72,6 +75,7 @@
     ImGui::DestroyContext(_ctx);
     _ctx = NULL;
     _initialized = NO;
+    [self resetFrameTime];
 }
 
 #pragma mark - 皮肤
@@ -188,11 +192,26 @@
 
 #pragma mark - 每帧
 
+- (void)resetFrameTime {
+    _previousFrameTime = 0;
+}
+
+- (void)discardFrame {
+    if (!_initialized) return;
+    ImGui::SetCurrentContext(_ctx);
+    if (_ctx->WithinFrameScope) ImGui::EndFrame();
+}
+
 - (void)beginFrameWithSize:(CGSize)size
                      scale:(CGFloat)scale
                 descriptor:(MTLRenderPassDescriptor *)descriptor {
     ImGui::SetCurrentContext(_ctx);
     ImGuiIO &io = ImGui::GetIO();
+    CFTimeInterval now = CACurrentMediaTime();
+    CFTimeInterval elapsed = now - _previousFrameTime;
+    io.DeltaTime = (_previousFrameTime > 0 && elapsed > 0 && std::isfinite(elapsed))
+        ? (float)elapsed : 1.0f / 60.0f;
+    _previousFrameTime = now;
     io.DisplaySize = ImVec2((float)size.width, (float)size.height);
     io.DisplayFramebufferScale = ImVec2((float)scale, (float)scale);
 

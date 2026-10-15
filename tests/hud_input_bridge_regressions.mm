@@ -242,36 +242,19 @@ static void TestNewFingerBeginCancelsAnExistingOwner(void) {
     w.hidden = YES;
 }
 
-/*
- * ★ M5.66 真机现场（hud.log 03:27:47，pid 328）★
- *
- *     03:27:47.084 down=1        rawPaths=1 rawID=3 rawIndex=6 point={821, 498.5}
- *     03:27:47.117 rangeLift=1   rawPaths=1 rawID=2 rawIndex=6 point={821, 498.5}
- *     03:27:47.119 触摸路由=menu phase=2 id=2 handled=0     ← 松手被拒绝
- *
- * M5.65 的假设是「rawID 能稳定代表一次手势」，这条样本推翻了它。
- * 新的所有权规则：原始 ID 相同，
- *   **或者** 位置随时间连续（同一根手指不会瞬移）→ 视为同一次手势。
- * 这个用例在旧实现下必然 FAIL（它只认原始 ID），是这次修复的 RED 用例。
- */
-static void TestDeviceRawIdentityChangeReleasesWithContinuity(void) {
+// Historical logs read 3 -> 2 from hardcoded private fields. That does not
+// prove contact identity changes. The production bridge must validate the
+// runtime fields using a factory, then keep actual contact ownership strict.
+static void TestForeignLiftAtSamePointCannotRelease(void) {
     UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
-    const CGPoint kDevicePoint = CGPointMake(80, 100);
-    Send(b, w, p, 3, 3, 0, kDevicePoint);
-    CHECK(p.imgui.presses == 1, "the device tap must reach ImGui as a press");
-    CHECK(p.redrawRequests > 0,
-          "an active touch must keep the overlay at its full frame rate");
-    Send(b, w, p, 2, 2, 2, kDevicePoint);
-    CHECK(p.imgui.releases == 1,
-          "the device's raw identity changes 3 -> 2 inside one tap; it must still release");
-    // 松手之后再来的 range-out 不能变成第二次释放
-    Send(b, w, p, 2, 2, 3, kDevicePoint);
-    CHECK(p.imgui.releases == 1, "range-out after lift must not release twice");
-    // 下一次点击必须重新走完整的按下/释放
-    Send(b, w, p, 4, 3, 0, CGPointMake(120, 140));
-    Send(b, w, p, 5, 2, 2, CGPointMake(120, 140));
-    CHECK(p.imgui.presses == 2 && p.imgui.releases == 2,
-          "the next tap gets its own complete press and release");
+    Send(b, w, p, 3, 3, 0, CGPointMake(80, 100));
+    CHECK(p.imgui.presses == 1 && p.redrawRequests > 0,
+          "a known factory identity must reach ImGui and request redraw");
+    Send(b, w, p, 2, 2, 2, CGPointMake(80, 100));
+    CHECK(p.imgui.releases == 0,
+          "a different validated contact at the same point cannot release the owner");
+    Send(b, w, p, 3, 2, 3, CGPointMake(80, 100));
+    CHECK(p.imgui.releases == 1, "the original contact must release despite AX identity changing");
     w.hidden = YES;
 }
 
@@ -357,7 +340,7 @@ static void TestBallTapAndDragHaveDifferentOutcomes(void) {
         TestMetadataWrappersAndStandaloneFinger();
         TestMetadataDoesNotEndGestureButInvalidContactCancels();
         TestNewFingerBeginCancelsAnExistingOwner();
-        TestDeviceRawIdentityChangeReleasesWithContinuity();
+        TestForeignLiftAtSamePointCannotRelease();
         TestContinuityDoesNotTransferOwnershipAcrossTheScreen();
         TestNearbySecondFingerCannotBorrowPrimaryIdentity();
         TestRawIdentityCannotCollideWithInternalToken();

@@ -25,10 +25,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 面板「收起成小圆球」状态。收起后只有球体那一小块参与命中，
 /// 其余位置照常穿透；点球体恢复面板。
 + (BOOL)collapsed;
++ (void)setCollapseChangeHandler:(void (^_Nullable)(BOOL collapsed))handler;
 + (void)setCollapsed:(BOOL)collapsed;
 
-/// 「整面板穿透」：连控件也不吃触摸，菜单变成纯显示层。
-/// 注意菜单自己仍然可操作 —— HUD 的输入走 BKS 全局事件回调，不依赖窗口命中。
+/// 兼容旧调用：YES 收起实际窗口，NO 展开菜单。
 + (BOOL)fullPassthrough;
 + (void)setFullPassthrough:(BOOL)passthrough;
 

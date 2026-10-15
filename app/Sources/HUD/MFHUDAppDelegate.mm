@@ -7,6 +7,7 @@
 #import "MFHUDStartupStatus.h"
 #import "MFHUDInputBridge.h"
 #import "MFHUDControl.h"
+#import <mach/mach.h>
 #include <unistd.h>
 #include <stdlib.h>
 #import "MFHUDLog.h"
@@ -16,11 +17,32 @@
 #import "../Kernel/MFKernel.h"
 #import "../Game/MFGameReader.h"
 #import "../Game/MFSettings.h"
+#import "../Game/Offsets.h"
+#import "../Kernel/MFModuleLocator.h"
+#import "../Game/MFUEReader.h"
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 #import "../Read/MFReadBackend.h"
 #import <objc/message.h>
 #include <string.h>
 #include <math.h>
 #include <dlfcn.h>
+
+// Validate the process instance before using a persisted PID or absolute base.
+static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName) {
+    if (pid <= 0 || !expectedName.length) return nil;
+    char path[4096] = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return nil;
+    NSString *executable = [NSString stringWithUTF8String:path].stringByResolvingSymlinksInPath;
+    if (![executable.lastPathComponent isEqual:expectedName]) return nil;
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    struct kinfo_proc info = {}; size_t length = sizeof(info);
+    if (sysctl(mib, 4, &info, &length, NULL, 0) != 0 || length < sizeof(info) ||
+        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0) return nil;
+    return [NSString stringWithFormat:@"%d|%@|%lld|%d", pid, executable,
+        (long long)info.kp_proc.p_starttime.tv_sec, (int)info.kp_proc.p_starttime.tv_usec];
+}
 
 #pragma mark - HUD 应用代理
 
@@ -51,6 +73,9 @@
 @property (nonatomic, strong) id<MFHUDOrientationObserver> orientationObserver;
 @property (nonatomic) UIInterfaceOrientation hudOrientation;
 @property (nonatomic) BOOL exitRequested;
+@property (nonatomic, strong) NSTimer *targetTimer;
+@property (nonatomic) pid_t boundTargetPID;
+@property (nonatomic, copy) NSString *boundTargetIdentity;
 @end
 
 @implementation MFHUDAppDelegate
@@ -69,55 +94,16 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     NSLog(@"[MF][HUD] didFinish，开始建立双窗口");
     MFHUDLogLine(@"==== HUD didFinishLaunching 进来了 ====");
 
-    /*
-     * ★ 退出通道（M5.66）★
-     *
-     * 控制台是 mobile(501)，HUD 子进程是 root(uid 0) ——
-     * mobile 给 root 发 SIGTERM 会被内核直接拒绝（EPERM），
-     * 这就是「控制台点结束悬浮窗一直失败、菜单里也没退出入口」的根因。
-     *
-     * 现在改成「HUD 收到请求后自己结束自己」：
-     *   ① Darwin 通知 com.mf.findmy.hud.exit
-     *   ② PID 文件看门狗（控制台删掉文件 = 下令退出）
-     * 两条都不需要跨 uid 权限，也不依赖信号。
-     *
-     * 监听本身在引导阶段（MFLaunchHUDRole）就装好了 —— 那里比这里早，
-     * 窗口还没建起来的时候用户也可能想取消。这里只记一条状态。
-     */
-    MFHUDLogLine(@"退出通道：%@ + PID 文件看门狗，已由引导阶段安装", MFHUDExitNotificationName);
-
-    /*
-     * ★★ 审查修正（P0-2）★★
-     *
-     * 原来：控制台进程在「进程列表」里点一下，把 task port 写进【它自己】的
-     *       MFGameReader；而绘制跑在【这个】posix_spawn 出来的 HUD 进程里。
-     *       端口名字只在创建它的 IPC space 里有效 —— HUD 进程根本用不了那个号，
-     *       于是门条件永远不成立，绘制永远是空的。
-     *
-     * 现在：控制台把「目标 pid」落盘（NSUserDefaults 跨进程同容器可见），
-     *       HUD 进程启动时读回来，用 task_for_pid 为【自己】取一份端口。
-     */
-    {
-        NSInteger targetPid = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.target.pid"];
-        NSString *targetName = [[NSUserDefaults standardUserDefaults] stringForKey:@"mf.target.name"];
-        MFHUDLogLine(@"目标进程：pid=%ld name=%@", (long)targetPid, targetName ?: @"(未绑定)");
-
-        if (targetPid > 0) {
-            NSString *perr = nil;
-            uint32_t port = [MFKernel acquireTaskPortForPid:(int)targetPid error:&perr];
-            if (port != MACH_PORT_NULL) {
-                [MFGameReader shared].targetTaskPort = port;
-                [MFReadBackend shared].modeFlag = YES;
-                [[MFGameReader shared] loadBasesFromDefaults];   // 基址也一起读回来
-                MFHUDLogLine(@"✅ HUD 侧已取得目标端口 0x%x，读取链门条件=%d",
-                             port, [MFReadBackend shared].gateOpen);
-            } else {
-                MFHUDLogLine(@"❌ HUD 侧取端口失败：%@", perr ?: @"?");
-            }
-        } else {
-            MFHUDLogLine(@"⚠️ 还没有绑定目标进程 —— 先回控制台在「进程列表」点一个进程");
-        }
-    }
+    // The session listener is installed before UIKit. Cancellation can arrive
+    // before this delegate, so never start building a window after a stop.
+    if ([MFHUDControl exitRequested]) { [self shutdownForExitRequest]; return YES; }
+    MFHUDLogLine(@"退出通道：独立控制队列 + 会话退出请求，已由引导阶段安装");
+    [self refreshTargetBinding];
+    __weak MFHUDAppDelegate *weakTargetOwner = self;
+    self.targetTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+        [weakTargetOwner refreshTargetBinding];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.targetTimer forMode:NSRunLoopCommonModes];
 
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
     // [M5.22] 层级对齐 TrollSpeed 的 10000010.0（原来 1020，差了四个数量级）
@@ -218,19 +204,25 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     __weak MFHUDAppDelegate *weakSelfForInput = self;
     menuView.captureRectDidChange = ^(CGRect rect) {
         MFHUDAppDelegate *owner = weakSelfForInput;
+        if (!owner || [owner isStopping]) return;
         BOOL empty = CGRectIsNull(rect) || CGRectIsEmpty(rect);
         owner.hudMenuWindow.hidden = empty;
-        if (empty) {
-            [owner.inputBridge cancelAll];
-        } else {
-            [owner.menuOverlay requestRedraw];   // 重新出现时立刻画一帧
-        }
+        if (empty) [owner.inputBridge cancelAll];
     };
+    [MFMenuUI setCollapseChangeHandler:^(BOOL collapsed) {
+        // Resize only after the current ImGui frame has ended.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MFHUDAppDelegate *owner = weakSelfForInput;
+            if (!owner || [owner isStopping]) return;
+            [owner resizeMenuForOrientation:owner.hudOrientation initial:NO];
+        });
+    }];
     [self startObservingOrientation];
 
     // Let UIKit finish initial window layout before reading its native context.
     // Keep rendering stopped until both layer trees have been registered.
     dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isStopping]) return;
         @try {
             [self.hudMenuWindow layoutIfNeeded];
             [self.drawingWindow layoutIfNeeded];
@@ -293,7 +285,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             }
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
-                if (![self.startupReport[@"state"] isEqual:@"ready"] &&
+                if (![self isStopping] && ![self.startupReport[@"state"] isEqual:@"ready"] &&
                     ![self.startupReport[@"state"] isEqual:@"failed"]) {
                     [self failStartup:[NSString stringWithFormat:
                         @"首帧等待超时：菜单=%@，绘制=%@。请查看 HUD 日志中的 drawable/Metal 记录。",
@@ -355,7 +347,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             orientation = UIInterfaceOrientationPortrait;
             break;
     }
-    if (self.hudOrientation == orientation) return;
+    if ([self isStopping] || self.hudOrientation == orientation) return;
+    BOOL initial = self.hudOrientation == UIInterfaceOrientationUnknown;
     [self.inputBridge cancelAll];
     self.hudOrientation = orientation;
     CGFloat angle = orientation == UIInterfaceOrientationPortraitUpsideDown ? M_PI :
@@ -364,43 +357,123 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     CGRect fixed = UIScreen.mainScreen.fixedCoordinateSpace.bounds;
     BOOL landscape = UIInterfaceOrientationIsLandscape(orientation);
     CGSize logicalScreen = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
-    CGSize panel = CGSizeMake(348, 520);
-    CGSize physicalPanel = landscape ? CGSizeMake(panel.height, panel.width) : panel;
-    // Position (24,90) in the displayed orientation, then rotate into fixed space.
-    CGFloat dx = 24 + panel.width / 2 - logicalScreen.width / 2;
-    CGFloat dy = 90 + panel.height / 2 - logicalScreen.height / 2;
-    CGPoint center = CGPointMake(CGRectGetMidX(fixed) + cos(angle)*dx - sin(angle)*dy,
-                                 CGRectGetMidY(fixed) + sin(angle)*dx + cos(angle)*dy);
-    UIWindow *menuWindow = self.hudMenuWindow;
-    menuWindow.bounds = (CGRect){CGPointZero, physicalPanel};
-    menuWindow.center = center;
-    menuWindow.rootViewController.view.frame = menuWindow.bounds;
-    // Only the content rotates. Setting a transformed UIView's frame is undefined.
-    self.menuContent.bounds = (CGRect){CGPointZero, panel};
-    self.menuContent.center = CGPointMake(physicalPanel.width / 2, physicalPanel.height / 2);
-    self.menuContent.transform = CGAffineTransformMakeRotation(angle);
-    self.menuOverlay.frame = self.menuContent.bounds;
+    [self resizeMenuForOrientation:orientation initial:initial];
     self.drawingContent.bounds = (CGRect){CGPointZero, logicalScreen};
     self.drawingContent.center = CGPointMake(fixed.size.width / 2, fixed.size.height / 2);
     self.drawingContent.transform = CGAffineTransformMakeRotation(angle);
     self.drawingOverlay.frame = self.drawingContent.bounds;
-    [menuWindow layoutIfNeeded];
+    [self.hudMenuWindow layoutIfNeeded];
     [self.menuOverlay layoutIfNeeded];
     [self.drawingOverlay layoutIfNeeded];
     [CATransaction flush];
     MFHUDLogLine(@"HUD 方向=%ld menu frame=%@ content=%@ drawing=%@",
-        (long)orientation, NSStringFromCGRect(menuWindow.frame),
+        (long)orientation, NSStringFromCGRect(self.hudMenuWindow.frame),
         NSStringFromCGRect(self.menuOverlay.bounds), NSStringFromCGRect(self.drawingOverlay.bounds));
     // Never leave a stale registered context silently owning an invisible input surface.
-    if ((self.menuHost && [self nativeContextIDForWindow:menuWindow] != self.menuHost.contextID) ||
+    if ((self.menuHost && [self nativeContextIDForWindow:self.hudMenuWindow] != self.menuHost.contextID) ||
         (self.drawingHost && [self nativeContextIDForWindow:self.drawingWindow] != self.drawingHost.contextID))
         [self failStartup:@"旋转后窗口 context 已变化，悬浮窗已退出，请重新启动悬浮窗。"];
 }
 
-- (void)dealloc { [self.orientationObserver invalidate]; }
+- (void)refreshTargetBinding {
+    if ([self isStopping]) return;
+    MFGameReader *reader = [MFGameReader shared];
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *expected = [MFOffsets shared].current.processName;
+    pid_t pid = (pid_t)[defaults integerForKey:@"mf.target.pid"];
+    NSString *identity = MFTargetIdentity(pid, expected);
+    if (!identity) {
+        pid = [MFModuleLocator pidForProcessName:expected];
+        identity = MFTargetIdentity(pid, expected);
+    }
+    if (identity && [identity isEqual:self.boundTargetIdentity] && reader.targetTaskPort != MACH_PORT_NULL) return;
+    if (self.boundTargetIdentity || reader.targetTaskPort != MACH_PORT_NULL) {
+        mach_port_t oldPort = reader.targetTaskPort;
+        reader.targetTaskPort = MACH_PORT_NULL;
+        reader.rootObjectBase = reader.entityArrayBase = reader.lootArrayBase = 0;
+        [MFReadBackend shared].modeFlag = NO;
+        if (oldPort != MACH_PORT_NULL && oldPort != mach_task_self()) mach_port_deallocate(mach_task_self(), oldPort);
+        [MFUEReader shared].libBase = 0;
+        for (NSString *key in @[@"mf.game.libbase", @"mf.game.module", @"mf.game.pid"])
+            [defaults removeObjectForKey:key];
+        self.boundTargetIdentity = nil; self.boundTargetPID = 0;
+        MFHUDLogLine(@"目标实例变化/退出：已释放旧端口并清除绝对基址");
+    }
+    if (!identity) return;
+    NSString *error = nil;
+    mach_port_t port = [MFKernel acquireTaskPortForPid:pid error:&error];
+    if (port == MACH_PORT_NULL) return;
+    // Close the PID-reuse race between the name check and port acquisition.
+    int portPID = 0;
+    if (pid_for_task(port, &portPID) != KERN_SUCCESS || portPID != pid ||
+        ![identity isEqual:MFTargetIdentity(pid, expected)]) {
+        mach_port_deallocate(mach_task_self(), port); return;
+    }
+    reader.targetTaskPort = port;
+    [reader loadBasesFromDefaults];
+    self.boundTargetPID = pid; self.boundTargetIdentity = identity;
+    [defaults setInteger:pid forKey:@"mf.target.pid"];
+    [defaults setObject:expected forKey:@"mf.target.name"];
+    MFHUDLogLine(@"HUD 绑定已核验：pid=%d %@", pid, reader.calibrationSummary);
+}
+
+- (BOOL)isStopping {
+    NSString *state = self.startupReport[@"state"];
+    return self.exitRequested || [MFHUDControl exitRequested] ||
+        [state isEqual:@"failed"] || [state isEqual:@"stopping"] || [state isEqual:@"stopped"];
+}
+
+- (void)resizeMenuForOrientation:(UIInterfaceOrientation)orientation initial:(BOOL)initial {
+    if ([self isStopping]) return;
+    [self.inputBridge cancelAll];
+    UIWindow *window = self.hudMenuWindow;
+    CGRect fixed = window.screen.fixedCoordinateSpace.bounds;
+    BOOL landscape = UIInterfaceOrientationIsLandscape(orientation);
+    CGFloat angle = orientation == UIInterfaceOrientationPortraitUpsideDown ? M_PI :
+        (orientation == UIInterfaceOrientationLandscapeLeft ? -M_PI_2 :
+         (orientation == UIInterfaceOrientationLandscapeRight ? M_PI_2 : 0));
+    CGSize panel = [MFMenuUI collapsed] ? CGSizeMake(56, 56) : CGSizeMake(348, 520);
+    CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
+    CGPoint center = window.center;
+    if (initial) {
+        CGSize logical = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
+        CGFloat dx = 24 + panel.width / 2 - logical.width / 2;
+        CGFloat dy = 90 + panel.height / 2 - logical.height / 2;
+        center = CGPointMake(CGRectGetMidX(fixed) + cos(angle)*dx - sin(angle)*dy,
+                             CGRectGetMidY(fixed) + sin(angle)*dx + cos(angle)*dy);
+    } else if (CGAffineTransformEqualToTransform(self.menuContent.transform,
+                                                CGAffineTransformMakeRotation(angle))) {
+        CGPoint anchor = [self.menuContent convertPoint:CGPointZero
+                                      toCoordinateSpace:window.screen.fixedCoordinateSpace];
+        center = CGPointMake(anchor.x + cos(angle)*panel.width/2 - sin(angle)*panel.height/2,
+                             anchor.y + sin(angle)*panel.width/2 + cos(angle)*panel.height/2);
+    }
+    center.x = MIN(CGRectGetMaxX(fixed)-physical.width/2, MAX(physical.width/2, center.x));
+    center.y = MIN(CGRectGetMaxY(fixed)-physical.height/2, MAX(physical.height/2, center.y));
+    window.bounds = (CGRect){CGPointZero, physical};
+    window.center = center;
+    window.rootViewController.view.frame = window.bounds;
+    // Set bounds/center/transform separately; frame is undefined for a rotated view.
+    self.menuContent.bounds = (CGRect){CGPointZero, panel};
+    self.menuContent.center = CGPointMake(physical.width/2, physical.height/2);
+    self.menuContent.transform = CGAffineTransformMakeRotation(angle);
+    self.menuOverlay.frame = self.menuContent.bounds;
+    [window layoutIfNeeded]; [self.menuOverlay layoutIfNeeded];
+    [self.menuOverlay requestRedraw];
+    [CATransaction flush];
+    MFHUDLogLine(@"菜单原生窗口尺寸=%@ collapsed=%d", NSStringFromCGSize(window.bounds.size), [MFMenuUI collapsed]);
+    if (self.menuHost && [self nativeContextIDForWindow:window] != self.menuHost.contextID)
+        [self failStartup:@"调整菜单尺寸后 context 已变化，已停止悬浮窗，请重新启动。"];
+}
+
+- (void)dealloc { [self.orientationObserver invalidate]; [self.targetTimer invalidate]; }
 
 - (void)publishStartupState:(NSString *)state error:(NSString *)error {
-    if ([self.startupReport[@"state"] isEqual:@"failed"] && ![state isEqual:@"failed"]) return;
+    NSString *previous = self.startupReport[@"state"];
+    BOOL terminal = [previous isEqual:@"failed"] || [previous isEqual:@"stopped"];
+    if (terminal && ![state isEqual:previous]) return;
+    if ((self.exitRequested || [MFHUDControl exitRequested] || [previous isEqual:@"stopping"]) &&
+        ![state isEqual:@"stopping"] && ![state isEqual:@"stopped"]) return;
     self.startupReport[@"state"] = state;
     if (error) self.startupReport[@"error"] = error;
     MFHUDLogLine(@"HUD 状态=%@ %@", state, error ?: @"");
@@ -412,6 +485,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 }
 
 - (void)failStartup:(NSString *)error {
+    if ([self isStopping]) return;
+    [self.targetTimer invalidate];
     [self.inputBridge cancelAll];
     [self.menuOverlay stopRendering];
     [self.drawingOverlay stopRendering];
@@ -439,8 +514,13 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     if (self.exitRequested) return;
     self.exitRequested = YES;
 
-    MFHUDLogLine(@"HUD 退出：撤窗口 → 停渲染 → 删 PID 文件 → 结束进程（pid=%d）", getpid());
-    [self publishStartupState:@"stopped" error:nil];
+    MFHUDLogLine(@"HUD 退出：撤窗口 → 停渲染 → 结束进程（身份保留到确认死亡）（pid=%d）", getpid());
+    [self publishStartupState:@"stopping" error:nil];
+    [self.targetTimer invalidate];
+    [MFMenuUI setCollapseChangeHandler:nil];
+    [MFMenuUI setFrameRateApplier:nil];
+    self.menuOverlay.firstFrameCompletion = nil;
+    self.drawingOverlay.firstFrameCompletion = nil;
 
     [self.inputBridge cancelAll];
     self.menuOverlay.delegate = nil;
@@ -457,13 +537,13 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     self.menuHost = nil;
     self.drawingHost = nil;
 
-    [[NSFileManager defaultManager] removeItemAtPath:MFHUDPIDFilePath error:NULL];
     [MFHUDControl stopWatching];
 
     // 给窗口服务器一点时间把两个 context 撤下来（否则可能留下残影），
     // 然后再硬退出。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        [self publishStartupState:@"stopped" error:nil];
         MFHUDLogLine(@"HUD 进程结束（退出码 0）");
         _exit(EXIT_SUCCESS);
     });
@@ -473,7 +553,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 }
 
 - (void)handleFirstFrame:(NSString *)key error:(NSString *)error {
-    if ([self.startupReport[@"state"] isEqual:@"failed"]) return;
+    if ([self isStopping]) return;
     if (error) { [self failStartup:[NSString stringWithFormat:@"%@：%@", key, error]]; return; }
     self.startupReport[key] = @YES;
     MFHUDLogLine(@"%@：GPU 首帧已完成", key);

@@ -61,6 +61,13 @@ static NSDictionary *TestSameProcessInstanceRoundTrip(void) {
     [saved saveBasesToDefaults];
     NSDictionary *snapshot = [NSUserDefaults.standardUserDefaults dictionaryForKey:kSnapshotKey];
     Check(snapshot != nil, "a real current-process identity must permit a scoped snapshot");
+    NSDictionary *identity = snapshot[@"identity"];
+    Check([identity isKindOfClass:NSDictionary.class] &&
+          [identity[@"pid"] intValue] == NSProcessInfo.processInfo.processIdentifier &&
+          [identity[@"path"] isKindOfClass:NSString.class] && [identity[@"path"] isAbsolutePath] &&
+          [identity[@"startTimeSec"] longLongValue] > 0 &&
+          [identity[@"startTimeUSec"] isKindOfClass:NSNumber.class],
+          "snapshot scope must include a real PID, exact executable path, and process start time");
 
     MFGameReader *loaded = NewReader();
     [loaded loadBasesFromDefaults];
@@ -75,9 +82,11 @@ static NSDictionary *TestSameProcessInstanceRoundTrip(void) {
 }
 
 static void TestRejectChangedProcessIdentity(NSDictionary *valid) {
+    NSString *sameBasenameElsewhere = [@"/a/different/executable/location"
+        stringByAppendingPathComponent:[valid[@"identity"][@"path"] lastPathComponent]];
     NSArray<NSDictionary *> *changes = @[
         @{ @"pid": @2147483647 },
-        @{ @"path": @"/a/different/executable/with/the/same/basename" },
+        @{ @"path": sameBasenameElsewhere },
         @{ @"startTimeSec": @1 },
         @{ @"startTimeUSec": @1000001 },
     ];
@@ -121,6 +130,13 @@ static void TestRejectMalformedAndLegacyAddresses(NSDictionary *valid) {
     CheckEmpty(reader, "a UE module base must never be substituted for any reader object/array base");
 }
 
+static void TestChangingTargetCannotCarryAddresses(void) {
+    MFGameReader *reader = NewReader();
+    SetFixtureBases(reader);
+    reader.targetTaskPort = MACH_PORT_NULL;
+    CheckEmpty(reader, "unbinding or changing the target must discard addresses from the old instance");
+}
+
 @interface GameReaderRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation GameReaderRegressionDelegate
@@ -136,6 +152,7 @@ static void TestRejectMalformedAndLegacyAddresses(NSDictionary *valid) {
             NSDictionary *valid = TestSameProcessInstanceRoundTrip();
             TestRejectChangedProcessIdentity(valid);
             TestRejectMalformedAndLegacyAddresses(valid);
+            TestChangingTargetCannotCarryAddresses();
             puts("PASS: production game reader scoped calibration and startup selectors");
             exit(0);
         } @catch (NSException *exception) {

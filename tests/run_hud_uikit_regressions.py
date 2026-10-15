@@ -5,6 +5,7 @@ import os
 import platform
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -58,6 +59,9 @@ def main():
                 "UIDeviceFamily": [1, 2],
                 "UILaunchScreen": {},
             }))
+            if args.suite == "menu":
+                for font in (ROOT / "app/Resources").rglob("NotoSansSC-subset.ttf"):
+                    shutil.copy2(font, app / font.name)
             architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
             if args.suite == "windows":
                 sources = [ROOT / "tests/hud_uikit_regressions.mm", source]
@@ -86,7 +90,8 @@ def main():
                 if args.suite == "menu":
                     sources += [ROOT / "app/Sources/HUD/MFMenuUI.mm",
                                 ROOT / "app/Sources/Game/MFSettings.mm",
-                                ROOT / "app/Sources/HUD/MFHUDControl.mm"]
+                                ROOT / "app/Sources/HUD/MFHUDControl.mm",
+                                ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-x", "objective-c++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
@@ -116,10 +121,20 @@ def main():
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
                       "game-reader": "PASS: production game reader"}[args.suite]
             report = ""
+            menu_captured = False
             deadline = time.monotonic() + 120
             while result.returncode == 0 and time.monotonic() < deadline:
                 report = output.read_text(errors="replace") if output.exists() else ""
-                if marker in report or "FAIL:" in report:
+                if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
+                    destination = ROOT / "test-results/menu.png"
+                    destination.parent.mkdir(exist_ok=True)
+                    run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=30)
+                    menu_captured = True
+                terminal_failure = "FAIL:" in report
+                if args.suite == "overlay":
+                    terminal_failure = ("FAIL: production overlay" in report or
+                                        "FAIL: main queue must" in report)
+                if marker in report or terminal_failure:
                     break
                 time.sleep(0.25)
             print(report or "No test result was written; test execution is unconfirmed.", flush=True)

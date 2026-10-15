@@ -1,10 +1,16 @@
 name: HUD regression tests
 on:
   workflow_dispatch:
+    inputs:
+      baseline_renderer:
+        description: Reproduce renderer wait failures using the pre-fix implementations
+        type: boolean
+        default: false
   push:
     branches: [fix/hud-context-startup, fix/hud-reliability]
 jobs:
   native:
+    if: ${{ !inputs.baseline_renderer }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -14,6 +20,7 @@ jobs:
       - name: Exercise context ownership and startup reports
         run: bash tests/run_hud_regressions.sh
   uikit:
+    if: ${{ !inputs.baseline_renderer }}
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
@@ -24,3 +31,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Replay device touches through the production HID bridge
         run: python3 tests/run_hud_uikit_regressions.py --suite ${{ matrix.suite }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && matrix.suite == 'menu' }}
+        with:
+          name: hud-menu-preview
+          path: test-results/menu.png
+          if-no-files-found: ignore
+  overlay-baseline:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_renderer }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore only the pre-fix renderer implementations
+        run: |
+          git show 9ec2a2ea468b6f40315904b1c225329fbe92f00c:app/Sources/Render/MFOverlayView.mm > app/Sources/Render/MFOverlayView.mm
+          git show 9ec2a2ea468b6f40315904b1c225329fbe92f00c:app/Sources/Render/MFImGuiContext.mm > app/Sources/Render/MFImGuiContext.mm
+      - name: Reproduce delayed drawable regression against production baseline
+        run: python3 tests/run_hud_uikit_regressions.py --suite overlay

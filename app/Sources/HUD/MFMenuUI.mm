@@ -15,6 +15,7 @@
 #import "../Game/MFSettings.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 
 //
 // ★ ObjC++ 硬约束：不能对 property 表达式取地址（&s.someProp 是编译错误）。
@@ -23,20 +24,20 @@
 //
 static __weak MFOverlayView *sRectTarget = nil;
 
-/// 上报一个矩形（视图坐标）——只有落在上报矩形里的点才被菜单接住。
+// Clip against the current ImGui window, including its scrolling viewport.
+// Offscreen items must never become invisible touch targets.
 static void MFTrackRect(CGRect rect) {
     MFOverlayView *overlay = sRectTarget;
-    if (!overlay) return;
-    [overlay addInteractiveRect:rect];
+    if (!overlay || rect.size.width <= 0 || rect.size.height <= 0) return;
+    ImGuiWindow *window = ImGui::GetCurrentWindowRead();
+    const ImRect &clip = window->ClipRect;
+    CGRect clipped = CGRectIntersection(rect, CGRectMake(clip.Min.x, clip.Min.y,
+                                      clip.GetWidth(), clip.GetHeight()));
+    if (!CGRectIsNull(clipped) && !CGRectIsEmpty(clipped)) [overlay addInteractiveRect:clipped];
 }
-
-/// 上报「刚刚构建完的那个 ImGui item」的矩形。
 static void MFTrackLastItem(void) {
-    MFOverlayView *overlay = sRectTarget;
-    if (!overlay) return;
-    ImVec2 a = ImGui::GetItemRectMin();
-    ImVec2 b = ImGui::GetItemRectMax();
-    [overlay addInteractiveRect:CGRectMake(a.x, a.y, b.x - a.x, b.y - a.y)];
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    MFTrackRect(CGRectMake(a.x, a.y, b.x - a.x, b.y - a.y));
 }
 
 #define MF_CHECK(label, prop)                           \
@@ -57,16 +58,18 @@ static void MFTrackLastItem(void) {
 #define MF_SLIDE_F(label, prop, lo, hi, fmt)                          \
     do {                                                              \
         float _v = (float)(s.prop);                                   \
+        ImGui::TextUnformatted(label);                               \
         ImGui::SetNextItemWidth(-1);                                  \
-        if (ImGui::SliderFloat(label, &_v, lo, hi, fmt)) s.prop = _v; \
+        if (ImGui::SliderFloat("##" label, &_v, lo, hi, fmt)) s.prop = _v; \
         MFTrackLastItem();                                            \
     } while (0)
 
 #define MF_SLIDE_I(label, prop, lo, hi, fmt)                          \
     do {                                                              \
         int _v = (int)(s.prop);                                       \
+        ImGui::TextUnformatted(label);                               \
         ImGui::SetNextItemWidth(-1);                                  \
-        if (ImGui::SliderInt(label, &_v, lo, hi, fmt)) s.prop = _v;   \
+        if (ImGui::SliderInt("##" label, &_v, lo, hi, fmt)) s.prop = _v;   \
         MFTrackLastItem();                                            \
     } while (0)
 
@@ -95,7 +98,7 @@ static bool MFUIColorEdit(const char *label, UIColor **io, MFColorSlot slot) {
 
 static BOOL gVisible = YES;
 static BOOL gCollapsed = NO;
-static BOOL gFullPassthrough = NO;
+static void (^gCollapseChangeHandler)(BOOL) = nil;
 static void (^gFrameRateApplier)(NSInteger fps) = nil;
 
 /// 收起态的圆球直径（点）
@@ -105,10 +108,16 @@ static const float kMFMenuBallSize = 56.0f;
 + (BOOL)globalVisible { return gVisible; }
 
 + (BOOL)collapsed { return gCollapsed; }
-+ (void)setCollapsed:(BOOL)collapsed { gCollapsed = collapsed; }
++ (void)setCollapsed:(BOOL)collapsed {
+    if (gCollapsed == collapsed) return;
+    gCollapsed = collapsed;
+    if (gCollapseChangeHandler) gCollapseChangeHandler(collapsed);
+}
++ (void)setCollapseChangeHandler:(void (^)(BOOL))handler { gCollapseChangeHandler = [handler copy]; }
 
-+ (BOOL)fullPassthrough { return gFullPassthrough; }
-+ (void)setFullPassthrough:(BOOL)passthrough { gFullPassthrough = passthrough; }
+// Legacy callers requesting full passthrough now collapse the real window.
++ (BOOL)fullPassthrough { return gCollapsed; }
++ (void)setFullPassthrough:(BOOL)passthrough { [self setCollapsed:passthrough]; }
 
 + (void)setFrameRateApplier:(void (^_Nullable)(NSInteger))applier { gFrameRateApplier = applier; }
 
@@ -125,8 +134,7 @@ static const float kMFMenuBallSize = 56.0f;
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
     MFSettings *s = [MFSettings shared];
 
-    // 整面板穿透是运行时开关，每帧同步一次即可（setter 内部有变化判断）。
-    overlay.passthroughAll = gFullPassthrough;
+    overlay.passthroughAll = NO;
 
     sRectTarget = nil;
     [overlay beginInteractiveRects];
@@ -148,6 +156,14 @@ static const float kMFMenuBallSize = 56.0f;
         [self buildPanelForSettings:s overlay:overlay screen:screen];
     }
 
+    // Popups own their visible surface, including color pickers and combo
+    // lists whose children do not pass through the menu's tracking helpers.
+    ImGuiContext *current = ImGui::GetCurrentContext();
+    for (ImGuiWindow *window : current->Windows) {
+        if (!window->Active || !(window->Flags & ImGuiWindowFlags_Popup)) continue;
+        const ImRect &r = window->OuterRectClipped;
+        [overlay addInteractiveRect:CGRectMake(r.Min.x, r.Min.y, r.GetWidth(), r.GetHeight())];
+    }
     [overlay endInteractiveRects];
     sRectTarget = nil;
 }
@@ -188,10 +204,10 @@ static const float kMFMenuBallSize = 56.0f;
 
     // 整球就是按钮：抬指时仍在球上才算「点开」——
     // 用 down 触发的话，展开后那根手指的抬起会砸在刚出现的面板控件上。
-    ImGui::InvisibleButton("##mfexpand", ImVec2(ball, ball));
+    bool expand = ImGui::InvisibleButton("##mfexpand", ImVec2(ball, ball));
     MFTrackLastItem();
-    if (ImGui::IsItemDeactivated() && ImGui::IsItemHovered()) {
-        gCollapsed = NO;
+    if (expand) {
+        [MFMenuUI setCollapsed:NO];
         MFHUDLogLine(@"菜单展开");
         [overlay requestRedraw];
     }
@@ -210,86 +226,66 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::SetNextWindowSize(screen, ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(_alpha);
-
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoTitleBar;
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
     if (!ImGui::Begin("##mfmenu", nullptr, flags)) {
-        ImGui::End();
-        overlay.captureRect = CGRectNull;
-        overlay.headerDragRect = CGRectNull;
-        return;
+        ImGui::End(); overlay.captureRect = CGRectNull; overlay.headerDragRect = CGRectNull; return;
     }
+    overlay.captureRect = CGRectMake(0, 0, screen.x, screen.y);
+    const float left = ImGui::GetCursorPosX();
+    const float headerY = ImGui::GetCursorPosY();
+    const float right = screen.x - ImGui::GetStyle().WindowPadding.x;
+    ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1), "白米饭 · 悬浮窗");
+    ImGui::SetCursorPos(ImVec2(right - 136, headerY));
+    bool collapse = ImGui::Button("收起", ImVec2(64, 32)); MFTrackLastItem();
+    ImGui::SameLine(0, 8);
+    if (ImGui::Button("退出", ImVec2(64, 32))) [MFHUDControl requestExit];
+    MFTrackLastItem();
+    overlay.headerDragRect = CGRectMake(left, headerY, MAX(0.0f, right - 144 - left), 32);
+    ImGui::SetCursorPosY(headerY + 40);
+    ImGui::Separator();
 
-    const ImVec2 pos = ImGui::GetWindowPos();
-    const ImVec2 ws = ImGui::GetWindowSize();
-    overlay.captureRect = CGRectMake(pos.x, pos.y, ws.x, ws.y);
-
-    // ── 标题行 ──
-    ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), "复刻版");
+    // Fixed tabs; only the page below scrolls. Header and exit stay reachable.
+    const char *tabs[] = {"主功能", "外观", "其他"};
+    float tabWidth = (ImGui::GetContentRegionAvail().x - 16) / 3;
+    for (int i = 0; i < 3; i++) {
+        if (i) ImGui::SameLine(0, 8);
+        bool selected = _tab == i;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.52f, 1, 1));
+        if (ImGui::Button(tabs[i], ImVec2(tabWidth, 34))) _tab = i;
+        MFTrackLastItem();
+        if (selected) ImGui::PopStyleColor();
+    }
+    float footerHeight = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y + 8;
+    float pageHeight = MAX(64.0f, ImGui::GetContentRegionAvail().y - footerHeight);
+    char pageID[32]; snprintf(pageID, sizeof(pageID), "##settings-%d", _tab);
+    if (ImGui::BeginChild(pageID, ImVec2(0, pageHeight), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoSavedSettings)) {
+        if (_tab == 0) [self pageMain:s];
+        else if (_tab == 1) [self pageAppearance:s];
+        else [self pageOther:s];
+        ImGuiWindow *child = ImGui::GetCurrentWindowRead();
+        if (child->ScrollbarY) {
+            ImRect r = ImGui::GetWindowScrollbarRect(child, ImGuiAxis_Y);
+            // Scrollbars lie outside the content ClipRect; clip to their child.
+            CGRect scroll = CGRectMake(r.Min.x, r.Min.y, r.GetWidth(), r.GetHeight());
+            CGRect outer = CGRectMake(child->Pos.x, child->Pos.y, child->Size.x, child->Size.y);
+            [overlay addInteractiveRect:CGRectIntersection(scroll, outer)];
+        }
+    }
+    ImGui::EndChild();
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(MAX(60.0f, ImGui::GetContentRegionAvail().x - 104));
+    ImGui::SliderFloat("##alpha", &_alpha, 0.4f, 1.0f, "透明度 %.2f"); MFTrackLastItem();
     ImGui::SameLine();
-    ImGui::TextDisabled("| 悬浮菜单");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140);
-
-    if (ImGui::SmallButton("收起")) {
-        gCollapsed = YES;
-        MFHUDLogLine(@"菜单收起为小圆球（点球体可再展开）");
+    if (ImGui::Button("保存配置")) [s save]; MFTrackLastItem();
+    ImGui::End();
+    if (collapse) {
+        [MFMenuUI setCollapsed:YES];
+        MFHUDLogLine(@"菜单收起：下一帧将原生窗口缩至 56×56");
         [overlay requestRedraw];
     }
-    const ImVec2 collapseMin = ImGui::GetItemRectMin();
-    const ImVec2 collapseMax = ImGui::GetItemRectMax();
-    MFTrackLastItem();
-
-    ImGui::SameLine();
-    if (ImGui::SmallButton("退出")) {
-        // 让 HUD 进程自己结束自己 —— 不需要跨 uid 的信号权限。
-        MFHUDLogLine(@"菜单里点了「退出」，请求关闭悬浮窗");
-        [MFHUDControl requestExit];
-    }
-    MFTrackLastItem();
-    ImGui::Separator();
-
-    /*
-     * 标题拖动区。
-     *
-     * ★ 原来写成 CGRectMake(0, 0, hideMin.x - 4, hideMax.y + 4)：
-     *   一旦那行被挤到可视区之外，hideMax.y 就是负数 —— 产生
-     *   {{0,0},{248,-316}} 这种负高度矩形，拖动判定直接失效。
-     *   这里把高度夹在 [0, 面板高] 内，并把右边界停在「收起」按钮左侧，
-     *   免得拖动手势把按钮点击吃掉。
-     */
-    {
-        CGFloat dragW = MAX(0.0f, collapseMin.x - 8.0f);
-        CGFloat dragH = MIN(MAX(collapseMax.y + 6.0f, 0.0f), ws.y);
-        overlay.headerDragRect = CGRectMake(0, 0, dragW, dragH);
-    }
-
-    // ── 页签 ──
-    // 只上报 tab bar 整行（精确到每个 tab 的矩形在即时模式下不可靠；
-    // 而 tab 行本身很短，多算一点都不影响穿透体验）。
-    const ImVec2 barTop = ImGui::GetCursorScreenPos();
-    if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTooltip)) {
-        if (ImGui::BeginTabItem("主功能")) { _tab = 0; [self pageMain:s]; ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("外观"))   { _tab = 1; [self pageAppearance:s]; ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("其他"))   { _tab = 2; [self pageOther:s]; ImGui::EndTabItem(); }
-        ImGui::EndTabBar();
-    }
-    {
-        const ImVec2 barBottom = ImGui::GetCursorScreenPos();
-        CGFloat h = MAX(0.0f, barBottom.y - barTop.y);
-        if (h > 0.0f) MFTrackRect(CGRectMake(0, barTop.y, screen.x, h));
-    }
-
-    // ── 底部：透明度 + 保存 ──
-    ImGui::Separator();
-    ImGui::SetNextItemWidth(-96);
-    ImGui::SliderFloat("##alpha", &_alpha, 0.4f, 1.0f, "透明度 %.2f");
-    MFTrackLastItem();
-    ImGui::SameLine();
-    if (ImGui::Button("保存配置")) [[MFSettings shared] save];
-    MFTrackLastItem();
-
-    ImGui::End();
 }
 
 #pragma mark - 主功能页
@@ -351,8 +347,9 @@ static const float kMFMenuBallSize = 56.0f;
     {
         const char *styles[] = {"圆形", "箭头", "圆环"};
         int st = (int)s.backEnemyStyle;
+        ImGui::TextUnformatted("背敌样式");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("背敌样式", &st, styles, 3)) s.backEnemyStyle = (MFBackEnemyStyle)st;
+        if (ImGui::Combo("##背敌样式", &st, styles, 3)) s.backEnemyStyle = (MFBackEnemyStyle)st;
         MFTrackLastItem();
     }
 }
@@ -390,7 +387,7 @@ static const float kMFMenuBallSize = 56.0f;
         ImGui::Text("%s", r.label);
         ImGui::SameLine(150);
         UIColor *c = [s colorForSlot:r.slot];
-        if (MFUIColorEdit(r.label, &c, r.slot)) [s save];
+        MFUIColorEdit(r.label, &c, r.slot);
     }
 }
 
@@ -400,17 +397,9 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::Spacing();
     ImGui::TextDisabled("穿透与窗口");
     ImGui::Separator();
-    {
-        bool v = gFullPassthrough;
-        if (ImGui::Checkbox("整面板穿透", &v)) {
-            gFullPassthrough = v;
-            MFHUDLogLine(@"整面板穿透 = %d（菜单仍可用 BKS 输入操作）", (int)v);
-        }
-        MFTrackLastItem();
-        ImGui::TextDisabled("菜单空白处本来就不吃触摸；");
-        ImGui::TextDisabled("打开这个连按钮也一起穿透给下层。");
-        ImGui::TextDisabled("点「收起」可以缩成小圆球。");
-    }
+    ImGui::TextWrapped("拖动标题移动窗口；收起后仅保留小圆球，点球展开。");
+    ImGui::TextWrapped("需要操作下层 App 时，先点标题右侧的收起。");
+    ImGui::TextDisabled("拖动右侧滚动条浏览设置");
 
     ImGui::Spacing();
     ImGui::TextDisabled("物资统计");
@@ -426,8 +415,9 @@ static const float kMFMenuBallSize = 56.0f;
         const int rateValues[] = {30, 45, 60, 90, 120};
         int ri = 2;
         for (int i = 0; i < 5; i++) if (s.refreshRate >= rateValues[i]) ri = i;
+        ImGui::TextUnformatted("刷新率");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("刷新率", &ri, rates, 5)) {
+        if (ImGui::Combo("##刷新率", &ri, rates, 5)) {
             s.refreshRate = rateValues[ri];
             // ★ 同时应用到菜单层与绘制层：之前只改了菜单层，
             //   真正吃性能的全屏绘制层一直是固定 60。
@@ -440,8 +430,9 @@ static const float kMFMenuBallSize = 56.0f;
     {
         const char *bars[] = {"细线", "圆头", "分段"};
         int hb = (int)s.healthBarStyle;
+        ImGui::TextUnformatted("血条样式");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("血条样式", &hb, bars, 3)) s.healthBarStyle = hb;
+        if (ImGui::Combo("##血条样式", &hb, bars, 3)) s.healthBarStyle = hb;
         MFTrackLastItem();
     }
     MF_CHECK("平滑绘制", smoothAim);
@@ -456,15 +447,13 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
-    MF_CHECK_SAME("观战模式", spectatorMode);
-    MF_CHECK("直播模式", liveMode);
-    ImGui::TextDisabled("直播模式对应原版 DrawingView._isLiveModeEnabled");
+    ImGui::TextDisabled("观战 / 直播模式：功能尚未接入");
 
     ImGui::Spacing();
     ImGui::TextDisabled("目标");
     ImGui::Separator();
     ImGui::TextWrapped("当前目标：三角洲行动 com.tencent.tmgp.dfm");
-    ImGui::TextDisabled("偏移表见 Game/Offsets.h（M4 真机校准）");
+    ImGui::TextDisabled("游戏数据和偏移仍需单独验证");
 }
 
 @end

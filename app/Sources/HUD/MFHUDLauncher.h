@@ -10,7 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface MFHUDLauncher : NSObject
 
-/// HUD 是否已在运行（读 PID 文件 + kill(pid,0) 探活）
+/// Validate the saved executable and reap exited children. Unknown liveness is
+/// retained for retry; it is never treated as permission to spawn a duplicate.
 + (BOOL)isHUDRunning;
 + (pid_t)hudPID;
 
@@ -20,6 +21,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 结束 HUD 进程
 + (BOOL)stopHUDWithError:(NSString *_Nullable *_Nullable)err;
+/// Serializes with start and cancels a start still awaiting readiness. The
+/// completion is delivered on main; an already exited HUD counts as stopped.
++ (void)stopHUDWithCompletion:(void (^)(BOOL stopped, NSString *_Nullable error))completion;
 
 /// PID 文件路径
 + (NSString *)pidFilePath;

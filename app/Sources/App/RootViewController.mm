@@ -63,6 +63,10 @@ extern char **environ;
 @interface RootViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, assign) BOOL hudStarting;
+@property (nonatomic, assign) BOOL hudStopping;
+@property (nonatomic) NSUInteger hudActionGeneration;
+@property (nonatomic, strong) NSTimer *hudStatusTimer;
+@property (nonatomic) pid_t observedHUDPID;
 @property (nonatomic, strong) NSMutableArray<MFSection *> *sections;
 @end
 
@@ -89,7 +93,30 @@ extern char **environ;
     [rc addTarget:self action:@selector(refreshStatus) forControlEvents:UIControlEventValueChanged];
     self.tableView.refreshControl = rc;
 
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(hudAppBecameActive:)
+        name:UIApplicationDidBecomeActiveNotification object:nil];
     [self refreshStatus];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self refreshStatus];
+    __weak RootViewController *weakSelf = self;
+    [self.hudStatusTimer invalidate];
+    self.hudStatusTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+        RootViewController *owner = weakSelf;
+        pid_t pid = [MFHUDLauncher hudPID];
+        if (owner && pid != owner.observedHUDPID) [owner refreshStatus];
+    }];
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [self.hudStatusTimer invalidate]; self.hudStatusTimer = nil;
+}
+- (void)hudAppBecameActive:(NSNotification *)notification { [self refreshStatus]; }
+- (void)dealloc {
+    [self.hudStatusTimer invalidate];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 #pragma mark - 状态刷新 / 建模
@@ -103,11 +130,13 @@ extern char **environ;
     [s0.rows addObject:[self infoRow:@"内核（KFD）" detail:[[MFKernel shared] statusText]
                                   ok:[[MFKernel shared] isOpen]]];
 
-    BOOL hudUp = [MFHUDLauncher isHUDRunning];
+    pid_t currentHUDPID = [MFHUDLauncher hudPID];
+    self.observedHUDPID = currentHUDPID;
+    BOOL hudUp = currentHUDPID > 0;
     [s0.rows addObject:[self infoRow:@"悬浮窗（HUD）"
                               detail:(hudUp ? [NSString stringWithFormat:@"运行中 · PID %d",
-                                               [MFHUDLauncher hudPID]]
-                                            : @"未启动 · M2 已接入")
+                                               currentHUDPID]
+                                            : @"未启动")
                                   ok:hudUp]];
     [s0.rows addObject:[self infoRow:@"运行身份" detail:[self identityText] ok:YES]];
 
@@ -145,13 +174,15 @@ extern char **environ;
      * 所以主流程就是：找进程 → task_for_pid → 模块定位 → UE4 解析。
      */
     [s1.rows addObject:[self actionRow:@"★ 一键开始"
-                                detail:@"找游戏 → 绑定 → 定位模块 → 解析 UE4（不用内核，不会崩）"
+                                detail:@"查找并验证游戏进程、模块和 UE4 数据链"
                                 action:@"actOneClick"]];
     [s1.rows addObject:[self actionRow:@"启动内核"
                                 detail:@"⛔️ 别点！KFD 已让设备 panic 重启 4 次，主线不需要它"
                                 action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
-    [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];
+    [s1.rows addObject:[self actionRow:(self.hudStopping ? @"正在结束悬浮窗" :
+            (self.hudStarting ? @"取消悬浮窗启动" : (hudUp ? @"结束悬浮窗" : @"启动悬浮窗")))
+            detail:(self.hudStarting ? @"正在初始化，点击可取消" : @"菜单、绘制、收起与退出") action:@"actStartHUD"]];
     [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
     [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media，电脑一条命令拉走" action:@"actExportDiagnostics"]];
     [s1.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒/权限/fd/越狱/内核链 一次性体检" action:@"actEnvCheck"]];
@@ -288,7 +319,8 @@ extern char **environ;
     [self alert:@"内核设置" message:msg];
 }
 - (void)actStartHUD {
-    if (self.hudStarting) return;
+    if (self.hudStopping) return;
+    if (self.hudStarting) { [self stopHUDNow]; return; }
     if ([MFHUDLauncher isHUDRunning]) {
         UIAlertController *a = [UIAlertController
             alertControllerWithTitle:@"悬浮窗正在运行"
@@ -303,8 +335,11 @@ extern char **environ;
     }
 
     self.hudStarting = YES;
-    self.navigationItem.prompt = @"正在等待悬浮窗初始化与首帧…";
+    NSUInteger generation = ++self.hudActionGeneration;
+    [self refreshStatus];
+    self.navigationItem.prompt = @"正在等待悬浮窗初始化与首帧，点击列表可取消…";
     [MFHUDLauncher startHUDWithCompletion:^(BOOL ready, NSString *error) {
+        if (generation != self.hudActionGeneration) return;
         self.hudStarting = NO;
         self.navigationItem.prompt = nil;
         if (ready) {
@@ -313,7 +348,7 @@ extern char **environ;
                 @"· 拖动「标题文字」那一行可以移动整个窗口\n"
                 @"·「收起」把小菜单缩成小圆球，点圆球再展开\n"
                 @"·「退出」彻底关闭悬浮窗（控制台也会同步显示未运行）\n"
-                @"· 菜单空白处不吃触摸，可以直接点到下面的游戏\n"
+                @"· 操作下层 App 时可先收起，窗口会真正缩小\n"
                 @"· 万一菜单没显示，打开「HUD 日志」看现场",
                 [MFHUDLauncher hudPID]]];
         } else {
@@ -337,23 +372,17 @@ extern char **environ;
  *    用户看到的就是「点了没反应」。现在挪到后台队列，界面照常。
  */
 - (void)stopHUDNow {
-    if (self.hudStarting) return;
-    self.hudStarting = YES;
-    self.navigationItem.prompt = @"正在结束悬浮窗…";
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *err = nil;
-        BOOL stopped = [MFHUDLauncher stopHUDWithError:&err];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.hudStarting = NO;
-            self.navigationItem.prompt = nil;
-            [self refreshStatus];
-            if (stopped) {
-                [self alert:@"悬浮窗已结束" message:@"菜单和绘制层都已经撤下。"];
-            } else {
-                [self alert:@"结束失败" message:err ?: @"未知错误"];
-            }
-        });
-    });
+    if (self.hudStopping) return;
+    ++self.hudActionGeneration; // Ignore an older startup completion after cancel.
+    self.hudStarting = NO; self.hudStopping = YES;
+    self.navigationItem.prompt = @"正在确认悬浮窗退出…";
+    [self refreshStatus];
+    [MFHUDLauncher stopHUDWithCompletion:^(BOOL stopped, NSString *error) {
+        self.hudStopping = NO;
+        self.navigationItem.prompt = nil;
+        [self refreshStatus];
+        if (!stopped) [self alert:@"尚未退出" message:error ?: @"身份已保留，可再次点结束。"];
+    }];
 }
 
 #pragma mark HUD 日志
@@ -502,7 +531,7 @@ extern char **environ;
 
     done:
         [rep appendString:@"\n─────────────────────────────────\n"];
-        [rep appendString:@"★ 全程没有用到 KFD —— 不会 panic、不会崩。\n"];
+        [rep appendString:@"此诊断不调用 KFD；游戏数据链仍需逐级验证。\n"];
         [rep appendString:@"如果 ④ 报「GWorld 不是合法指针」，说明 0x178AA5E0\n"];
         [rep appendString:@"这个静态偏移已经随游戏版本失效，需要用扫描重新定位。\n"];
 
@@ -536,17 +565,11 @@ extern char **environ;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         MFUEReader *ur = [MFUEReader shared];
 
-        // 如果还没定位过模块，先自动做一次
-        if (ur.libBase == 0) {
-            NSNumber *saved = [[NSUserDefaults standardUserDefaults] objectForKey:@"mf.game.libbase"];
-            if (saved) {
-                ur.libBase = [saved unsignedLongLongValue];
-            } else {
-                NSString *pname = [MFOffsets shared].current.processName;
-                MFModuleInfo *m = pname.length ? [MFModuleLocator locateProcess:pname error:NULL] : nil;
-                if (m) ur.libBase = m.base;
-            }
-        }
+        // ASLR addresses belong to one running game instance. Resolve afresh
+        // rather than restoring an unscoped absolute address from defaults.
+        NSString *pname = [MFOffsets shared].current.processName;
+        MFModuleInfo *module = pname.length ? [MFModuleLocator locateProcess:pname error:NULL] : nil;
+        ur.libBase = module ? module.base : 0;
 
         NSString *rep = [ur diagnosticReport];
 

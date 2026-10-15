@@ -5,6 +5,55 @@
 #import "Offsets.h"
 #import "MFSettings.h"
 #import "../Read/MFReadBackend.h"
+#import <mach/mach.h>
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#include <string.h>
+
+// libproc.h is not available in the iOS SDK. The symbol is provided by libSystem.
+extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+
+static NSString *const kMFReaderBasesKey = @"mf.game.reader.absoluteBases.v1";
+
+/// A PID/path alone cannot distinguish a restarted copy of the same game.
+/// Refuse persistence when its start time cannot be established as well.
+static NSDictionary *MFReaderProcessIdentity(mach_port_t task) {
+    int pid = 0;
+    if (task == MACH_PORT_NULL || pid_for_task(task, &pid) != KERN_SUCCESS || pid <= 0) return nil;
+
+    char path[4096] = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return nil;
+    path[sizeof(path) - 1] = '\0';
+    NSString *executable = [NSString stringWithUTF8String:path];
+    if (!executable.length) return nil;
+
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    struct kinfo_proc info = {0};
+    size_t length = sizeof(info);
+    if (sysctl(mib, 4, &info, &length, NULL, 0) != 0 || length != sizeof(info) ||
+        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0 ||
+        info.kp_proc.p_starttime.tv_usec < 0 || info.kp_proc.p_starttime.tv_usec >= 1000000) return nil;
+
+    // If the task died during the path/sysctl queries, do not publish an
+    // identity possibly obtained from a newly reused PID.
+    int confirmedPID = 0;
+    if (pid_for_task(task, &confirmedPID) != KERN_SUCCESS || confirmedPID != pid) return nil;
+    return @{@"pid": @(pid), @"path": executable,
+             @"startTimeSec": @((int64_t)info.kp_proc.p_starttime.tv_sec),
+             @"startTimeUSec": @((int64_t)info.kp_proc.p_starttime.tv_usec)};
+}
+
+static BOOL MFReaderIsUnsignedInteger(id value) {
+    if (![value isKindOfClass:NSNumber.class]) return NO;
+    const char *type = [value objCType];
+    if (!type || !strchr("cCsSiIlLqQ", type[0])) return NO;
+    if (strchr("csilq", type[0]) && [value longLongValue] < 0) return NO;
+    return YES;
+}
+
+@interface MFGameReader ()
+- (void)clearBasesWithStatus:(NSString *)status;
+@end
 
 @implementation MFEntity
 - (NSString *)description {
@@ -16,7 +65,9 @@
 }
 @end
 
-@implementation MFGameReader
+@implementation MFGameReader {
+    NSString *_baseCalibrationStatus;
+}
 
 + (instancetype)shared {
     static MFGameReader *s;
@@ -26,12 +77,95 @@
 }
 
 - (void)setTargetTaskPort:(uint32_t)port {
-    _targetTaskPort = port;
-    [MFReadBackend shared].targetTaskPort = port;
+    @synchronized (self) {
+        if (_targetTaskPort != port)
+            [self clearBasesWithStatus:@"未校准（目标已切换，旧绝对地址已清空）"];
+        _targetTaskPort = port;
+        [MFReadBackend shared].targetTaskPort = port;
+    }
 }
 
 - (BOOL)ready {
     return self.targetTaskPort != MACH_PORT_NULL && [MFReadBackend shared].gateOpen;
+}
+
+#pragma mark - 当前进程实例的基址快照
+
+- (void)clearBasesWithStatus:(NSString *)status {
+    self.rootObjectBase = 0;
+    self.entityArrayBase = 0;
+    self.lootArrayBase = 0;
+    _baseCalibrationStatus = [status copy];
+}
+
+- (void)loadBasesFromDefaults {
+    @synchronized (self) {
+        [self clearBasesWithStatus:@"未校准（没有当前进程实例的基址快照）"];
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        [defaults synchronize];
+        id value = [defaults objectForKey:kMFReaderBasesKey];
+        NSDictionary *identity = MFReaderProcessIdentity(self.targetTaskPort);
+        if (!identity) {
+            [defaults removeObjectForKey:kMFReaderBasesKey];
+            _baseCalibrationStatus = @"未校准（目标 PID、路径或启动时间无法确认）";
+            return;
+        }
+        if (!value) return;
+        if (![value isKindOfClass:NSDictionary.class]) {
+            [defaults removeObjectForKey:kMFReaderBasesKey];
+            _baseCalibrationStatus = @"未校准（基址快照格式无效）";
+            return;
+        }
+        NSDictionary *snapshot = value;
+        if (![snapshot[@"version"] isEqual:@1] ||
+            ![snapshot[@"identity"] isKindOfClass:NSDictionary.class] ||
+            ![snapshot[@"identity"] isEqual:identity] ||
+            !MFReaderIsUnsignedInteger(snapshot[@"rootObjectBase"]) ||
+            !MFReaderIsUnsignedInteger(snapshot[@"entityArrayBase"]) ||
+            !MFReaderIsUnsignedInteger(snapshot[@"lootArrayBase"])) {
+            [defaults removeObjectForKey:kMFReaderBasesKey];
+            _baseCalibrationStatus = @"未校准（旧快照身份不匹配或字段无效）";
+            return;
+        }
+        self.rootObjectBase = [snapshot[@"rootObjectBase"] unsignedLongLongValue];
+        self.entityArrayBase = [snapshot[@"entityArrayBase"] unsignedLongLongValue];
+        self.lootArrayBase = [snapshot[@"lootArrayBase"] unsignedLongLongValue];
+        _baseCalibrationStatus = @"已恢复（仅限同一目标进程实例，字段仍需真机校准）";
+    }
+}
+
+- (void)saveBasesToDefaults {
+    @synchronized (self) {
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        NSDictionary *identity = MFReaderProcessIdentity(self.targetTaskPort);
+        if (!identity) {
+            [self clearBasesWithStatus:@"未校准（缺少进程实例身份，已丢弃绝对地址）"];
+            [defaults removeObjectForKey:kMFReaderBasesKey];
+            [defaults synchronize];
+            return;
+        }
+        if (!(self.rootObjectBase || self.entityArrayBase || self.lootArrayBase)) {
+            [defaults removeObjectForKey:kMFReaderBasesKey];
+            _baseCalibrationStatus = @"未校准（三个基址均为 0）";
+        } else {
+            [defaults setObject:@{@"version": @1, @"identity": identity,
+                @"rootObjectBase": @(self.rootObjectBase),
+                @"entityArrayBase": @(self.entityArrayBase),
+                @"lootArrayBase": @(self.lootArrayBase)} forKey:kMFReaderBasesKey];
+            _baseCalibrationStatus = @"已保存（仅限当前目标进程实例）";
+        }
+        if (![defaults synchronize]) _baseCalibrationStatus = @"基址快照保存失败";
+    }
+}
+
+- (NSString *)calibrationSummary {
+    @synchronized (self) {
+        NSString *state = _baseCalibrationStatus ?: @"未校准（尚未加载或保存进程实例快照）";
+        return [NSString stringWithFormat:@"%@\nroot=0x%llx ent=0x%llx loot=0x%llx", state,
+            (unsigned long long)self.rootObjectBase,
+            (unsigned long long)self.entityArrayBase,
+            (unsigned long long)self.lootArrayBase];
+    }
 }
 
 #pragma mark - ① 相机
@@ -261,6 +395,7 @@
     [s appendFormat:@"门条件：%@\n", self.ready ? @"已就绪" : @"未就绪"];
     [s appendFormat:@"目标端口：0x%x\n", self.targetTaskPort];
     [s appendFormat:@"%@\n\n", [[MFReadBackend shared] statsText]];
+    [s appendFormat:@"基址校准：%@\n\n", self.calibrationSummary];
     [s appendString:[[MFOffsets shared] summary]];
     [s appendFormat:@"\n\n%@", [[MFProjection shared] conventionText]];
 

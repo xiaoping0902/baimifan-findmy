@@ -1,6 +1,3 @@
-//
-//  MFHUDLauncher.mm — 派生 HUD 进程（实现）
-//
 #import "MFHUDLauncher.h"
 #import "MFHUDLog.h"
 #import "MFHUDStartupStatus.h"
@@ -9,377 +6,311 @@
 #import <spawn.h>
 #import <signal.h>
 #import <sys/stat.h>
-#import <sys/types.h>     // uid_t / gid_t（persona 私有 API 的参数类型）
+#import <sys/sysctl.h>
+#import <sys/proc.h>
+#import <sys/types.h>
 #import <sys/wait.h>
 #import <unistd.h>
-#import <mach-o/dyld.h>    // _NSGetExecutablePath（root 助手取自己的路径）
+#import <mach-o/dyld.h>
+#include <atomic>
+#include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
-#include <stdlib.h>      // calloc / free（root 助手拼 argv）
+#include <stdlib.h>
 
-/*
- * libproc.h 在 iOS 公开 SDK 里不存在（构建 #12 踩过），自己声明。
- * PROC_PIDPATHINFO_MAXSIZE = 4 * MAXPATHLEN = 4096
- */
 #ifndef PROC_PIDPATHINFO_MAXSIZE
 #define PROC_PIDPATHINFO_MAXSIZE (4 * 1024)
 #endif
-
 extern "C" {
 int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
-
-/*
- * ★ [M5.22] persona 相关私有 API —— 必须放在【文件作用域】。
- *
- * 之前写在函数体内（extern "C" { ... } 在块作用域），
- * 构建 #50 报：
- *     error: use of undeclared identifier 'posix_spawnattr_set_persona_uid_np'
- *     error: use of undeclared identifier 'posix_spawnattr_set_persona_gid_np'
- *     did you mean 'posix_spawnattr_set_csm_np'?
- * 说明块作用域的 extern "C" 声明没生效到调用点。
- *
- * 这三个是 Apple 私有 API，iOS 公开 SDK 的 <spawn.h> 里没有，所以自己声明。
- * 用途见 spawnHUD 里的注释（以 root 身份派生 HUD 子进程）。
- */
 #define MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 int posix_spawnattr_set_persona_np(const posix_spawnattr_t *attr, uid_t persona, uint32_t flags);
 int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *attr, uid_t uid);
 int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *attr, uid_t gid);
 }
-
 extern char **environ;
-
-/// PID 文件路径的唯一权威定义在 MFHUDControl（HUD 侧的看门狗要用同一个路径）。
-/// 原版白米饭用 /var/mobile/Library/Caches/ch.xxtou.hudapp.pid，
-/// 我们用自己的名字，避免与真白米饭冲突。
 #define kPIDFile MFHUDPIDFilePath
 
-/*
- * ★★ 审查修正（HUD 报告 §1.7）：探活不能只用 kill(pid, 0) ★★
- *
- * 问题：全工程没有 waitpid、也没装 SIGCHLD 处理器。
- *   posix_spawn 出来的子进程一旦死掉而父进程没回收，就变成僵尸。
- *   而 kill(僵尸进程, 0) 【返回 0（成功）】—— 因为进程表里还有这个条目。
- *   后果两个，都很致命：
- *     ① 状态行永久显示「运行中 PID xxx」，你以为它在跑
- *     ② isHUDRunning 恒为真 → startHUD 直接拒绝 → 【再也拉不起第二个 HUD】
- *        你每测一次都得重装 App
- *
- * 修法：三重判定
- *   ① waitpid(WNOHANG) —— 顺手回收僵尸，能收掉就说明已经死了
- *   ② proc_pidpath 能读出路径 —— 真活着的进程才有（僵尸读不到）
- *   ③ kill(pid, 0) 兜底
- */
-static BOOL MFPidAlive(pid_t p) {
-    if (p <= 0) return NO;
-
-    // ① 先试回收。能收到 → 它已经死了（我们之前没收）
-    int status = 0;
-    pid_t w = waitpid(p, &status, WNOHANG);
-    if (w == p) {
-        NSLog(@"[MF][HUDLaunch] pid=%d 是僵尸，已回收（status=0x%x）", p, status);
-        return NO;
-    }
-
-    // ② proc_pidpath 对僵尸返回失败
-    char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
-    if (proc_pidpath(p, path, sizeof(path)) <= 0) {
-        return NO;
-    }
-
-    // ③ 兜底
-    return (kill(p, 0) == 0 || errno == EPERM);
+static const void *kMFLifecycleQueueKey = &kMFLifecycleQueueKey;
+static std::atomic<uint64_t> sStopGeneration(0);
+static NSDictionary *sOwnedChildRecord;
+static dispatch_queue_t MFLifecycleQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.mf.hud.lifecycle", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(queue, kMFLifecycleQueueKey, (void *)kMFLifecycleQueueKey, NULL);
+    });
+    return queue;
 }
+static NSString *MFExecutablePath(void) {
+    return NSBundle.mainBundle.executablePath.stringByResolvingSymlinksInPath;
+}
+static NSString *MFProcessBirth(pid_t pid) {
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    struct kinfo_proc info = {};
+    size_t length = sizeof(info);
+    if (sysctl(mib, 4, &info, &length, NULL, 0) != 0 || length < sizeof(info) ||
+        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0) return nil;
+    return [NSString stringWithFormat:@"%lld:%06d", (long long)info.kp_proc.p_starttime.tv_sec,
+        (int)info.kp_proc.p_starttime.tv_usec];
+}
+static NSDictionary *MFCurrentRecord(void) {
+    NSDictionary *saved = [MFHUDControl readPIDRecord];
+    if (saved) return saved;
+    @synchronized (MFHUDControl.class) { return sOwnedChildRecord; }
+}
+static void MFForgetRecord(NSDictionary *record) {
+    [MFHUDControl removePIDRecordIfMatching:record];
+    @synchronized (MFHUDControl.class) {
+        if ([sOwnedChildRecord isEqual:record]) sOwnedChildRecord = nil;
+    }
+}
+typedef NS_ENUM(NSInteger, MFProcessIdentity) {
+    MFProcessExited, MFProcessMatches, MFProcessCooperativeOnly, MFProcessUnrelated, MFProcessUnknown
+};
+static MFProcessIdentity MFInspectRecord(NSDictionary *record) {
+    pid_t pid = [record[@"pid"] intValue];
+    if (pid <= 0) return MFProcessExited;
+    int status = 0;
+    pid_t observed;
+    do { observed = waitpid(pid, &status, WNOHANG); } while (observed < 0 && errno == EINTR);
+    if (observed == pid) return MFProcessExited;
+    char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) > 0) {
+        NSString *actual = [NSString stringWithUTF8String:path].stringByResolvingSymlinksInPath;
+        NSString *expected = MFExecutablePath();
+        id stored = record[@"executable"];
+        if (![actual isEqual:expected] || (stored && (![stored isKindOfClass:NSString.class] ||
+            ![[stored stringByResolvingSymlinksInPath] isEqual:expected]))) return MFProcessUnrelated;
+        id birth = record[@"birth"];
+        // Old decimal records can still use their cooperative notification.
+        // An executable path alone cannot authorize signals after PID reuse.
+        if (!birth) return MFProcessCooperativeOnly;
+        if (![birth isKindOfClass:NSString.class] || ![birth length]) return MFProcessUnrelated;
+        NSString *actualBirth = MFProcessBirth(pid);
+        if (!actualBirth) return MFProcessUnknown;
+        if (![actualBirth isEqual:birth]) return MFProcessUnrelated;
+        return MFProcessMatches;
+    }
+    // A denied path query is not proof of death. Keep identity for retry and
+    // never use a signal/task port unless both path and birth were matched.
+    if (kill(pid, 0) < 0 && errno == ESRCH) return MFProcessExited;
+    return MFProcessUnknown;
+}
+static BOOL MFWaitForExit(NSDictionary *record, NSTimeInterval timeout) {
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + timeout;
+    do {
+        MFProcessIdentity identity = MFInspectRecord(record);
+        if (identity == MFProcessExited || identity == MFProcessUnrelated) {
+            MFForgetRecord(record);
+            return YES;
+        }
+        usleep(50 * 1000);
+    } while (NSProcessInfo.processInfo.systemUptime < deadline);
+    return NO;
+}
+static void MFObserveChild(NSDictionary *record) {
+    pid_t pid = [record[@"pid"] intValue];
+    __block dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC,
+        (uintptr_t)pid, DISPATCH_PROC_EXIT, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!source) return; // Explicit probes still reap on platforms denying a proc source.
+    dispatch_source_set_event_handler(source, ^{
+        int status = 0;
+        pid_t observed;
+        do { observed = waitpid(pid, &status, WNOHANG); } while (observed < 0 && errno == EINTR);
+        if (observed == pid || (observed < 0 && errno == ECHILD)) MFForgetRecord(record);
+        dispatch_source_cancel(source);
+    });
+    dispatch_source_set_cancel_handler(source, ^{ source = nil; });
+    dispatch_resume(source);
+}
+
+@interface MFHUDLauncher (LifecyclePrivate)
++ (BOOL)spawnHUDWithToken:(NSString *)token pid:(pid_t *)pid record:(NSDictionary **)record error:(NSString **)error;
++ (BOOL)stopRecord:(NSDictionary *)record error:(NSString **)error;
++ (BOOL)forceTerminateWithTaskPortForRecord:(NSDictionary *)record;
++ (BOOL)stopCurrentWithError:(NSString **)error;
+@end
 
 @implementation MFHUDLauncher
-
 + (NSString *)pidFilePath { return kPIDFile; }
-
 + (pid_t)hudPID {
-    NSString *s = [NSString stringWithContentsOfFile:kPIDFile
-                                            encoding:NSUTF8StringEncoding
-                                               error:NULL];
-    if (!s) return 0;
-    pid_t p = (pid_t)s.intValue;
-    if (p <= 0) return 0;
-
-    if (MFPidAlive(p)) return p;
-
-    // ★ 死了就立刻清 PID 文件，否则永远拉不起第二个
-    [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
-    MFHUDLogLine(@"hudPID: pid=%d 已不在，PID 文件已清理", p);
+    NSDictionary *record = MFCurrentRecord();
+    if (!record) return 0;
+    MFProcessIdentity identity = MFInspectRecord(record);
+    if (identity != MFProcessExited && identity != MFProcessUnrelated) return [record[@"pid"] intValue];
+    MFForgetRecord(record);
     return 0;
 }
++ (BOOL)isHUDRunning { return [self hudPID] > 0; }
 
-+ (BOOL)isHUDRunning {
-    return [self hudPID] != 0;
++ (BOOL)spawnHUDWithToken:(NSString *)token pid:(pid_t *)spawnedPID record:(NSDictionary **)spawnedRecord error:(NSString **)err {
+    __block BOOL spawned = NO;
+    __block NSString *failure = nil;
+    __block NSDictionary *identityRecord = nil;
+    BOOL locked = [MFHUDControl withPIDRecordLock:^{
+        if ([self isHUDRunning]) { failure = @"HUD 已在运行"; return; }
+        NSString *exe = MFExecutablePath();
+        if (!exe) { failure = @"取不到自身可执行路径"; return; }
+        posix_spawnattr_t attr;
+        int rc = posix_spawnattr_init(&attr);
+        if (rc != 0) { failure = [NSString stringWithFormat:@"初始化派生属性失败：%s", strerror(rc)]; return; }
+        int p1 = posix_spawnattr_set_persona_np(&attr, 99, MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+        int p2 = posix_spawnattr_set_persona_uid_np(&attr, 0);
+        int p3 = posix_spawnattr_set_persona_gid_np(&attr, 0);
+        sigset_t emptyMask, defaultSignals;
+        sigemptyset(&emptyMask);
+        sigemptyset(&defaultSignals);
+        sigaddset(&defaultSignals, SIGTERM);
+        sigaddset(&defaultSignals, SIGINT);
+        int group = posix_spawnattr_setpgroup(&attr, 0);
+        int mask = posix_spawnattr_setsigmask(&attr, &emptyMask);
+        int defaults = posix_spawnattr_setsigdefault(&attr, &defaultSignals);
+        int flags = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+        if (p1 || p2 || p3 || group || mask || defaults || flags) {
+            posix_spawnattr_destroy(&attr);
+            failure = [NSString stringWithFormat:@"HUD 派生权限/信号属性失败：persona=%d/%d/%d group=%d mask=%d defaults=%d flags=%d",
+                p1, p2, p3, group, mask, defaults, flags];
+            return;
+        }
+        const char *path = exe.fileSystemRepresentation;
+        char *args[] = {(char *)path, (char *)"-hud", (char *)"-mf-session", (char *)token.UTF8String, NULL};
+        pid_t pid = 0;
+        rc = posix_spawn(&pid, path, NULL, &attr, args, environ);
+        posix_spawnattr_destroy(&attr);
+        if (rc != 0) { failure = [NSString stringWithFormat:@"posix_spawn 失败：%s (%d)", strerror(rc), rc]; return; }
+        if (spawnedPID) *spawnedPID = pid;
+        NSMutableDictionary *identity = [@{ @"pid": @(pid), @"token": token, @"executable": exe } mutableCopy];
+        NSString *birth = MFProcessBirth(pid);
+        if (birth) identity[@"birth"] = birth;
+        NSDictionary *record = [identity copy];
+        identityRecord = record;
+        @synchronized (MFHUDControl.class) { sOwnedChildRecord = record; }
+        MFObserveChild(record);
+        NSError *writeError = nil;
+        spawned = [MFHUDControl writePIDRecord:record error:&writeError];
+        if (!spawned) failure = [NSString stringWithFormat:@"无法保存 HUD 身份：%@", writeError.localizedDescription ?: @"目录不可写"];
+        MFHUDLogLine(@"派生 HUD：pid=%d token=%@ saved=%d", pid, token, spawned);
+    }];
+    if (spawnedRecord) *spawnedRecord = identityRecord;
+    if (!locked) failure = @"无法锁定 HUD 身份文件，请检查缓存目录权限。";
+    if (!spawned && err) *err = failure;
+    return spawned;
 }
 
-+ (BOOL)spawnHUDWithToken:(NSString *)token pid:(pid_t *)spawnedPID error:(NSString **)err {
-    // 先清一次可能的僵尸/陈旧 PID
-    (void)[self hudPID];
-
-    if ([self isHUDRunning]) {
-        if (err) *err = @"HUD 已在运行";
-        return NO;
++ (BOOL)stopRecord:(NSDictionary *)record error:(NSString **)err {
+    MFProcessIdentity identity = MFInspectRecord(record);
+    if (identity == MFProcessExited || identity == MFProcessUnrelated) { MFForgetRecord(record); return YES; }
+    pid_t pid = [record[@"pid"] intValue];
+    NSString *token = record[@"token"];
+    NSError *requestError = nil;
+    if (identity == MFProcessMatches || identity == MFProcessCooperativeOnly || token)
+        [MFHUDControl requestExitForPID:pid token:token error:&requestError];
+    if (MFWaitForExit(record, 2.0)) return YES;
+    int signalError = 0;
+    if (MFInspectRecord(record) == MFProcessMatches) {
+        if (kill(pid, SIGTERM) < 0) signalError = errno;
+        if (MFWaitForExit(record, 1.0)) return YES;
+        // Revalidate immediately before the privileged fallback too.
+        if (MFInspectRecord(record) == MFProcessMatches && [self forceTerminateWithTaskPortForRecord:record] &&
+            MFWaitForExit(record, 1.0)) return YES;
     }
-
-    NSString *exe = [NSBundle mainBundle].executablePath;
-    if (!exe) {
-        if (err) *err = @"取不到自身可执行路径";
-        return NO;
-    }
-
-    MFHUDLogLine(@"==== 开始派生 HUD 进程 ====");
-    MFHUDLogLine(@"exe = %@", exe);
-
-    const char *path = exe.fileSystemRepresentation;
-    char *argv[] = { (char *)path, (char *)"-hud", (char *)"-mf-session",
-                     (char *)token.UTF8String, NULL };
-
-    /*
-     * ══════════════════════════════════════════════════════════════
-     *  ★★★ [M5.22] 用 root 身份派生 —— 对齐 TrollSpeed ★★★
-     *
-     *  TrollSpeed（Lessica，开源，ch.xxtou.hudapp）的 SetHUDEnabled：
-     *
-     *      posix_spawnattr_t attr;
-     *      posix_spawnattr_init(&attr);
-     *      posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-     *      posix_spawnattr_set_persona_uid_np(&attr, 0);
-     *      posix_spawnattr_set_persona_gid_np(&attr, 0);
-     *      ...
-     *      posix_spawnattr_setpgroup(&attr, 0);
-     *      posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-     *      posix_spawn(&task_pid, executablePath, NULL, &attr, (char **)args, environ);
-     *
-     *  为什么这很重要：
-     *      HUD 子进程要调 GSInitialize() / BKSDisplayServicesStart() /
-     *      UIApplicationInitialize() 这些图形栈底层初始化。
-     *      以 mobile(501) 身份跑，这些大概率半途失败 →
-     *      UIApplication 内部状态不完整 → 窗口拿不到 CAContext。
-     *
-     *  依赖 entitlement：persona-mgmt（我们已验证生效）。
-     */
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-
-    int pr1 = posix_spawnattr_set_persona_np(&attr, 99, MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    int pr2 = posix_spawnattr_set_persona_uid_np(&attr, 0);
-    int pr3 = posix_spawnattr_set_persona_gid_np(&attr, 0);
-    MFHUDLogLine(@"persona 设定：np=%d uid=%d gid=%d（0 表示成功）", pr1, pr2, pr3);
-
-    posix_spawnattr_setpgroup(&attr, 0);
-    // GCD worker threads can block signals. Do not pass that mask into the
-    // long-lived HUD child, otherwise SIGTERM cannot stop a failed startup.
-    sigset_t emptyMask, defaultSignals;
-    sigemptyset(&emptyMask);
-    sigemptyset(&defaultSignals);
-    sigaddset(&defaultSignals, SIGTERM);
-    sigaddset(&defaultSignals, SIGINT);
-    posix_spawnattr_setsigmask(&attr, &emptyMask);
-    posix_spawnattr_setsigdefault(&attr, &defaultSignals);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, path, NULL, &attr, argv, environ);
-    posix_spawnattr_destroy(&attr);
-    if (rc != 0) {
-        if (err) {
-            *err = [NSString stringWithFormat:@"posix_spawn 失败: %s (rc=%d)", strerror(rc), rc];
-        }
-        MFHUDLogLine(@"posix_spawn 失败 rc=%d (%s)", rc, strerror(rc));
-        return NO;
-    }
-
-    NSLog(@"[MF][HUDLaunch] 已拉起 HUD 进程 pid=%d", pid);
-    MFHUDLogLine(@"posix_spawn 成功，子进程 pid=%d", pid);
-    // Return the child's identity even if saving its PID file fails, so the
-    // caller can still perform cleanup and report a root/mobile signal error.
-    if (spawnedPID) *spawnedPID = pid;
-
-    // 记 PID（目录不存在则忽略）
-    [[NSFileManager defaultManager] createDirectoryAtPath:
-        [kPIDFile stringByDeletingLastPathComponent]
-                                             withIntermediateDirectories:YES
-                                                              attributes:nil
-                                                                   error:NULL];
-    NSError *writeError = nil;
-    if (![[NSString stringWithFormat:@"%d", pid] writeToFile:kPIDFile atomically:YES
-                encoding:NSUTF8StringEncoding error:&writeError]) {
-        if (err) *err = [NSString stringWithFormat:@"无法保存 HUD PID：%@", writeError.localizedDescription];
-        return NO;
-    }
-    return YES;
+    if (err) *err = [NSString stringWithFormat:
+        @"HUD 尚未确认退出（PID %d）。已保留进程身份，可再次点结束；signal errno=%d，控制通道=%@。",
+        pid, signalError, requestError.localizedDescription ?: @"请求已送出"];
+    return NO;
 }
 
 + (void)startHUDWithCompletion:(void (^)(BOOL, NSString *))completion {
-    static dispatch_queue_t queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue = dispatch_queue_create("com.mf.hud.launch", DISPATCH_QUEUE_SERIAL); });
-    dispatch_async(queue, ^{
+    uint64_t generation = sStopGeneration.load();
+    dispatch_async(MFLifecycleQueue(), ^{
         @autoreleasepool {
             NSString *token = NSUUID.UUID.UUIDString;
             NSString *error = nil;
             NSError *writeError = nil;
             pid_t pid = 0;
+            NSDictionary *record = nil;
             BOOL ready = NO;
-            // The parent creates the directory as mobile before the root child
-            // writes its reports. A UUID also prevents old PID/report reuse.
-            BOOL prepared = [MFHUDStartupStatus writeReport:@{ @"token": token, @"pid": @0,
-                                 @"state": @"starting" } token:token error:&writeError];
-            if (!prepared) {
-                error = [NSString stringWithFormat:@"无法创建 HUD 启动状态文件：%@",
-                         writeError.localizedDescription ?: @"目录不可写"];
-            } else if ([self spawnHUDWithToken:token pid:&pid error:&error]) {
+            BOOL cancelled = generation != sStopGeneration.load();
+            BOOL prepared = !cancelled && [MFHUDStartupStatus writeReport:
+                @{ @"token": token, @"pid": @0, @"state": @"starting" } token:token error:&writeError];
+            if (cancelled) {
+                error = @"HUD 启动已取消。";
+            } else if (!prepared) {
+                error = [NSString stringWithFormat:@"无法创建 HUD 启动状态文件：%@", writeError.localizedDescription ?: @"目录不可写"];
+            } else if ([self spawnHUDWithToken:token pid:&pid record:&record error:&error]) {
                 NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 12.0;
                 while (NSProcessInfo.processInfo.systemUptime < deadline) {
                     NSDictionary *report = [MFHUDStartupStatus readReportForToken:token];
-                    BOOL alive = MFPidAlive(pid);
-                    MFHUDStartupState state = [MFHUDStartupStatus stateForReport:report
-                                                 pid:pid token:token processAlive:alive];
+                    if (generation != sStopGeneration.load() || [report[@"state"] isEqual:@"stopped"] ||
+                        [report[@"state"] isEqual:@"stopping"]) { error = @"HUD 启动已取消。"; break; }
+                    MFProcessIdentity identity = MFInspectRecord(record);
+                    BOOL alive = identity != MFProcessExited && identity != MFProcessUnrelated;
+                    MFHUDStartupState state = [MFHUDStartupStatus stateForReport:report pid:pid token:token processAlive:alive];
                     if (state == MFHUDStartupReady) { ready = YES; break; }
-                    if (state == MFHUDStartupFailed) {
-                        error = [report[@"error"] isKindOfClass:NSString.class] ? report[@"error"] : @"HUD 初始化失败";
+                    if (state == MFHUDStartupFailed || state == MFHUDStartupExited) {
+                        error = [report[@"error"] isKindOfClass:NSString.class] ? report[@"error"] :
+                            (alive ? @"HUD 初始化失败。" : @"HUD 在窗口就绪前退出，请查看 HUD 日志。");
                         break;
                     }
-                    if (state == MFHUDStartupExited) {
-                        error = [NSString stringWithFormat:@"HUD 在窗口就绪前退出（PID %d），请查看 HUD 日志。", pid];
-                        // Do not erase a replacement process's PID file.
-                        NSString *stored = [NSString stringWithContentsOfFile:kPIDFile
-                            encoding:NSUTF8StringEncoding error:NULL];
-                        if (stored.intValue == pid)
-                            [NSFileManager.defaultManager removeItemAtPath:kPIDFile error:NULL];
-                        break;
-                    }
-                    usleep(100 * 1000); // Worker queue only; the console stays responsive.
+                    usleep(100 * 1000);
                 }
-                if (!ready && !error)
-                    error = @"HUD 启动超时：未收到两窗注册与首帧回报。请查看 HUD 日志后重试。";
+                if (!ready && !error) error = @"HUD 启动超时：未收到两窗注册与首帧回报。";
             }
-            if (!ready && pid > 0) {
-                // Reap a failed child and remove only this launch's PID. The
-                // HUD also exits itself on failure (root/mobile signal rules).
-                int childStatus = 0;
-                pid_t observed;
-                do { observed = waitpid(pid, &childStatus, WNOHANG); }
-                while (observed < 0 && errno == EINTR);
-                int signalResult = 0, signalError = 0;
-                if (observed == 0) {
-                    signalResult = kill(pid, SIGTERM);
-                    signalError = signalResult < 0 ? errno : 0;
-                    for (int attempt = 0; attempt < 50 && observed == 0; attempt++) {
-                        usleep(20 * 1000);
-                        do { observed = waitpid(pid, &childStatus, WNOHANG); }
-                        while (observed < 0 && errno == EINTR);
-                    }
-                }
-                int waitError = observed < 0 ? errno : 0;
-                BOOL confirmedExit = observed == pid ||
-                    (observed < 0 && waitError == ECHILD && !MFPidAlive(pid));
-                if (confirmedExit) {
-                    NSString *stored = [NSString stringWithContentsOfFile:kPIDFile
-                        encoding:NSUTF8StringEncoding error:NULL];
-                    if (stored.intValue == pid)
-                        [NSFileManager.defaultManager removeItemAtPath:kPIDFile error:NULL];
-                } else {
-                    error = [NSString stringWithFormat:@"%@\nHUD 尚未确认退出（PID %d，signal=%d errno=%d wait=%d），请先结束该进程。",
-                             error ?: @"初始化失败", pid, signalResult, signalError, waitError];
-                }
+            if (!ready && record) {
+                NSString *cleanupError = nil;
+                if (![self stopRecord:record error:&cleanupError])
+                    error = [NSString stringWithFormat:@"%@\n%@", error ?: @"初始化失败", cleanupError];
             }
-            MFHUDLogLine(@"启动等待结果：pid=%d ready=%d %@", pid, ready, error ?: @"");
-            NSString *reportPath = [MFHUDStartupStatus reportPathForToken:token];
-            if (reportPath) [NSFileManager.defaultManager removeItemAtPath:reportPath error:NULL];
-            dispatch_async(dispatch_get_main_queue(), ^{ completion(ready, error); });
+            // Preserve terminal diagnostics. UUID-scoped files cannot become a
+            // later launch's readiness report.
+            MFHUDLogLine(@"启动结果：pid=%d ready=%d %@", pid, ready, error ?: @"");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                BOOL accepted = ready && generation == sStopGeneration.load() && [self hudPID] == pid;
+                if (completion) completion(accepted, ready && !accepted ? @"HUD 已停止或启动已取消。" : error);
+            });
         }
     });
 }
 
-/*
- * ★★ 退出通道改造（M5.66）★★
- *
- * 原来的实现是：
- *     kill(p, SIGTERM) → 失败就报错
- *
- * 为什么一直失败：HUD 子进程是 persona + uid 0（root）拉起来的，
- * 控制台是 mobile(501)。Unix 规则是「发送者的 real/effective uid 必须等于
- * 目标的 real/saved uid」—— mobile 给 root 发信号，内核直接 EPERM。
- * 用户看到的就是「结束失败 errno=1 (Operation not permitted)」，
- * 菜单里也没有退出入口 —— HUD 起得来、退不掉。
- *
- * 现在的顺序：
- *   ① Darwin 通知 + 删 PID 文件 → HUD 自己结束自己（不需要任何权限）
- *   ② 等 2 秒
- *   ③ 还活着就补一发 SIGTERM（记录真实 errno，不掩盖）
- *   ④ 再不行用 task port 强制终止（靠 task_for_pid-allow）
- */
-+ (BOOL)forceTerminateWithTaskPort:(pid_t)pid {
++ (BOOL)forceTerminateWithTaskPortForRecord:(NSDictionary *)record {
+    if (MFInspectRecord(record) != MFProcessMatches) return NO;
+    pid_t pid = [record[@"pid"] intValue];
+    typedef kern_return_t (*TaskForPID)(mach_port_name_t, int, mach_port_name_t *);
+    TaskForPID acquire = (TaskForPID)dlsym(RTLD_DEFAULT, "task_for_pid");
+    if (!acquire) return NO;
     mach_port_t task = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        MFHUDLogLine(@"兜底 task_for_pid(%d) 失败 kr=0x%x", pid, kr);
-        return NO;
-    }
-    kr = task_terminate(task);
+    kern_return_t result = acquire(mach_task_self(), pid, &task);
+    if (result != KERN_SUCCESS || task == MACH_PORT_NULL) return NO;
+    // The port is tied to a task instance. Recheck after acquisition before
+    // terminating so PID reuse during task_for_pid cannot target a new task.
+    result = MFInspectRecord(record) == MFProcessMatches ? task_terminate(task) : KERN_FAILURE;
     mach_port_deallocate(mach_task_self(), task);
-    MFHUDLogLine(@"兜底 task_terminate(%d) kr=0x%x", pid, kr);
-    return kr == KERN_SUCCESS;
+    return result == KERN_SUCCESS;
 }
-
++ (BOOL)stopCurrentWithError:(NSString **)err {
+    NSDictionary *record = MFCurrentRecord();
+    return !record || [self stopRecord:record error:err];
+}
 + (BOOL)stopHUDWithError:(NSString **)err {
-    pid_t p = [self hudPID];
-    if (p <= 0) {
-        if (err) *err = @"HUD 未在运行";
-        return NO;
-    }
-
-    [MFHUDControl requestExit];   // 通知 + 删 PID 文件（双通道）
-
-    // ① 等 HUD 自己退出（看门狗最长 1 秒一轮，这里给 2 秒）
-    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 2.0;
-    while (NSProcessInfo.processInfo.systemUptime < deadline) {
-        if (!MFPidAlive(p)) {
-            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
-            NSLog(@"[MF][HUDLaunch] HUD 已按请求自行退出 pid=%d", p);
-            MFHUDLogLine(@"HUD 自行退出完成 pid=%d", p);
-            return YES;
-        }
-        usleep(50 * 1000);
-    }
-
-    // ② 通知没生效（例如 HUD 主线程卡住）→ 补发信号，记录真实错误码
-    int signalResult = kill(p, SIGTERM);
-    int signalError = (signalResult != 0) ? errno : 0;
-    MFHUDLogLine(@"HUD 未在 2 秒内自行退出，补发 SIGTERM：r=%d errno=%d(%s)",
-                 signalResult, signalError, strerror(signalError));
-
-    deadline = NSProcessInfo.processInfo.systemUptime + 1.0;
-    while (NSProcessInfo.processInfo.systemUptime < deadline) {
-        if (!MFPidAlive(p)) {
-            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
-            MFHUDLogLine(@"HUD 在 SIGTERM 后退出 pid=%d", p);
-            return YES;
-        }
-        usleep(50 * 1000);
-    }
-
-    // ③ 最后手段：拿 task port 直接终止（entitlement 里有 task_for_pid-allow）
-    if ([self forceTerminateWithTaskPort:p]) {
-        for (int i = 0; i < 20 && MFPidAlive(p); i++) usleep(50 * 1000);
-        if (!MFPidAlive(p)) {
-            [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
-            MFHUDLogLine(@"HUD 已由 task_terminate 结束 pid=%d", p);
-            return YES;
-        }
-    }
-
-    if (err) {
-        *err = [NSString stringWithFormat:
-            @"悬浮窗（PID %d）没有响应退出请求。\n"
-            @"已尝试：Darwin 通知、删除 PID 文件、SIGTERM(errno=%d)、task_terminate。\n"
-            @"可以重开一次「查找」再点结束，或直接重启设备。", p, signalError];
-    }
-    return NO;
+    sStopGeneration.fetch_add(1);
+    if (dispatch_get_specific(kMFLifecycleQueueKey)) return [self stopCurrentWithError:err];
+    __block BOOL stopped = NO;
+    __block NSString *failure = nil;
+    dispatch_sync(MFLifecycleQueue(), ^{ stopped = [self stopCurrentWithError:&failure]; });
+    if (!stopped && err) *err = failure;
+    return stopped;
+}
++ (void)stopHUDWithCompletion:(void (^)(BOOL, NSString *))completion {
+    // Cancel an in-flight start immediately; the serialized stop then confirms
+    // that launch's cleanup before another start can be admitted.
+    sStopGeneration.fetch_add(1);
+    dispatch_async(MFLifecycleQueue(), ^{
+        NSString *error = nil;
+        BOOL stopped = [self stopCurrentWithError:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(stopped, error); });
+    });
 }
 
 #pragma mark - [M5.26] root 助手

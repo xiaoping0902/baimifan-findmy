@@ -169,7 +169,7 @@ def check_symbols(problems: list):
     overlay_h = (app / "Render/MFOverlayView.h").read_text(encoding='utf-8')
     overlay_m = (app / "Render/MFOverlayView.mm").read_text(encoding='utf-8')
     for sel in ["beginInteractiveRects", "addInteractiveRect", "endInteractiveRects",
-                "requestRedraw", "hasInteractiveRects"]:
+                "requestRedraw", "hasInteractiveRects", "acceptsInteractionAtPoint"]:
         if sel not in overlay_h:
             problems.append(f"MFOverlayView.h 缺少 {sel}")
         if sel not in overlay_m:
@@ -185,9 +185,11 @@ def check_symbols(problems: list):
 
     # AppDelegate 必须实现退出收尾；通道安装点在引导阶段（MFHUDApplication）
     appdelegate_m = (app / "HUD/MFHUDAppDelegate.mm").read_text(encoding='utf-8')
-    for needle in ["shutdownForExitRequest", "stopWatching", "MFHUDPIDFilePath"]:
+    for needle in ["shutdownForExitRequest", "stopWatching", "isStopping"]:
         if needle not in appdelegate_m:
             problems.append(f"MFHUDAppDelegate.mm 缺少 {needle}")
+    if re.search(r"removeItemAtPath:\s*MFHUDPIDFilePath", appdelegate_m):
+        problems.append("MFHUDAppDelegate must retain process identity until confirmed death")
     appdelegate_h = (app / "HUD/MFHUDAppDelegate.h").read_text(encoding='utf-8')
     if "shutdownForExitRequest" not in appdelegate_h:
         problems.append("MFHUDAppDelegate.h 缺少 shutdownForExitRequest")

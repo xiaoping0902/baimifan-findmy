@@ -30,8 +30,9 @@ static void Expect(BOOL condition, const char *message) {
     std::fflush(stderr);
 }
 
-// The deliberate wait is below the production acquisition boundary. The
-// drawable is obtained from CAMetalLayer and rendered/presented by real Metal.
+// The deliberate wait is below the production acquisition boundary, before
+// entering the driver (which may itself wait for a main-thread transaction).
+// The drawable is then obtained and presented by real Metal.
 @interface WaitingMetalLayer : CAMetalLayer
 @property (nonatomic, strong, readonly) dispatch_semaphore_t entered;
 @property (nonatomic, strong, readonly) dispatch_semaphore_t releaseOne;
@@ -62,14 +63,14 @@ static void Expect(BOOL condition, const char *message) {
     unsigned previous = _maxConcurrent.load();
     while (previous < concurrent && !_maxConcurrent.compare_exchange_weak(previous, concurrent)) { }
     if (NSThread.isMainThread) _mainThreadCalls.fetch_add(1);
-    id<CAMetalDrawable> drawable = [super nextDrawable];
-    if (!drawable) _missingDrawables.fetch_add(1);
     dispatch_semaphore_signal(self.entered);
     if (_waitingEnabled.load()) {
         // Finite even if a test fails: no simulator process can hang forever.
         dispatch_semaphore_wait(self.releaseOne,
             dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
     }
+    id<CAMetalDrawable> drawable = [super nextDrawable];
+    if (!drawable) _missingDrawables.fetch_add(1);
     _concurrent.fetch_sub(1);
     return drawable;
 }
@@ -92,12 +93,14 @@ static void Expect(BOOL condition, const char *message) {
 
 @interface FrameCounter : NSObject <MFOverlayViewDelegate>
 @property unsigned builds, offMainBuilds;
+@property (strong) dispatch_semaphore_t built;
 @end
 @implementation FrameCounter
 - (void)overlayBuildUI:(MFImGuiContext *)context overlay:(MFOverlayView *)overlay {
     self.builds++;
     if (!NSThread.isMainThread) self.offMainBuilds++;
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(2, 2), ImVec2(12, 12), IM_COL32_WHITE);
+    if (self.built) dispatch_semaphore_signal(self.built);
 }
 @end
 
@@ -221,6 +224,7 @@ static void TestActualFrameTime(dispatch_block_t completion) {
 }
 
 static void TestDrawableWaitDoesNotBlockMain(dispatch_block_t completion) {
+    std::puts("CASE: drawable wait preserves main-queue responsiveness");
     OverlayFixture *fixture = [OverlayFixture new];
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
     [fixture start];
@@ -236,6 +240,13 @@ static void TestDrawableWaitDoesNotBlockMain(dispatch_block_t completion) {
         });
         BOOL responsive = dispatch_semaphore_wait(pulse,
             dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC)) == 0;
+        if (!responsive) {
+            // A blocked main queue cannot run Expect() or finish the suite.
+            // Report from this independent deadline before touching the driver.
+            std::fprintf(stderr, "FAIL: main queue must run input work while nextDrawable remains blocked\n");
+            std::fflush(stderr);
+            std::exit(1);
+        }
         unsigned acquisitionsWhileHeld = layer.calls;
         [layer releaseAll];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -253,8 +264,17 @@ static void TestDrawableWaitDoesNotBlockMain(dispatch_block_t completion) {
 }
 
 static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t completion) {
+    std::puts("CASE: stop/resize/restart rejects a late drawable");
     OverlayFixture *fixture = [OverlayFixture new];
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
+    dispatch_semaphore_t firstFrame = dispatch_semaphore_create(0);
+    __block unsigned firstFrameCallbacks = 0;
+    __block NSString *firstFrameError;
+    fixture.overlay.firstFrameCompletion = ^(NSString *error) {
+        firstFrameCallbacks++;
+        firstFrameError = error;
+        dispatch_semaphore_signal(firstFrame);
+    };
     [fixture start];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL entered = dispatch_semaphore_wait(layer.entered,
@@ -288,11 +308,80 @@ static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t comple
                    "a stopped generation's late drawable must not build or present a restarted frame");
             Expect(!fixture.overlay.hasCompletedFrame,
                    "a discarded old drawable must not report first-frame readiness");
+            Expect(firstFrameCallbacks == 0, "the first-frame observer must ignore a stopped generation");
             [layer releaseAll];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                Expect(fixture.counter.builds > 0, "the restarted renderer must resume with a fresh drawable");
-                Expect(fixture.counter.offMainBuilds == 0, "restarted ImGui frames must remain on main");
-                [fixture dispose]; completion();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                BOOL completed = dispatch_semaphore_wait(firstFrame,
+                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    Expect(fixture.counter.builds > 0, "the restarted renderer must resume with a fresh drawable");
+                    Expect(completed && firstFrameCallbacks == 1 && firstFrameError == nil &&
+                           fixture.overlay.hasCompletedFrame,
+                           "only the restarted generation's GPU completion may notify first-frame readiness");
+                    Expect(fixture.counter.offMainBuilds == 0, "restarted ImGui frames must remain on main");
+                    [fixture dispose]; completion();
+                });
+            });
+        });
+    });
+}
+
+static void PumpTicks(MFOverlayView *overlay, unsigned remaining, dispatch_block_t completion) {
+    if (!remaining) { completion(); return; }
+    [overlay tick:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        PumpTicks(overlay, remaining - 1, completion);
+    });
+}
+
+static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
+    std::puts("CASE: held GPU work bounds drawable acquisitions and resumes after completion");
+    OverlayFixture *fixture = [OverlayFixture new];
+    WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
+    [layer releaseAll];
+    id<MTLSharedEvent> barrier = [fixture.overlay.imgui.device newSharedEvent];
+    if (!barrier) {
+        Expect(NO, "GPU backpressure regression requires Metal shared events");
+        [fixture dispose]; completion(); return;
+    }
+    // Hold the real production command queue with a GPU-side wait. No Metal
+    // methods, command buffers or completion callbacks are replaced.
+    id<MTLCommandBuffer> blocker = [fixture.overlay.imgui.queue commandBuffer];
+    [blocker encodeWaitForEvent:barrier value:1];
+    [blocker commit];
+    dispatch_semaphore_t firstFrame = dispatch_semaphore_create(0);
+    fixture.overlay.firstFrameCompletion = ^(NSString *error) {
+        Expect(error == nil, "releasing GPU backpressure must complete without a Metal error");
+        dispatch_semaphore_signal(firstFrame);
+    };
+    fixture.counter.built = dispatch_semaphore_create(0);
+    [fixture start];
+    // Also release on an independent deadline if the broken implementation
+    // blocks main while trying to acquire a fourth layer drawable.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ barrier.signaledValue = 1; });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL built = dispatch_semaphore_wait(fixture.counter.built,
+            dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Expect(built, "GPU backpressure regression must build a real production frame");
+            PumpTicks(fixture.overlay, 40, ^{
+                Expect(barrier.signaledValue == 0, "GPU pressure assertions must run before the independent safety release");
+                Expect(fixture.counter.builds > 0 && fixture.counter.builds <= 2 && layer.calls <= 2,
+                       "held GPU completions must bound reserved/acquired/in-flight frames to two");
+                barrier.signaledValue = 1;
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    BOOL completed = dispatch_semaphore_wait(firstFrame,
+                        dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        Expect(completed && fixture.overlay.hasCompletedFrame,
+                               "GPU completion must return frame credits and restore renderer progress");
+                        PumpTicks(fixture.overlay, 20, ^{
+                            Expect(fixture.counter.builds > 2, "returned GPU credits must permit subsequent frames");
+                            [fixture dispose]; completion();
+                        });
+                    });
+                });
             });
         });
     });
@@ -302,15 +391,23 @@ static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t comple
 @end
 @implementation OverlayRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        std::fprintf(stderr, "FAIL: production overlay suite exceeded its independent deadline\n");
+        std::fflush(stderr);
+        std::exit(1);
+    });
     dispatch_async(dispatch_get_main_queue(), ^{
         TestInteractionGeometry();
         TestActualFrameTime(^{
             TestDrawableWaitDoesNotBlockMain(^{
                 TestStoppedGenerationCannotBuildAfterRestart(^{
-                    if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
-                    else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
-                    std::fflush(stdout); std::fflush(stderr);
-                    std::exit(sFailures ? 1 : 0);
+                    TestGPUBackpressureIsBounded(^{
+                        if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
+                        else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
+                        std::fflush(stdout); std::fflush(stderr);
+                        std::exit(sFailures ? 1 : 0);
+                    });
                 });
             });
         });

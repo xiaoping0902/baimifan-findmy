@@ -2,11 +2,13 @@
 #import "MFHUDControl.h"
 #import "MFHUDLauncher.h"
 #import "MFHUDStartupStatus.h"
+#import <notify.h>
 #include <atomic>
 #include <dlfcn.h>
 #include <errno.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -28,8 +30,10 @@ void MFHUDLogLine(NSString *format, ...) { }
 // Reproduce mobile -> root EPERM for our fixtures without requiring a setuid
 // helper on CI. Probes and test-only SIGKILL cleanup retain their real behavior.
 static std::atomic<bool> denyTermination(false);
-static int FixtureKill(pid_t pid, int sig) {
+static std::atomic<unsigned> deniedSignalCalls(0);
+extern "C" int kill(pid_t pid, int sig) {
     if (denyTermination.load() && pid > 0 && sig == SIGTERM) {
+        deniedSignalCalls.fetch_add(1);
         errno = EPERM;
         return -1;
     }
@@ -38,20 +42,17 @@ static int FixtureKill(pid_t pid, int sig) {
     if (!realKill) { errno = ENOSYS; return -1; }
     return realKill(pid, sig);
 }
-__attribute__((used)) static struct { const void *replacement; const void *original; }
-    killInterposition __attribute__((section("__DATA,__interpose"))) = {
-        (const void *)&FixtureKill, (const void *)&kill
-    };
 
 @interface SignalDeniedLauncher : MFHUDLauncher
 @end
 @implementation SignalDeniedLauncher
-+ (BOOL)forceTerminateWithTaskPort:(pid_t)pid { return NO; }
++ (BOOL)forceTerminateWithTaskPortForRecord:(NSDictionary *)record { return NO; }
 @end
 
 static pid_t children[16];
 static size_t childCount;
 static NSMutableArray<NSString *> *reportTokens;
+static NSString *childIdentityPath;
 
 static void RememberChild(pid_t pid) {
     if (pid <= 0) return;
@@ -72,6 +73,7 @@ static void Cleanup(void) {
         NSString *path = [MFHUDStartupStatus reportPathForToken:token];
         if (path) [NSFileManager.defaultManager removeItemAtPath:path error:NULL];
     }
+    if (childIdentityPath) [NSFileManager.defaultManager removeItemAtPath:childIdentityPath error:NULL];
     if (childCount) [NSFileManager.defaultManager removeItemAtPath:MFHUDPIDFilePath error:NULL];
 }
 
@@ -102,15 +104,28 @@ static NSDictionary *ReadyReport(NSString *token) {
 
 static void RunChild(NSString *token) {
     NSString *mode = [NSString stringWithUTF8String:getenv("MF_HUD_LIFECYCLE_MODE") ?: "responsive"];
-    if (![mode isEqual:@"unresponsive"]) {
+    if ([mode isEqual:@"legacy"]) {
+        // Characterize the old binary's unscoped listener without substituting
+        // the new control implementation in any of the other cases.
+        int legacyToken = NOTIFY_TOKEN_INVALID;
+        Check(notify_register_dispatch(MFHUDExitNotificationName.UTF8String, &legacyToken,
+              dispatch_get_main_queue(), ^(int t) { _exit(EXIT_SUCCESS); }) == NOTIFY_STATUS_OK,
+              "legacy fixture must install its old notification protocol");
+    } else if (![mode isEqual:@"unresponsive"]) {
         [MFHUDControl watchForExitRequest:^{ _exit(EXIT_SUCCESS); }];
+    }
+    const char *identityPath = getenv("MF_HUD_LIFECYCLE_CHILD_ID_PATH");
+    if (identityPath) {
+        Check([[NSString stringWithFormat:@"%d", getpid()] writeToFile:[NSString stringWithUTF8String:identityPath]
+            atomically:YES encoding:NSUTF8StringEncoding error:NULL], "publish independent test child identity");
     }
     NSMutableDictionary *report = [ReadyReport(token) mutableCopy];
     if ([mode isEqual:@"failed"]) {
         report[@"state"] = @"failed";
         report[@"error"] = @"fixture initialization failure";
     }
-    Check([MFHUDStartupStatus writeReport:report token:token error:NULL], "child must publish its actual startup result");
+    if (![mode isEqual:@"silent"])
+        Check([MFHUDStartupStatus writeReport:report token:token error:NULL], "child must publish its actual startup result");
     if ([mode isEqual:@"blocked"] || [mode isEqual:@"unresponsive"]) {
         // The real control implementation must enforce its exit deadline even
         // while UIKit's main thread never returns to the run loop.
@@ -146,6 +161,7 @@ static pid_t LaunchReady(const char *mode) {
         finished = YES;
     }];
     Check(PumpUntil(^BOOL {
+        RememberChild([[NSString stringWithContentsOfFile:childIdentityPath encoding:NSUTF8StringEncoding error:NULL] intValue]);
         RememberChild([MFHUDLauncher hudPID]);
         return finished;
     }, 16), "real child startup must finish within its deadline");
@@ -186,7 +202,9 @@ static void TestFailedStopCanBeRetried(void) {
     pid_t pid = LaunchReady("unresponsive");
     denyTermination.store(true);
     NSString *error = nil;
-    Check(!StopOnWorker(SignalDeniedLauncher.class, &error), "inaccessible unresponsive child must report stop failure");
+    BOOL stopped = StopOnWorker(SignalDeniedLauncher.class, &error);
+    Check(deniedSignalCalls.load() > 0, "permission fixture must intercept production SIGTERM calls");
+    Check(!stopped, "inaccessible unresponsive child must report stop failure");
     Check(error.length > 0 && ProcessHasPath(pid), "failed stop must describe the still-living child");
     Check([MFHUDLauncher hudPID] == pid, "failed stop must retain the same PID for retry and duplicate-start prevention");
     denyTermination.store(false);
@@ -208,8 +226,8 @@ static void TestSessionIsolation(void) {
     Check(ProcessHasPath(older), "a current-session exit request must not terminate a different session");
 }
 
-static void TestFailedStartupUsesCooperativeExit(void) {
-    setenv("MF_HUD_LIFECYCLE_MODE", "failed", 1);
+static void TestFailedStartupUsesCooperativeExit(const char *mode) {
+    setenv("MF_HUD_LIFECYCLE_MODE", mode, 1);
     denyTermination.store(true);
     __block BOOL finished = NO, ready = YES;
     [SignalDeniedLauncher startHUDWithCompletion:^(BOOL result, NSString *error) {
@@ -218,6 +236,7 @@ static void TestFailedStartupUsesCooperativeExit(void) {
         finished = YES;
     }];
     Check(PumpUntil(^BOOL {
+        RememberChild([[NSString stringWithContentsOfFile:childIdentityPath encoding:NSUTF8StringEncoding error:NULL] intValue]);
         RememberChild([MFHUDLauncher hudPID]);
         return finished;
     }, 16), "failed startup must complete");
@@ -236,6 +255,47 @@ static void TestRejectUnrelatedLegacyPID(void) {
         encoding:NSUTF8StringEncoding error:NULL], "write stale legacy PID fixture");
     Check([MFHUDLauncher hudPID] == 0, "legacy PID belonging to another executable must never be accepted as HUD");
     Check(ProcessHasPath(pid), "rejecting a stale PID must leave the unrelated executable untouched");
+}
+
+static void TestRejectReusedSameExecutablePID(void) {
+    NSDictionary *stale = @{ @"pid": @(getpid()), @"token": NSUUID.UUID.UUIDString,
+        @"executable": NSBundle.mainBundle.executablePath.stringByResolvingSymlinksInPath,
+        @"birth": @"1:000001" };
+    Check([MFHUDControl writePIDRecord:stale error:NULL], "write stale same-executable identity");
+    Check([MFHUDLauncher hudPID] == 0,
+          "a reused PID in the same executable must be rejected when process birth differs");
+    Check([MFHUDControl writePIDRecord:stale error:NULL], "restore stale identity for direct stop");
+    denyTermination.store(true);
+    Check(StopOnWorker(SignalDeniedLauncher.class, NULL), "a stale process instance must already count as stopped");
+    Check(deniedSignalCalls.load() == 0, "stop must not signal a different birth of the same executable");
+    Check(ProcessHasPath(getpid()), "rejecting reused HUD identity must leave the console alive");
+}
+
+static void TestMissingBirthCannotAuthorizeSignal(void) {
+    pid_t pid = LaunchReady("unresponsive");
+    NSDictionary *original = [MFHUDControl readPIDRecord];
+    Check([original[@"birth"] isKindOfClass:NSString.class], "new child record must persist actual process birth");
+    NSMutableDictionary *unverified = [original mutableCopy];
+    [unverified removeObjectForKey:@"birth"];
+    Check([MFHUDControl writePIDRecord:unverified error:NULL], "write identity without process birth");
+    denyTermination.store(true);
+    Check(!StopOnWorker(SignalDeniedLauncher.class, NULL), "an unverified unresponsive process cannot confirm exit");
+    Check(deniedSignalCalls.load() == 0, "missing birth must permit cooperative requests without authorizing signals");
+    Check(ProcessHasPath(pid) && [MFHUDLauncher hudPID] == pid,
+          "failed cooperative-only stop must retain the live identity for retry");
+    Check([MFHUDControl writePIDRecord:original error:NULL], "restore positively verified child identity");
+    denyTermination.store(false);
+    Check(StopOnWorker(MFHUDLauncher.class, NULL), "verified child can still use the normal termination fallback");
+}
+
+static void TestReadOnlyLockCanSerialize(void) {
+    Check([MFHUDControl withPIDRecordLock:^{}], "initialize shared lock fixture");
+    NSString *path = [MFHUDPIDFilePath stringByAppendingString:@".lock"];
+    Check(chmod(path.fileSystemRepresentation, 0444) == 0, "make existing lock readable without write access");
+    __block BOOL ran = NO;
+    BOOL locked = [MFHUDControl withPIDRecordLock:^{ ran = YES; }];
+    chmod(path.fileSystemRepresentation, 0644);
+    Check(locked && ran, "read-only lock descriptor must still serialize root/mobile lifecycle operations");
 }
 
 static void TestDuplicateAndRestart(void) {
@@ -262,23 +322,103 @@ static void TestCooperativeExitReapsChild(void) {
           "launcher must reap its exited child even after menu-style cooperative exit");
 }
 
+static void TestLegacyRecordCanStillStop(void) {
+    pid_t pid = LaunchReady("legacy");
+    Check([[NSString stringWithFormat:@"%d", pid] writeToFile:MFHUDPIDFilePath atomically:YES
+        encoding:NSUTF8StringEncoding error:NULL], "replace metadata with a legacy decimal PID record");
+    Check([MFHUDLauncher hudPID] == pid, "a live legacy HUD executable must remain discoverable");
+    denyTermination.store(true);
+    Check(StopOnWorker(SignalDeniedLauncher.class, NULL), "old PID records must retain their cooperative notification exit");
+    Check(!ProcessHasPath(pid), "legacy stop success must mean the old child is gone");
+}
+
+static void TestConsoleReopenUsesPersistedSession(void) {
+    pid_t hud = LaunchReady("responsive");
+    NSString *exe = NSBundle.mainBundle.executablePath;
+    char *args[] = {(char *)exe.fileSystemRepresentation, (char *)"stop-existing-console", NULL};
+    pid_t console = 0;
+    Check(posix_spawn(&console, exe.fileSystemRepresentation, NULL, NULL, args, environ) == 0,
+          "spawn a fresh console with no in-memory session state");
+    RememberChild(console);
+    __block pid_t observed = 0;
+    __block int status = 0;
+    Check(PumpUntil(^BOOL { observed = waitpid(console, &status, WNOHANG); return observed != 0; }, 7),
+          "reopened console stop must complete");
+    Check(observed == console && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "fresh console must find and cooperatively stop the persisted session");
+    Check(!ProcessHasPath(hud) && ![MFHUDLauncher isHUDRunning], "fresh console cannot hide a still-running HUD");
+}
+
+static void TestStartupCancellation(void) {
+    setenv("MF_HUD_LIFECYCLE_MODE", "silent", 1);
+    __block BOOL finished = NO, ready = YES;
+    [MFHUDLauncher startHUDWithCompletion:^(BOOL result, NSString *error) { ready = result; finished = YES; }];
+    __block pid_t pid = 0;
+    Check(PumpUntil(^BOOL {
+        pid = [[NSString stringWithContentsOfFile:childIdentityPath encoding:NSUTF8StringEncoding error:NULL] intValue];
+        return pid > 0;
+    }, 3), "silent child must exist before cancelling startup");
+    RememberChild(pid);
+    Check(StopOnWorker(MFHUDLauncher.class, NULL), "stop during startup must cancel its readiness wait");
+    Check(finished && !ready && !ProcessHasPath(pid), "cancelled startup must finish without leaving its child running");
+    LaunchReady("responsive");
+    Check(StopOnWorker(MFHUDLauncher.class, NULL), "a cancelled launch must allow a later clean restart");
+}
+
+static void TestTerminalStartupReports(void) {
+    NSString *token = NSUUID.UUID.UUIDString;
+    [reportTokens addObject:token];
+    NSMutableDictionary *report = [ReadyReport(token) mutableCopy];
+    report[@"state"] = @"stopped";
+    Check([MFHUDStartupStatus writeReport:report token:token error:NULL], "publish terminal stopped report");
+    Check([MFHUDStartupStatus stateForReport:report pid:getpid() token:token processAlive:YES] != MFHUDStartupExited,
+          "a stopped acknowledgement cannot claim a living process has exited");
+    report[@"state"] = @"ready";
+    Check([MFHUDStartupStatus writeReport:report token:token error:NULL], "late frame report must be handled without transport error");
+    Check([[[MFHUDStartupStatus readReportForToken:token] objectForKey:@"state"] isEqual:@"stopped"],
+          "late ready must not overwrite a terminal stopped report");
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         NSString *token = [MFHUDStartupStatus currentToken];
         if (token) { RunChild(token); return 0; }
         Check(argc == 2, "supply one lifecycle case name");
+        if (!strcmp(argv[1], "stop-existing-console")) {
+            NSString *error = nil;
+            BOOL stopped = [MFHUDLauncher stopHUDWithError:&error];
+            if (!stopped) fprintf(stderr, "Fresh console stop error: %s\n", error.UTF8String);
+            return stopped ? 0 : 1;
+        }
         reportTokens = [NSMutableArray array];
+        childIdentityPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"mf-hud-lifecycle-%@.pid", NSUUID.UUID.UUIDString]];
+        setenv("MF_HUD_LIFECYCLE_CHILD_ID_PATH", childIdentityPath.fileSystemRepresentation, 1);
         atexit(Cleanup);
+        denyTermination.store(true);
+        errno = 0;
+        Check(kill(getpid(), SIGTERM) == -1 && errno == EPERM && deniedSignalCalls.load() == 1,
+              "permission fixture must demonstrably deny SIGTERM before exercising production");
+        denyTermination.store(false);
+        deniedSignalCalls.store(0);
         Check(![MFHUDLauncher isHUDRunning], "fixture host must not already contain a running HUD");
         const char *name = argv[1];
         if (!strcmp(name, "retain-request")) TestRetainedIdentityAfterRequest();
         else if (!strcmp(name, "failed-stop")) TestFailedStopCanBeRetried();
         else if (!strcmp(name, "blocked-main")) TestBlockedMainQueueExit();
         else if (!strcmp(name, "session-isolation")) TestSessionIsolation();
-        else if (!strcmp(name, "startup-cleanup")) TestFailedStartupUsesCooperativeExit();
+        else if (!strcmp(name, "startup-cleanup")) TestFailedStartupUsesCooperativeExit("failed");
+        else if (!strcmp(name, "startup-timeout")) TestFailedStartupUsesCooperativeExit("silent");
         else if (!strcmp(name, "foreign-pid")) TestRejectUnrelatedLegacyPID();
+        else if (!strcmp(name, "same-executable-pid")) TestRejectReusedSameExecutablePID();
+        else if (!strcmp(name, "missing-birth")) TestMissingBirthCannotAuthorizeSignal();
+        else if (!strcmp(name, "readonly-lock")) TestReadOnlyLockCanSerialize();
         else if (!strcmp(name, "restart")) TestDuplicateAndRestart();
         else if (!strcmp(name, "reap")) TestCooperativeExitReapsChild();
+        else if (!strcmp(name, "legacy-record")) TestLegacyRecordCanStillStop();
+        else if (!strcmp(name, "console-reopen")) TestConsoleReopenUsesPersistedSession();
+        else if (!strcmp(name, "cancel-start")) TestStartupCancellation();
+        else if (!strcmp(name, "terminal-report")) TestTerminalStartupReports();
         else Check(NO, "unknown lifecycle case");
         printf("PASS: lifecycle %s\n", name);
     }

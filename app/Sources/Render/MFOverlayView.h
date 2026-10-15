@@ -35,14 +35,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// The HUD uses a BKS/AX input bridge, so UIKit must not enqueue duplicate touches.
 @property (nonatomic, assign) BOOL usesExternalTouchInput;
 
-/// ★ 整窗穿透：置 YES 后本视图对窗口服务器完全不可命中，
-///   但 HUD 的 ImGui 输入走 BKSHIDEventRegisterEventCallback 全局事件流，
-///   所以菜单本身仍然能点、能拖。
+/// 整窗穿透。UIKit 和共享 HID 命中几何同时拒绝输入。
 @property (nonatomic, assign) BOOL passthroughAll;
+
+/// 共享输入几何：只查询有效、可见范围内的控件/标题矩形，无 UIKit 副作用。
+/// passthroughAll 或非交互视图恒返回 NO；HID Began 与 UIKit 使用同一规则。
+- (BOOL)acceptsInteractionAtPoint:(CGPoint)point;
 
 /// ★ 可交互矩形集合（视图坐标）。
 ///   菜单每帧把每个真实控件的位置上报进来；落在集合外的点会
 ///   `hitTest` 返回 nil，事件因此穿透到下层 App。
+///   矩形必须是有限的正尺寸，并裁剪到视图 bounds；调用者先按 child/popup
+///   的可见视口裁剪。命中不再外扩，以免将已裁掉的区域重新变为可交互。
 ///   没上报过任何矩形时退化成「整个 captureRect 都可交互」（旧行为）。
 - (void)beginInteractiveRects;
 - (void)addInteractiveRect:(CGRect)rect;
