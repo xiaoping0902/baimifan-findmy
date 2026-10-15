@@ -168,6 +168,16 @@ const char *mf_last_stage(void);
 /* 最近一次失败发生的位置（"file:line"）；无则 "n/a"。 */
 const char *mf_last_error_site(void);
 
+/*
+ * 读回 kfd 内部的 printf 诊断日志。
+ * kfd 用 printf 输出 9 个偏移的查找过程，但 iOS 上 App 的 stdout 既不进
+ * syslog 也没人接 —— 失败时只能看到最后那句 "run_kfd_patchfinder failed"。
+ * 桥接层把它重定向到沙盒 Documents/mf_kfd.log，这里读回来给 UI 显示。
+ *
+ * 返回 malloc 的字符串，调用方负责 free()；没有日志时返回 NULL。
+ */
+char *mf_read_klog(void);
+
 /* 打开日志：非 0 时内核链会把诊断打到 stderr（debug 用）。 */
 void mf_set_verbose(int enabled);
 

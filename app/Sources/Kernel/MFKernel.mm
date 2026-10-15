@@ -4,6 +4,7 @@
 #import "MFKernel.h"
 #import "MFKernelBridge.h"
 
+#import <UIKit/UIKit.h>          // forceRestartWithReason 弹窗用
 #import <mach/mach.h>
 #import <mach/mach_host.h>
 #import <mach/task_special_ports.h>
@@ -414,6 +415,60 @@ extern "C" {
         if (strncmp(p.name.UTF8String, name.UTF8String, want) == 0) return p;
     }
     return nil;
+}
+
+#pragma mark - 诊断
+
++ (NSString *)kernelLog {
+    char *raw = mf_read_klog();
+    if (raw == NULL) {
+        return @"（还没有内核日志 —— 先去跑一次「启动内核」）";
+    }
+    NSString *s = [NSString stringWithUTF8String:raw];
+    free(raw);
+    return s.length ? s : @"（日志为空）";
+}
+
++ (void)forceRestartWithReason:(NSString *)reason {
+    NSLog(@"[MF][Kernel] 准备重启 App：%@", reason);
+
+    UIViewController *top = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) { top = w.rootViewController; break; }
+        }
+    }
+    while (top.presentedViewController) top = top.presentedViewController;
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"需要重启 App"
+                         message:[NSString stringWithFormat:
+                                  @"%@\n\n"
+                                  @"为什么必须重启：\n"
+                                  @"· KFD 失败时已在进程里占住约 1 万个文件描述符，无法安全回收\n"
+                                  @"· 内核态可能残留未清理的 PUAF 页\n"
+                                  @"· 原地重试会导致 kernel panic（你已经遇到过了）\n\n"
+                                  @"点「现在退出」后重新打开本 App 即可。",
+                                  reason ?: @""]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"现在退出"
+                                          style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction *_) {
+        NSLog(@"[MF][Kernel] 用户确认退出，exit(0)");
+        exit(0);
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel
+                                       handler:^(UIAlertAction *_) {
+        NSLog(@"[MF][Kernel] 用户选择稍后 —— 再试有 panic 风险");
+    }]];
+
+    if (top) {
+        [top presentViewController:a animated:YES completion:nil];
+    } else {
+        NSLog(@"[MF][Kernel] 没有可用 VC，直接退出");
+        exit(0);
+    }
 }
 
 #pragma mark - 内核读写

@@ -80,6 +80,18 @@ typedef NS_ENUM(NSInteger, MFEnumRoute) {
 /// 按进程名匹配（对标原实现 proc_pidpath + strrchr + strncmp 前缀匹配）
 - (nullable MFProcessInfo *)findProcessNamed:(NSString *)name;
 
+#pragma mark 诊断
+
+/// 读回 kfd 内部的 printf 诊断日志（9 个偏移的查找过程）。
+/// 失败时这是唯一能看出卡在哪一步的东西。
++ (nullable NSString *)kernelLog;
+
+/// KFD 失败后【必须】重启 App：
+///   · fd 表已被 ~10000 个 sem_open 占住，且失败路径无法安全回收
+///   · 内核态可能残留未清理的 PUAF 页 —— 原地重试会 kernel panic（已实测）
+/// 调用后弹确认框，用户点确定就 exit(0)。
++ (void)forceRestartWithReason:(NSString *)reason;
+
 #pragma mark 内核读写（桥接层透传）
 
 - (BOOL)kreadAddress:(uint64_t)kaddr into:(void *)out size:(uint64_t)size;

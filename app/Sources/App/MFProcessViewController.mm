@@ -38,6 +38,8 @@
     self.toolbarItems = @[
         [[UIBarButtonItem alloc] initWithTitle:@"能力探测" style:UIBarButtonItemStylePlain
                                         target:self action:@selector(probe)],
+        [[UIBarButtonItem alloc] initWithTitle:@"内核日志" style:UIBarButtonItemStylePlain
+                                        target:self action:@selector(showKernelLog)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
                                                       target:nil action:nil],
         [[UIBarButtonItem alloc] initWithTitle:@"启动内核" style:UIBarButtonItemStyleDone
@@ -157,10 +159,52 @@
         [self.spinner startAnimating];
         [[MFKernel shared] startWithPuafPages:2048 completion:^(BOOL ok, NSString *message) {
             [self.spinner stopAnimating];
-            [self alert:ok ? @"启动成功" : @"启动失败" message:message];
             [self reload];
+
+            if (ok) {
+                [self alert:@"启动成功" message:message];
+                return;
+            }
+
+            // ★ 失败后强制重启：fd 表已污染 + 内核态可能有残留 PUAF 页
+            UIAlertController *f = [UIAlertController
+                alertControllerWithTitle:@"启动失败"
+                                 message:message
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [f addAction:[UIAlertAction actionWithTitle:@"看内核日志"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [self showKernelLog];
+            }]];
+            [f addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel
+                                               handler:^(UIAlertAction *_) {
+                [MFKernel forceRestartWithReason:@"内核启动失败"];
+            }]];
+            [self presentViewController:f animated:YES completion:nil];
         }];
     }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+/// 内核日志查看器：kfd 用 printf 输出的 9 个偏移查找过程
+- (void)showKernelLog {
+    NSString *log = [MFKernel kernelLog];
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"内核日志"
+                         message:[NSString stringWithFormat:
+                                  @"%@\n\n"
+                                  @"关注这几行：\n"
+                                  @"  defeated kaslr, kbase: …    ← 破 KASLR 成功\n"
+                                  @"  pfinder_init: success!       ← patchfinder 初始化\n"
+                                  @"  cdevsw / gPhysBase / …       ← 9 个偏移逐个回填\n"
+                                  @"哪一行缺了，就死在那一步。",
+                                  log]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"复制全文" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *_) {
+        [UIPasteboard generalPasteboard].string = log;
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
 

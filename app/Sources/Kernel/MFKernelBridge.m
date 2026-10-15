@@ -57,6 +57,8 @@
 
 /* ── 标准库 ───────────────────────────────────────────────────── */
 #include <errno.h>
+#include <fcntl.h>       /* open / O_CREAT —— 给 mf_redirect_klog 用 */
+#include <unistd.h>      /* dup2 / getpid */
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -137,11 +139,105 @@ void mf_kfd_fail_hook(const char *what, const char *file, int line)
 }
 
 /* ================================================================ */
+/* 1b) __assert_rtn 兜底                                             */
+/* ================================================================ */
+
+/*
+ * ★ 为什么需要这一层（真机崩溃报告实锤）：
+ *
+ *   [MF PATCH 01] 把 libkfd/common.h 的 assert 宏改成走 mf_kfd_fail_hook，
+ *   但 <assert.h> 是【无 include guard 且内部会 #undef assert】的头文件。
+ *   kread_sem_open.h 里 #include "libdimentio.h" / "patchfinder.h" 会拐进
+ *   Foundation → <assert.h>，于是我们的宏被顶回系统版本。
+ *
+ *   结果（设备上的真实崩溃报告 FindMy-2026-10-15-115826.ips）：
+ *     __assert_rtn -> abort
+ *     kread_sem_open_allocate.cold.1   ← 卡在这里直接闪退
+ *   而不是弹出可读的错误框。
+ *
+ *   修法：不从宏层拦，改从【符号层】拦。
+ *   整个进程里所有 assert 失败都要经过 __assert_rtn，我们在这里接管。
+ *   这是 libSystem 的公开 ABI 符号，本镜像内的引用会优先解析到我们的定义。
+ */
+void __assert_rtn(const char *func, const char *file, int line, const char *expr)
+{
+    (void)func;
+    mf_kfd_fail_hook((expr != NULL) ? expr : "assert", file, line);
+
+    /*
+     * 走到这里说明钩子没 longjmp（g_fail_armed == 0，没人 setjmp 落点）。
+     * 保持上游语义：真的中断，不静默吞错。
+     */
+    abort();
+}
+
+/* ================================================================ */
+/* 1c) 把 kfd 内部的 printf 诊断重定向到文件                          */
+/* ================================================================ */
+
+static int g_klog_fd = -1;
+
+/*
+ * kfd 内部大量用 printf 输出诊断，形如：
+ *     defeated kaslr, kbase: 0xfffffe0007...
+ *     pfinder_init: success!
+ *     cdevsw: 0x...
+ *     gPhysBase: 0x...
+ * 但 iOS 上 App 的 stdout 既不进 syslog、也没人接着 —— 失败时我们只
+ * 看到最后那句 "run_kfd_patchfinder failed"，不知道它死在 9 个偏移里的哪一个。
+ *
+ * 这里把 stdout/stderr 重定向到沙盒里的 mf_kfd.log，
+ * 界面「内核日志」页能读回来（见 mf_read_klog）。
+ *
+ * 只重定向一次；任何失败都静默 —— 日志不是关键路径。
+ */
+static void mf_redirect_klog(void)
+{
+    if (g_klog_fd >= 0) return;
+
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                          NSUserDomainMask, YES) firstObject];
+    if (docs == nil) return;
+
+    NSString *path = [docs stringByAppendingPathComponent:@"mf_kfd.log"];
+    int fd = open(path.fileSystemRepresentation, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return;
+
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    g_klog_fd = fd;
+
+    printf("[mf] ==== kfd log opened  pid=%d  puaf/landa 前置日志 ====\n", getpid());
+    fflush(stdout);
+}
+
+/* 读回内核日志（UI 用）。返回 malloc 的字符串，调用方 free；没有则 NULL。 */
+char *mf_read_klog(void)
+{
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                          NSUserDomainMask, YES) firstObject];
+    if (docs == nil) return NULL;
+
+    NSString *path = [docs stringByAppendingPathComponent:@"mf_kfd.log"];
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    if (d == nil || d.length == 0) return NULL;
+
+    char *out = (char *)malloc(d.length + 1);
+    if (out == NULL) return NULL;
+    memcpy(out, d.bytes, d.length);
+    out[d.length] = '\0';
+    return out;
+}
+
+/* ================================================================ */
 /* 2) 生命周期                                                       */
 /* ================================================================ */
 
 int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
 {
+    /* 先把 kfd 内部的 printf 诊断接进文件，失败时才能看出死在 9 个偏移里的哪一个 */
+    mf_redirect_klog();
+
     if (g_kfd != NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "already open (call mf_kclose first)");
         return -2;
