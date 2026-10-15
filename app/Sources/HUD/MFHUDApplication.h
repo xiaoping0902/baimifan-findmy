@@ -49,17 +49,20 @@ int MFLaunchHUDRole(int argc, char *argv[]);
 void MFDumpWindowAPI(void);
 
 /*
- * [M5.21] 给窗口自造并绑定一个 CAContext。
+ * [M5.21] 给窗口自造并绑定一个 CAContext。返回绑好的 context；失败返回 nil。
  *
  * 真机勘探结论：posix_spawn 的子进程 connectedScenes = 0，
  * 没有 UIWindowScene 就拿不到 CAContext，_contextId 恒为 0，
  * registerWindowWithContextID:0 静默无效 —— 窗口永远不显示。
  *
  * 于是手动建一个 CAContext（设备上已证存在
- * initWithOptions:localContext: / contextId / setLayer: / setSecure:），
- * 再用窗口的 _setBoundContext: 绑上去。
+ * initRemoteWithOptions: / initWithOptions:localContext: /
+ * contextId / setLayer: / setSecure:），再用窗口的 _setBoundContext: 绑上去。
+ *
+ * [M5.24] 改为返回 id 并严格校验 contextId != 0：
+ *   拿不到非 0 的 id 就返回 nil，调用方据此报错，不再继续往下走。
  */
-void MFAttachContextToWindow(UIWindow *window, NSString *tag);
+id MFAttachContextToWindow(UIWindow *window, NSString *tag);
 
 /*
  * 给窗口打上「系统窗口 / 安全窗口」标记。

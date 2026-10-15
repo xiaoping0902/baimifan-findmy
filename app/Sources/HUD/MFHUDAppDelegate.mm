@@ -281,6 +281,46 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
 
+    /*
+     * ══════════════════════════════════════════════════════════════
+     *  ★ [M5.24] 显示链路自检色块 —— 采纳另一位分析者的建议
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 原话：「验证这一层时，可以先显示一个固定位置、颜色明显的普通 UIView 色块。
+     *        色块能跨应用显示，就说明基础窗口显示链路已经接通，
+     *        再继续验证 ImGui 菜单，排查范围会清楚很多。」
+     *
+     * 这个思路很对 —— 把「窗口能不能显示」和「ImGui 能不能渲染」
+     * 拆开验证。色块用的是最朴素的东西（UIView + backgroundColor），
+     * 只要它不显示，问题就一定在窗口/托管层，与渲染无关。
+     *
+     * 放在屏幕右上角，不挡菜单；尺寸够大，一眼能看到。
+     */
+    {
+        CGFloat w = 120, h = 120;
+        CGRect f = CGRectMake(UIScreen.mainScreen.bounds.size.width - w - 24,
+                              60, w, h);
+        UIView *tv = [[UIView alloc] initWithFrame:f];
+        tv.backgroundColor = [UIColor colorWithRed:1.0 green:0.15 blue:0.45 alpha:0.92];
+        tv.layer.cornerRadius = 16;
+        tv.layer.borderWidth = 4;
+        tv.layer.borderColor = [UIColor whiteColor].CGColor;
+        tv.userInteractionEnabled = NO;
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:tv.bounds];
+        lbl.text = @"色块\n测试";
+        lbl.numberOfLines = 0;
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.font = [UIFont boldSystemFontOfSize:26];
+        lbl.textColor = [UIColor whiteColor];
+        [tv addSubview:lbl];
+
+        [menuVC.view addSubview:tv];
+        self.testColorView = tv;
+        MFHUDLogLine(@"已放入测试色块：frame=%@（右上角粉红色方块）",
+                     NSStringFromCGRect(f));
+    }
+
     // ── ③ 启动渲染 ───────────────────────────────────
     NSString *err = nil;
     if (![drawView startRenderingWithError:&err]) {
@@ -348,9 +388,15 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
          * 先自己建 context 并绑上，再去托管 —— 否则 _contextId=0，托管必然无效。
          */
         MFHUDLogLine(@"---- 自造 CAContext（核心修复）----");
-        MFAttachContextToWindow(self.hudMenuWindow, @"菜单");
-        MFAttachContextToWindow(self.drawingWindow, @"绘制");
-        MFHUDLogLine(@"---- 自造结束，准备托管 ----");
+        /*
+         * [M5.24] context 存进属性，生命周期覆盖整个悬浮窗显示期
+         * （采纳另一位分析者建议：原来只放局部变量，函数返回就没，存在隐患）
+         */
+        self.menuContext    = MFAttachContextToWindow(self.hudMenuWindow, @"菜单");
+        self.drawingContext = MFAttachContextToWindow(self.drawingWindow, @"绘制");
+        MFHUDLogLine(@"---- 自造结束（菜单=%@ 绘制=%@），准备托管 ----",
+                     self.menuContext ? @"成功" : @"失败",
+                     self.drawingContext ? @"成功" : @"失败");
 
         for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
                                self.drawingWindow ?: (id)[NSNull null] ]) {

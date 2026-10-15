@@ -2,24 +2,103 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- 平台应用身份（白米饭包内同款，TrollStore 环境生效） -->
+	<!-- ══════════════════════════════════════════════════════════
+	     [M5.24] 权限对齐 TrollSpeed（Lessica，开源，ch.xxtou.hudapp）
+	     ══════════════════════════════════════════════════════════
+
+	     起因：用户点出「我们的这个软件不是所有的给他所有的权限呀」。
+	     拿 TrollSpeed 的 supports/entitlements.plist 逐条比对，
+	     我们少了 17 项 —— 其中两项直接决定 HUD 能不能显示：
+
+	       com.apple.QuartzCore.displayable-context
+	           字面意思就是「可显示的 context」。
+	           没有它，QuartzCore 不会分配可用的 display context，
+	           于是 CAContext.contextId 恒为 0，
+	           registerWindowWithContextID:0 静默无效 —— 窗口永远不显示。
+	           这正是我们卡了很多轮的那个现象。
+
+	       com.apple.backboard.client
+	           BackBoardServices 客户端权限。
+	           TrollSpeed 的 HUDApp.mm 里那句 BKSDisplayServicesStart()
+	           需要它；缺权限时该调用会静默失败，
+	           于是 GSInitialize / GSEvent 这条图形栈初始化链不完整。
+
+	     其它补上的（HID 事件、内存状态、后台样式等）也都是 TrollSpeed
+	     在用的，属于「HUD 应用的标准配置」。
+	     ══════════════════════════════════════════════════════════ -->
+
+	<!-- ── 身份 ── -->
+	<key>application-identifier</key>
+	<string>com.apple.findmy</string>
 	<key>platform-application</key>
 	<true/>
-	<!-- 沙盒完全豁免：内核链 / 清理 / 防封 读系统目录的前提 -->
+
+	<!-- ── ★★★ 显示链路核心（我们之前完全没有）─── -->
+	<key>com.apple.QuartzCore.displayable-context</key>
+	<true/>
+	<key>com.apple.QuartzCore.secure-mode</key>
+	<true/>
+	<key>com.apple.backboard.client</key>
+	<true/>
+
+	<!-- ── 沙盒豁免 ── -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<!-- 系统应用包目录访问（AppBundles） -->
 	<key>com.apple.private.security.storage.AppBundles</key>
 	<true/>
-	<!-- persona 管理 -->
+
+	<!-- ── persona 管理（HUD 子进程 root 身份派生要用）─── -->
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
-	<!-- HUD 跨 App 窗口托管（SpringBoard 辅助窗口） —— M2 悬浮窗的前提 -->
+
+	<!-- ── HUD 跨 App 窗口托管（SpringBoard 辅助窗口）─── -->
 	<key>com.apple.springboard.accessibility-window-hosting</key>
 	<true/>
-	<!-- task_for_pid 权限 -->
+	<key>com.apple.springboard.appbackgroundstyle</key>
+	<true/>
+	<key>com.apple.springboard.CFUserNotification</key>
+	<true/>
+	<key>com.apple.springboard.disallowControlCenter</key>
+	<true/>
+	<key>com.apple.springboard.disallowNotificationCenter</key>
+	<true/>
+
+	<!-- ── HID 事件（HUD 菜单要能收到触摸）─── -->
+	<key>com.apple.private.hid.client.event-dispatch</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-filter</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-monitor</key>
+	<true/>
+	<key>com.apple.private.hid.client.service-protected</key>
+	<true/>
+	<key>com.apple.private.hid.manager.client</key>
+	<true/>
+
+	<!-- ── 内存状态 / jetsam ── -->
+	<key>com.apple.private.memorystatus</key>
+	<true/>
+	<key>com.apple.private.kernel.jetsam</key>
+	<true/>
+
+	<!-- ── 其它 ── -->
+	<key>com.apple.private.allow-background-haptics</key>
+	<true/>
+	<key>file-read-data</key>
+	<true/>
+	<key>user-preference-read</key>
+	<true/>
+	<key>user-preference-write</key>
+	<true/>
+
+	<!-- ══════════════════════════════════════════════════════════
+	     以下是我们自己那条主线要用的（TrollSpeed 没有）
+	     ══════════════════════════════════════════════════════════ -->
+
+	<!-- task_for_pid：读游戏进程内存（「一键开始」四步链路的前提） -->
 	<key>task_for_pid-allow</key>
 	<true/>
+
 	<!-- IOKit 用户客户端（GPU / Surface，Metal 绘制层） -->
 	<key>com.apple.security.exception.iokit-user-client-class</key>
 	<array>

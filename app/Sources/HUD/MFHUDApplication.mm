@@ -129,34 +129,62 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
         return nil;
     }
 
+    /*
+     * ★★ [M5.24] 严格校验 —— 采纳另一位分析者的意见 ★★
+     *
+     * 原话：「现在的逻辑有一个明显缺口：创建 context → 只要对象不是 nil 就继续
+     *        → 即使 contextId 是 0，也只打印日志 → 继续绑定窗口。
+     *        应该改成：创建适用于跨进程托管的 context → 检查对象存在，
+     *        并且 contextId 非 0 → ...任一步失败，都向上返回具体错误。」
+     *
+     * 而且他点出关键：「对象存在」并不代表它具有可用于跨进程托管的显示 ID。
+     * 同时设备的方法列表里已经有 initRemoteWithOptions:，
+     * remote context 的创建路径应该作为对照验证。
+     *
+     * 所以这里改成：
+     *   ① 先试 initRemoteWithOptions:（跨进程托管要的就是 remote context）
+     *   ② 再试 initWithOptions:localContext:（本地 context，退而求其次）
+     *   ③ 【必须】拿到 contextId != 0 才算成功；否则明确返回失败并说明是哪一步
+     */
+
     id ctx = nil;
-    SEL initSel = sel_registerName("initWithOptions:localContext:");
+    NSString *howUsed = nil;
 
-    if ([CAContextCls instancesRespondToSelector:initSel]) {
-        ctx = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-                  [CAContextCls alloc], initSel, @{}, YES);
-        MFHUDLogLine(@"  [%@] initWithOptions:localContext: → %@",
-                     tag, ctx ? @"成功" : @"nil");
-    } else {
-        MFHUDLogLine(@"  [%@] ★ 没有 initWithOptions:localContext:", tag);
-    }
-
-    // 回退：有些版本用 initOptions: 或 initRemoteWithOptions:
-    if (ctx == nil) {
-        SEL s2 = sel_registerName("initRemoteWithOptions:");
-        if ([CAContextCls instancesRespondToSelector:s2]) {
-            ctx = ((id (*)(id, SEL, id))objc_msgSend)([CAContextCls alloc], s2, @{});
-            MFHUDLogLine(@"  [%@] 回退 initRemoteWithOptions: → %@",
-                         tag, ctx ? @"成功" : @"nil");
+    // ① remote context —— 跨进程托管的正解
+    SEL remoteSel = sel_registerName("initRemoteWithOptions:");
+    if ([CAContextCls instancesRespondToSelector:remoteSel]) {
+        @try {
+            ctx = ((id (*)(id, SEL, id))objc_msgSend)([CAContextCls alloc], remoteSel, @{});
+            howUsed = @"initRemoteWithOptions:";
+        } @catch (NSException *e) {
+            MFHUDLogLine(@"  [%@] initRemoteWithOptions: 抛异常 %@", tag, e.reason);
+            ctx = nil;
         }
     }
 
+    // ② 回退到 local context
     if (ctx == nil) {
-        MFHUDLogLine(@"  [%@] ★★ 造不出 CAContext，本路不通", tag);
+        SEL localSel = sel_registerName("initWithOptions:localContext:");
+        if ([CAContextCls instancesRespondToSelector:localSel]) {
+            @try {
+                ctx = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                          [CAContextCls alloc], localSel, @{}, YES);
+                howUsed = @"initWithOptions:localContext:YES";
+            } @catch (NSException *e) {
+                MFHUDLogLine(@"  [%@] initWithOptions:localContext: 抛异常 %@", tag, e.reason);
+                ctx = nil;
+            }
+        }
+    }
+
+    MFHUDLogLine(@"  [%@] context 创建方式 = %@，对象 = %@",
+                 tag, howUsed ?: @"（两种都不可用）", ctx ? @"非 nil" : @"★ nil");
+    if (ctx == nil) {
+        MFHUDLogLine(@"  [%@] ★★ 造不出 CAContext —— 本路不通", tag);
         return nil;
     }
 
-    // ② 挂 layer
+    // ②.5 挂 layer
     SEL setLayerSel = sel_registerName("setLayer:");
     if ([ctx respondsToSelector:setLayerSel]) {
         CALayer *l = window.layer;
@@ -164,14 +192,13 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
         MFHUDLogLine(@"  [%@] setLayer: %@", tag, l ? @"✓" : @"layer 为 nil");
     }
 
-    // ③ setSecure
     SEL setSecureSel = sel_registerName("setSecure:");
     if ([ctx respondsToSelector:setSecureSel]) {
         ((void (*)(id, SEL, BOOL))objc_msgSend)(ctx, setSecureSel, YES);
         MFHUDLogLine(@"  [%@] setSecure:YES ✓", tag);
     }
 
-    // 拿到 contextId
+    // ③ ★ 硬性要求：contextId 必须非 0
     SEL ctxIdSel = sel_registerName("contextId");
     uint32_t ctxId = 0;
     if ([ctx respondsToSelector:ctxIdSel]) {
@@ -179,7 +206,10 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
     }
     MFHUDLogLine(@"  [%@] CAContext.contextId = 0x%x", tag, ctxId);
     if (ctxId == 0) {
-        MFHUDLogLine(@"  [%@] ★★ 自造 context 的 id 也是 0 —— 这条路也堵", tag);
+        MFHUDLogLine(@"  [%@] ★★★ contextId 仍为 0 —— 创建方式不对，【不再往下走】", tag);
+        MFHUDLogLine(@"      最可能的原因：缺 com.apple.QuartzCore.displayable-context");
+        MFHUDLogLine(@"      entitlement（对照 TrollSpeed 的 entitlements.plist 补上）");
+        return nil;   // ★ 明确失败，不返回半成品
     }
 
     // ④ 绑到窗口
@@ -198,20 +228,21 @@ static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
         MFHUDLogLine(@"  [%@] window.setKeepContextInBackground:YES ✓", tag);
     }
 
-    // ⑥ 回头看窗口的 _contextId 变了没
+    // ⑥ 回头看窗口的 _contextId
     SEL winCtxSel = sel_registerName("_contextId");
     if ([window respondsToSelector:winCtxSel]) {
         uint32_t w = ((uint32_t (*)(id, SEL))objc_msgSend)(window, winCtxSel);
-        MFHUDLogLine(@"  [%@] 绑后 window._contextId = 0x%x", tag, w);
+        MFHUDLogLine(@"  [%@] 绑后 window._contextId = 0x%x %@",
+                     tag, w, (w == ctxId) ? @"✓ 与 context 一致" : @"⚠️ 不一致");
     }
 
     return ctx;
 }
 
-/// 给窗口装上 context（对外入口，供 delegate 调用）
-void MFAttachContextToWindow(UIWindow *window, NSString *tag) {
-    if (window == nil) return;
-    MFCreateAndBindContext(window, tag);
+/// 给窗口装上 context（对外入口）。返回绑好的 context，失败返回 nil。
+id MFAttachContextToWindow(UIWindow *window, NSString *tag) {
+    if (window == nil) return nil;
+    return MFCreateAndBindContext(window, tag);
 }
 
 #pragma mark - 运行时 API 勘探

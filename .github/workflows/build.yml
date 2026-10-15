@@ -47,6 +47,39 @@ jobs:
           echo "Found: $APP"
           ls -la "$APP"
 
+      # ★ [M5.24] 把版本号与 Git 提交号注入 Info.plist
+      #
+      # 起因：用户和分析者的建议 ——
+      #   「当前安装信息一直写着 1.0.0 / 1，建议给每次构建加上独立的版本号
+      #     或 Git 提交号，并在启动日志里打印，方便确认实际运行的是哪一版。」
+      #
+      # 这个问题真发生过：M5.21 明明加了「自造 CAContext（核心修复）」，
+      # 但拉到的日志里没有 —— 分不清是没装、装错包，还是代码没跑到。
+      # 注入之后，启动日志会打出版本 + 提交号 + run number，一眼对上。
+      - name: Stamp version (git SHA + run number)
+        id: stamp
+        working-directory: app
+        run: |
+          APP="${{ steps.locate.outputs.app_path }}"
+          PB=/usr/libexec/PlistBuddy
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          RUN_NO="${{ github.run_number }}"
+          MILE="M5.$RUN_NO"
+
+          # CFBundleShortVersionString 用语义化里程号；CFBundleVersion 用 run number
+          $PB -c "Set :CFBundleShortVersionString $MILE" "$APP/Info.plist"
+          $PB -c "Set :CFBundleVersion $RUN_NO" "$APP/Info.plist"
+          # 自加的键：完整提交号 + 构建时间，启动日志里会打出来
+          $PB -c "Add :MFBuildStamp string ${SHORT_SHA}-r${RUN_NO}" "$APP/Info.plist" 2>/dev/null \
+            || $PB -c "Set :MFBuildStamp ${SHORT_SHA}-r${RUN_NO}" "$APP/Info.plist"
+          $PB -c "Add :MFBuildSHA string ${{ github.sha }}" "$APP/Info.plist" 2>/dev/null \
+            || $PB -c "Set :MFBuildSHA ${{ github.sha }}" "$APP/Info.plist"
+
+          echo "=== 注入结果 ==="
+          $PB -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+          $PB -c "Print :CFBundleVersion" "$APP/Info.plist"
+          $PB -c "Print :MFBuildStamp" "$APP/Info.plist"
+
       - name: Inject entitlements (ldid)
         working-directory: app
         run: |

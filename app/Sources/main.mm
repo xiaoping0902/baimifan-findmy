@@ -41,6 +41,27 @@ static void MFDumpArgv(const char *who, int argc, char *argv[]) {
     MFHUDLogLine(@"==== main() 进入，角色判定并启动 %s ====", who);
     MFHUDLogLine(@"argc=%d argv=[ %@]", argc, s);
     MFHUDLogLine(@"pid=%d ppid=%d", getpid(), getppid());
+
+    /*
+     * ★ [M5.24] 把跑起来的到底是哪一版写进日志 ★
+     *
+     * 起因：用户和另一位分析者的建议 ——
+     *   「当前安装信息一直写着 1.0.0 / 1，建议给每次构建加上独立的版本号
+     *     或 Git 提交号，并在启动日志里打印，方便确认实际运行的是哪一版。」
+     *
+     * 这个问题真发生过：M5.21 明明加了「自造 CAContext（核心修复）」那一步，
+     * 但拉到的日志里没有 —— 分不清是没装、装错包，还是代码没跑到。
+     * 版本号进日志之后，一眼就能对上。
+     */
+    NSDictionary *info = [NSBundle mainBundle].infoDictionary;
+    MFHUDLogLine(@"版本：%@ (%@)  build=%@",
+                 info[@"CFBundleShortVersionString"] ?: @"?",
+                 info[@"CFBundleVersion"] ?: @"?",
+                 info[@"MFBuildStamp"] ?: @"未注入");
+    MFHUDLogLine(@"bundleID=%@  exe=%@",
+                 info[@"CFBundleIdentifier"] ?: @"?",
+                 info[@"CFBundleExecutable"] ?: @"?");
+    MFHUDLogLine(@"日志文件=%@", @"/var/mobile/Media/mf-debug/hud.log");
 }
 
 int main(int argc, char *argv[]) {
