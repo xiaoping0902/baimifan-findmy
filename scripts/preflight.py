@@ -20,6 +20,7 @@ import os
 import plistlib
 import re
 import sys
+from trollstore_entitlements import incompatible_entitlements
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "app")
@@ -302,6 +303,11 @@ def check_identity():
     ent = os.path.join(APP, "Support", "entitlements.plist")
     with open(ent, "rb") as f:
         e = plistlib.load(f)
+    banned = incompatible_entitlements(e)
+    if banned:
+        err(f"entitlements 含 A12+ / iOS 15+ 启动禁止项: {', '.join(banned)}")
+    else:
+        ok("entitlements 无 TrollStore 在 A12+ / iOS 15+ 的启动禁止项")
     need = [
         "platform-application",
         "com.apple.private.security.no-sandbox",

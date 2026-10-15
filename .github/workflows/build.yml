@@ -21,6 +21,11 @@ jobs:
       - name: Install xcodegen & ldid
         run: brew install xcodegen ldid
 
+      - name: Check source and entitlement regression tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
+          python3 scripts/preflight.py
+
       - name: Generate Xcode project
         working-directory: app
         run: xcodegen generate
@@ -149,6 +154,9 @@ jobs:
           ls -la
           echo "--- 结构校验 ---"
           unzip -l FindMy-unsigned.ipa | head -20
+
+      - name: Reject IPA with incompatible TrollStore entitlements
+        run: python3 scripts/verify_ipa.py app/out/FindMy-unsigned.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

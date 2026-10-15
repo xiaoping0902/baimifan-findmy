@@ -8,5 +8,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Reject entitlements that prevent TrollStore app launch
+        run: python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
       - name: Exercise context ownership and startup reports
         run: bash tests/run_hud_regressions.sh

@@ -3,14 +3,16 @@
 <plist version="1.0">
 <dict>
 	<!-- ══════════════════════════════════════════════════════════════════
-	     [M5.26] 权限全开版
+	     TrollStore 权限配置（含 A12+ 启动限制）
 	     ══════════════════════════════════════════════════════════════════
 
 	     用户要求：「把我们现在所有的功能全部给这个 root 权限呢
 	                和这个这些权限都要给够 都是这个巨魔安装的权限都有」
 
-	     TrollStore 用 ldid 做伪签名，【不校验】entitlements 是否
-	     与 provisioning profile 匹配 —— 所以这里可以放开列。
+	     TrollStore 可保留私有权限，但不能绕过 A12+ / iOS 15+ 的
+	     PPL 禁止项：cs.debugger、dynamic-codesigning、skip-library-validation。
+	     这些权限会让主程序在 main() 前启动失败，不能加入。
+	     参考：https://github.com/opa334/TrollStore#banned-entitlements
 
 	     三个来源都对齐了：
 	       · 白米饭原版 7 项（逐条从 Mach-O 里扣出来核对过，我们原本一字不差）
@@ -56,10 +58,6 @@
 	<key>com.apple.system-task-ports</key>
 	<true/>
 	<key>com.apple.system-task-ports.read</key>
-	<true/>
-	<key>com.apple.private.cs.debugger</key>
-	<true/>
-	<key>dynamic-codesigning</key>
 	<true/>
 
 	<!-- ── 越狱 / rootful 安装 ── -->

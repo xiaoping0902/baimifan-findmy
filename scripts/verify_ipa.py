@@ -18,6 +18,7 @@ import plistlib
 import struct
 import sys
 import zipfile
+from trollstore_entitlements import incompatible_entitlements
 
 CPU = {0x0100000C: "ARM64", 0x0100000E: "ARM64_32", 0x01000007: "x86_64"}
 SUB = {0: "ARM64_ALL", 1: "ARM64_V8", 2: "ARM64e"}
@@ -153,6 +154,12 @@ def main(ipa):
         print("   ✗ 签名里没有 entitlements blob！TrollStore 安装后权限不会生效")
         return 1
     ent = plistlib.loads(ent_xml)
+    banned = incompatible_entitlements(ent)
+    if banned:
+        print("   ✗ 含 TrollStore 在 iOS 15+ / A12+ 禁止的权限，会导致启动失败：")
+        for key in banned:
+            print(f"     {key}")
+        return 1
     for k, v in sorted(ent.items()):
         print(f"   ✓ {k} = {v}")
 
