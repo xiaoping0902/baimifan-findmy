@@ -1,9 +1,8 @@
 #import "MFModuleLocator.h"
 
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
-#import <mach/vm_region.h>
-#import <mach/task_info.h>
+#import <mach/vm_region.h>    /* vm_region_basic_info_data_64_t */
+#import <mach/task_info.h>    /* TASK_DYLD_INFO */
 #import <sys/sysctl.h>
 #import <sys/proc.h>          /* struct kinfo_proc */
 #import <sys/param.h>         /* MAXCOMLEN */
@@ -12,6 +11,17 @@
 #import <unistd.h>
 #import <string.h>
 #import <stdlib.h>
+
+/*
+ * ⚠️ 不要 #import <mach/mach_vm.h> ——
+ *    该头在 iOS SDK 里是「禁用头」，第一行就是 #error "mach_vm.h unsupported."
+ *    （构建 #31 实际踩过）
+ *
+ *    mach_vm_* 系列在 iOS 上属于私有 SPI：
+ *      · 公开 SDK 头里没有声明
+ *      · 但符号在 /usr/lib/system/libsystem_kernel.dylib 里确实存在
+ *    → 用 dlsym 拿函数指针，见下面 MFResolveVMSPI()
+ */
 
 /*
  * ── 为什么自己定义这些结构体 ──

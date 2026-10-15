@@ -925,6 +925,9 @@ def check_linux_only_headers():
         "error.h":           "glibc 扩展，iOS 没有",
         "endian.h":          "iOS 没有；用 <libkern/OSByteOrder.h> 或 CFByteOrder",
         "sys/random.h":      "iOS 没有；用 <Security/SecRandom.h> 或 arc4random",
+        # ↓ iOS SDK 里【存在但被禁用】的头：打开就是 #error
+        "mach/mach_vm.h":    "iOS 上是禁用头（首行 #error）—— "
+                             "mach_vm_* 是私有 SPI，用 dlsym 拿函数指针",
     }
     exts = (".m", ".mm", ".c", ".cpp", ".h")
     checked = 0
@@ -938,13 +941,18 @@ def check_linux_only_headers():
             rel = os.path.relpath(p, ROOT)
             with open(p, encoding="utf-8", errors="replace") as f:
                 for i, line in enumerate(f, 1):
+                    # ★ 跳过注释行：
+                    #   「⚠️ 不要 #import <mach/mach_vm.h>」这种说明性注释
+                    #   本身就是正常的（它正是在警告别人别用），不该报错。
+                    stripped = line.lstrip()
+                    if stripped.startswith(("//", "*", "/*", "#!")):
+                        continue
                     m = re.search(r'#\s*(?:import|include)\s*[<"]([^>"]+)[>"]', line)
                     if not m:
                         continue
                     h = m.group(1).strip()
                     if h in BAD:
-                        err(f"{rel}:{i}: iOS SDK 没有 <{h}>（构建 #28 踩过）"
-                            f" —— 改用 {BAD[h]}")
+                        err(f"{rel}:{i}: <{h}> 在 iOS SDK 里不可用 —— 改用 {BAD[h]}")
                     checked += 1
     ok(f"平台头文件检查完成，扫描 {checked} 条 #import")
 
