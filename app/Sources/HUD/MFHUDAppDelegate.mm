@@ -281,6 +281,19 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         // ★ [M5.20] 把私有 API 的真实名字 dump 出来（不再靠猜）
         MFDumpWindowAPI();
 
+        /*
+         * ★★★ [M5.21] 核心修复：没有 scene 就自己造 CAContext ★★★
+         *
+         * 勘探已证设备上有：
+         *     CAContext     - initWithOptions:localContext: / contextId / setLayer:
+         *     UIWindow      - _setBoundContext: / setKeepContextInBackground:
+         * 先自己建 context 并绑上，再去托管 —— 否则 _contextId=0，托管必然无效。
+         */
+        MFHUDLogLine(@"---- 自造 CAContext（核心修复）----");
+        MFAttachContextToWindow(self.hudMenuWindow, @"菜单");
+        MFAttachContextToWindow(self.drawingWindow, @"绘制");
+        MFHUDLogLine(@"---- 自造结束，准备托管 ----");
+
         for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
                                self.drawingWindow ?: (id)[NSNull null] ]) {
             if (![w isKindOfClass:[UIWindow class]]) continue;

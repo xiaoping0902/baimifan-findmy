@@ -82,6 +82,138 @@ void MFMarkWindowSystemSecure(UIWindow *w) {
                  applied, (unsigned long)(sizeof(marks)/sizeof(marks[0])));
 }
 
+#pragma mark - 自制 CAContext（核心修复）
+
+/*
+ * ★★★ [M5.21] 没有 scene，就自己造一个 CAContext ★★★
+ *
+ * ── 问题 ──
+ * M5.20 的运行时勘探给出了铁证（真机日志）：
+ *     connectedScenes 数量 = 0
+ *     窗口 菜单: level=980  hidden=0  windowScene=nil  _contextId=0x0
+ *     窗口 绘制: level=1020 hidden=0  windowScene=nil  _contextId=0x0
+ * 窗口建了、level 对、hidden=0 —— 但 _contextId 是 0，
+ * registerWindowWithContextID:0 静默无效，所以永远不显示。
+ *
+ * ── 勘探给出的真实 API ──
+ *   CAContext（53 个方法，全部 dump 自设备）：
+ *       - initWithOptions:localContext:     ← 可以自己造 context
+ *       - contextId                         ← 拿到 ID
+ *       - setLayer:                         ← 把 window.layer 挂上去
+ *       - setSecure: / setLevel: / setColorSpace:
+ *   UIWindow：
+ *       - _setBoundContext:                 ← 把 context 绑到窗口
+ *       - _setContextBinder:
+ *       - _setWindowHostingScene:
+ *       - setKeepContextInBackground:       ← 后台也不回收
+ *   SBSAccessibilityWindowHostingController：
+ *       - registerWindowWithContextID:atLevel:   ← 用它登记
+ *
+ * ── 做法 ──
+ * 既然 UIKit 不会给我们 context（没有 scene），就手动建一个：
+ *   ① [[CAContext alloc] initWithOptions:@{} localContext:YES]
+ *   ② setLayer:(window.layer)
+ *   ③ setSecure:YES
+ *   ④ window 上 _setBoundContext:(ctx)
+ *   ⑤ window 上 setKeepContextInBackground:YES
+ *   ⑥ 拿 ctx.contextId 去 registerWindowWithContextID:atLevel:
+ *
+ * 每一步都留日志，任何一步不支持都会明确写出来。
+ */
+static id MFCreateAndBindContext(UIWindow *window, NSString *tag) {
+    if (window == nil) return nil;
+
+    Class CAContextCls = NSClassFromString(@"CAContext");
+    if (CAContextCls == nil) {
+        MFHUDLogLine(@"  [%@] ★ CAContext 类不存在", tag);
+        return nil;
+    }
+
+    id ctx = nil;
+    SEL initSel = sel_registerName("initWithOptions:localContext:");
+
+    if ([CAContextCls instancesRespondToSelector:initSel]) {
+        ctx = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                  [CAContextCls alloc], initSel, @{}, YES);
+        MFHUDLogLine(@"  [%@] initWithOptions:localContext: → %@",
+                     tag, ctx ? @"成功" : @"nil");
+    } else {
+        MFHUDLogLine(@"  [%@] ★ 没有 initWithOptions:localContext:", tag);
+    }
+
+    // 回退：有些版本用 initOptions: 或 initRemoteWithOptions:
+    if (ctx == nil) {
+        SEL s2 = sel_registerName("initRemoteWithOptions:");
+        if ([CAContextCls instancesRespondToSelector:s2]) {
+            ctx = ((id (*)(id, SEL, id))objc_msgSend)([CAContextCls alloc], s2, @{});
+            MFHUDLogLine(@"  [%@] 回退 initRemoteWithOptions: → %@",
+                         tag, ctx ? @"成功" : @"nil");
+        }
+    }
+
+    if (ctx == nil) {
+        MFHUDLogLine(@"  [%@] ★★ 造不出 CAContext，本路不通", tag);
+        return nil;
+    }
+
+    // ② 挂 layer
+    SEL setLayerSel = sel_registerName("setLayer:");
+    if ([ctx respondsToSelector:setLayerSel]) {
+        CALayer *l = window.layer;
+        ((void (*)(id, SEL, id))objc_msgSend)(ctx, setLayerSel, l);
+        MFHUDLogLine(@"  [%@] setLayer: %@", tag, l ? @"✓" : @"layer 为 nil");
+    }
+
+    // ③ setSecure
+    SEL setSecureSel = sel_registerName("setSecure:");
+    if ([ctx respondsToSelector:setSecureSel]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(ctx, setSecureSel, YES);
+        MFHUDLogLine(@"  [%@] setSecure:YES ✓", tag);
+    }
+
+    // 拿到 contextId
+    SEL ctxIdSel = sel_registerName("contextId");
+    uint32_t ctxId = 0;
+    if ([ctx respondsToSelector:ctxIdSel]) {
+        ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(ctx, ctxIdSel);
+    }
+    MFHUDLogLine(@"  [%@] CAContext.contextId = 0x%x", tag, ctxId);
+    if (ctxId == 0) {
+        MFHUDLogLine(@"  [%@] ★★ 自造 context 的 id 也是 0 —— 这条路也堵", tag);
+    }
+
+    // ④ 绑到窗口
+    SEL bindSel = sel_registerName("_setBoundContext:");
+    if ([window respondsToSelector:bindSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(window, bindSel, ctx);
+        MFHUDLogLine(@"  [%@] window._setBoundContext: ✓", tag);
+    } else {
+        MFHUDLogLine(@"  [%@] ★ 窗口没有 _setBoundContext:", tag);
+    }
+
+    // ⑤ 后台保持
+    SEL keepSel = sel_registerName("setKeepContextInBackground:");
+    if ([window respondsToSelector:keepSel]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(window, keepSel, YES);
+        MFHUDLogLine(@"  [%@] window.setKeepContextInBackground:YES ✓", tag);
+    }
+
+    // ⑥ 回头看窗口的 _contextId 变了没
+    SEL winCtxSel = sel_registerName("_contextId");
+    if ([window respondsToSelector:winCtxSel]) {
+        uint32_t w = ((uint32_t (*)(id, SEL))objc_msgSend)(window, winCtxSel);
+        MFHUDLogLine(@"  [%@] 绑后 window._contextId = 0x%x", tag, w);
+    }
+
+    return ctx;
+}
+
+/// 给窗口装上 context（对外入口，供 delegate 调用）
+void MFAttachContextToWindow(UIWindow *window, NSString *tag) {
+    if (window == nil) return;
+    MFCreateAndBindContext(window, tag);
+}
+
 #pragma mark - 运行时 API 勘探
 
 /*
