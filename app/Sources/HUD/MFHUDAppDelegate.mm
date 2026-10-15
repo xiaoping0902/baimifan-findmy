@@ -32,33 +32,91 @@
 
 #pragma mark - 辅助窗口托管
 
+/*
+ * ★★ [M5.17] 跨进程窗口托管的两条路 ★★
+ *
+ * 原版白米饭用的私有成员（已从二进制差分确认）：
+ *     HUDMainApplication / _drawingHostingController /
+ *     _isWindowServerHostingManaged / ToggleDrawingWindow
+ *
+ * `_isWindowServerHostingManaged` 是 UIWindow 的私有属性 ——
+ * 它告诉 UIKit「这个窗口由 WindowServer 托管」，正是跨进程显示需要的。
+ * 我们之前完全没设它，只调了 SBSAccessibilityWindowHostingController。
+ *
+ * 这里两条都试：
+ *   ① set_isWindowServerHostingManaged:YES  ← 原版的机制
+ *   ② registerWindowWithContextID:atLevel:  ← SpringBoard 托管
+ * 任何一条成功，窗口就能进合成器。
+ */
+static void MFMarkWindowServerHostingManaged(UIWindow *w) {
+    if (w == nil) return;
+    // 私有 setter 的名字在几个 iOS 版本间变过，逐个试
+    NSArray<NSString *> *setters = @[
+        @"set_isWindowServerHostingManaged:",
+        @"_setWindowServerHostingManaged:",
+    ];
+    for (NSString *name in setters) {
+        SEL s = sel_registerName(name.UTF8String);
+        if ([w respondsToSelector:s]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(w, s, YES);
+            MFHUDLogLine(@"  ✓ 已设置 %@ = YES", name);
+            return;
+        }
+    }
+    MFHUDLogLine(@"  ⚠️ 没有可用的 _isWindowServerHostingManaged setter（试过 %lu 个名字）",
+                 (unsigned long)setters.count);
+}
+
 /// 通过 SBSAccessibilityWindowHostingController 把窗口托管给 SpringBoard
 /// （跨 App 悬浮的关键；对应 entitlement: com.apple.springboard.accessibility-window-hosting）
+///
+/// [M5.17] ★ 每一步都写 MFHUDLogLine，不再用 NSLog。
+///   原因：原来失败时只 NSLog，而 NSLog 进 syslog 不进我们的日志文件 ——
+///   结果「托管失败」时我在文件里什么都看不到，只能看到一句笼统的结论。
+///   真机配过一次（pid 307 活着但窗口不出来），现场全空。
 static BOOL MFHostWindow(UIWindow *window) {
-    Class cls = NSClassFromString(@"SBSAccessibilityWindowHostingController");
-    if (!cls) {
-        NSLog(@"[MF][HUD] 找不到 SBSAccessibilityWindowHostingController");
+    if (window == nil) {
+        MFHUDLogLine(@"  MFHostWindow: 窗口为 nil，跳过");
         return NO;
     }
+
+    // ① 先试原版那条路：标记成 WindowServer 托管
+    MFMarkWindowServerHostingManaged(window);
+
+    Class cls = NSClassFromString(@"SBSAccessibilityWindowHostingController");
+    MFHUDLogLine(@"  MFHostWindow: SBSAccessibilityWindowHostingController = %@",
+                 cls ? @"存在" : @"★ 不存在");
+    if (!cls) return NO;
+
     id controller = ((id (*)(id, SEL))objc_msgSend)([cls alloc], sel_registerName("init"));
+    MFHUDLogLine(@"  MFHostWindow: controller alloc/init = %@", controller ? @"成功" : @"★ 失败");
     if (!controller) return NO;
 
     SEL regSel = sel_registerName("registerWindowWithContextID:atLevel:");
-    if (![controller respondsToSelector:regSel]) {
-        NSLog(@"[MF][HUD] 托管控制器不支持 registerWindowWithContextID:atLevel:");
-        return NO;
-    }
+    BOOL responds = [controller respondsToSelector:regSel];
+    MFHUDLogLine(@"  MFHostWindow: respondsToSelector(registerWindowWithContextID:atLevel:) = %d", responds);
+    if (!responds) return NO;
 
     SEL ctxSel = sel_registerName("_contextId");
-    if (![window respondsToSelector:ctxSel]) {
-        NSLog(@"[MF][HUD] UIWindow 没有 _contextId");
+    BOOL hasCtx = [window respondsToSelector:ctxSel];
+    MFHUDLogLine(@"  MFHostWindow: UIWindow 有 _contextId = %d", hasCtx);
+    if (!hasCtx) return NO;
+
+    uint32_t ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(window, ctxSel);
+    MFHUDLogLine(@"  MFHostWindow: _contextId = 0x%x  level = %.0f",
+                 ctxId, (double)window.windowLevel);
+
+    if (ctxId == 0) {
+        MFHUDLogLine(@"  ★★ _contextId == 0 —— registerWindowWithContextID:0 会静默无效");
+        MFHUDLogLine(@"     这是「窗口建了但没进合成器」的直接原因");
+        MFHUDLogLine(@"     上游原因：本进程没有 UIWindowScene → 没拿到 CAContext");
+        MFHUDLogLine(@"     （但 _isWindowServerHostingManaged 已设，可能已足够）");
         return NO;
     }
-    uint32_t ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(window, ctxSel);
+
     ((void (*)(id, SEL, uint32_t, double))objc_msgSend)(
         controller, regSel, ctxId, (double)window.windowLevel);
-
-    NSLog(@"[MF][HUD] 已托管窗口 contextId=0x%x level=%.0f", ctxId, (double)window.windowLevel);
+    MFHUDLogLine(@"  ✓ 已托管 contextId=0x%x level=%.0f", ctxId, (double)window.windowLevel);
     return YES;
 }
 
@@ -170,11 +228,48 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     // ── ④ 交给系统托管（跨 App 悬浮）─────────────────
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        // ★ 托管前先把四个关键量落盘 —— 这是判断「窗口建了但没进合成器」的唯一证据
+        // ★ 托管前先把关键量落盘 —— 这是判断「窗口建了但没进合成器」的唯一证据
         MFHUDLogLine(@"---- 托管前诊断 ----");
         MFHUDLogLine(@"UIApplication.applicationState = %ld (0=Active 1=Inactive 2=Background)",
                      (long)UIApplication.sharedApplication.applicationState);
         MFHUDLogLine(@"UIScreen.bounds = %@", NSStringFromCGRect(UIScreen.mainScreen.bounds));
+
+        /*
+         * ★★ [M5.17] scene 诊断 —— 这是整个 HUD 问题的核心 ★★
+         *
+         * UIWindow 要进合成器，必须有一个 UIWindowScene，
+         * 而 scene 由 FrontBoard 在「前台 App 启动」时创建。
+         * posix_spawn 出来的子进程【不走 FrontBoard】，所以大概率一个 scene 都没有
+         * → UIWindow 挂不上 CAContext → _contextId = 0
+         * → registerWindowWithContextID:0 静默无效 → 窗口永远不显示。
+         */
+        {
+            NSSet<UIScene *> *scenes = UIApplication.sharedApplication.connectedScenes;
+            MFHUDLogLine(@"connectedScenes 数量 = %lu", (unsigned long)scenes.count);
+            int idx = 0;
+            for (UIScene *sc in scenes) {
+                MFHUDLogLine(@"  scene[%d]: %@  activationState=%ld",
+                             idx++, NSStringFromClass(sc.class), (long)sc.activationState);
+                if ([sc isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)sc;
+                    MFHUDLogLine(@"    是 UIWindowScene，windows 数 = %lu",
+                                 (unsigned long)ws.windows.count);
+                    for (UIWindow *w in ws.windows) {
+                        MFHUDLogLine(@"      - %@ level=%.0f hidden=%d",
+                                     NSStringFromClass(w.class), w.windowLevel, w.isHidden);
+                    }
+                }
+            }
+            if (scenes.count == 0) {
+                MFHUDLogLine(@"  ★★ 一个 scene 都没有 = 本进程不是 FrontBoard 启动的前台 App");
+                MFHUDLogLine(@"     这就是 _contextId=0 的根因");
+            }
+        }
+
+        MFHUDLogLine(@"UIApplication.windows 数量 = %lu（含未挂 scene 的）",
+                     (unsigned long)UIApplication.sharedApplication.windows.count);
+        MFHUDLogLine(@"keyWindow = %@", UIApplication.sharedApplication.keyWindow ? @"有" : @"nil");
+
         for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
                                self.drawingWindow ?: (id)[NSNull null] ]) {
             if (![w isKindOfClass:[UIWindow class]]) continue;

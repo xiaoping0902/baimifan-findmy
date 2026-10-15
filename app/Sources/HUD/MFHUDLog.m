@@ -4,6 +4,8 @@
 #import <pthread.h>
 #import <stdlib.h>
 #import <string.h>
+#import <fcntl.h>
+#import <sys/stat.h>
 
 /*
  * 两个进程（控制台 / HUD）会写同一个文件。
@@ -15,12 +17,40 @@ static pthread_mutex_t g_hudlog_lock = PTHREAD_MUTEX_INITIALIZER;
 // 日志上限，超了从头截断（避免无限增长）
 static const long long kMFHUDLogMaxBytes = 256 * 1024;
 
+/*
+ * [M5.17] ★ 日志直接写进 /var/mobile/Media/mf-debug/
+ *
+ * 为什么改：
+ *   HUD 子进程的日志原来只写 App 容器里的 Documents/mf_hud.log ——
+ *   而 AFC（电脑侧唯一能读的通道）只能访问 /var/mobile/Media。
+ *   结果就是：HUD 挂了我也看不到现场，只能等用户手动「导出诊断」，
+ *   而那一步会覆盖成当前内容，旧现场就丢了。
+ *
+ *   真机已经吃过亏：pid 307 的 HUD 明明活着，但我拉到的 hud.log
+ *   还是上一个会话（pid 614）的三行。现场是空的。
+ *
+ * 现在两个进程都直接写 Media —— 我有 no-sandbox，
+ * 子进程继承同样的 entitlements，一样能写。
+ * 保留 Documents 作为兜底（万一 Media 不可写）。
+ */
+static const char *kMFHUDLogMediaDir = "/var/mobile/Media/mf-debug";
+
 static NSString *MFHUDLogPath(void) {
-    /*
-     * main() 里最早就会调用（那时 App 还没完全起来），所以不能只依赖
-     * NSSearchPathForDirectoriesInDomains。用 NSHomeDirectory() 兜底 ——
-     * 沙盒 App 的 home 就是容器根，Documents 一定在它下面。
-     */
+    // ① 首选：Media 目录（电脑侧 afc 能直接拉）
+    NSString *mediaDir = [NSString stringWithUTF8String:kMFHUDLogMediaDir];
+    if (mediaDir.length) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:mediaDir]) {
+            [fm createDirectoryAtPath:mediaDir
+          withIntermediateDirectories:YES attributes:nil error:NULL];
+        }
+        NSString *p = [mediaDir stringByAppendingPathComponent:@"hud.log"];
+        // 快速可用性探测：能打开就算可用
+        int fd = open(p.fileSystemRepresentation, O_CREAT | O_WRONLY | O_APPEND, 0644);
+        if (fd >= 0) { close(fd); return p; }
+    }
+
+    // ② 兜底：容器内的 Documents
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                         NSUserDomainMask, YES);
     NSString *dir = (docs.count > 0) ? docs.firstObject : nil;
