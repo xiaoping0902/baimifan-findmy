@@ -10,6 +10,8 @@
 
 @interface UIWindow (MFRegressionPrivateAPI)
 - (BOOL)_ignoresHitTest;
+- (BOOL)_canBecomeKeyWindow;
+- (unsigned int)_contextId;
 - (NSDictionary *)_contextOptionsWithInitialOptions:(NSDictionary *)options;
 @end
 
@@ -29,20 +31,34 @@ static void TestDrawingIsPassthroughBeforeInitialization(void) {
     // Falling back to the old shared window reproduces the M5.63 failure.
     Class drawingClass = NSClassFromString(@"MFHUDDrawingWindow") ?: MFHUDWindow.class;
     UIWindow *allocated = [drawingClass alloc];
-    CHECK([allocated _ignoresHitTest],
-          "drawing window must ignore server hit testing BEFORE UIWindow initialization");
+    BOOL ignoresBeforeInit = [allocated _ignoresHitTest];
+    BOOL acceptsKeyBeforeInit = [allocated _canBecomeKeyWindow];
 
     Method options = class_getInstanceMethod(UIWindow.class,
                                              @selector(_contextOptionsWithInitialOptions:));
     CHECK(options != NULL, "UIKit context creation options must be observable");
     originalContextOptions = method_setImplementation(options, (IMP)ObserveOptions);
     UIWindow *drawing = [allocated initWithFrame:UIScreen.mainScreen.fixedCoordinateSpace.bounds];
+    // Replay the previous delegate's late property assignment when comparing
+    // an older revision. The dedicated drawing class has no mutable flag.
+    SEL lateSetter = NSSelectorFromString(@"setIgnoresHitTestOverride:");
+    if ([drawing respondsToSelector:lateSetter])
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(drawing, lateSetter, YES);
     drawing.rootViewController = [UIViewController new];
     drawing.hidden = NO;
     [drawing layoutIfNeeded];
     [CATransaction flush];
     method_setImplementation(options, originalContextOptions);
+    printf("Drawing class=%s beforeInit=%d optionsCalls=%u interactiveOptionsCalls=%u context=0x%x\n",
+        class_getName(drawingClass), ignoresBeforeInit, drawingContextCreations,
+        interactiveDrawingCreations, drawing._contextId);
+    fflush(stdout);
     CHECK(drawingContextCreations > 0, "test must observe a real UIKit context creation");
+    CHECK(drawing._contextId != 0, "drawing window must have a real nonzero native context");
+    CHECK(ignoresBeforeInit,
+          "drawing window must ignore server hit testing BEFORE UIWindow initialization");
+    CHECK(!acceptsKeyBeforeInit,
+          "drawing window must be ineligible for key focus, even before initialization");
     CHECK(interactiveDrawingCreations == 0,
           "UIKit must never create an interactive context for the drawing window");
     CHECK(!drawing.isKeyWindow, "a display-only window must not take application key focus");

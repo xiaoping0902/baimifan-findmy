@@ -3,6 +3,7 @@ import argparse
 import json
 import platform
 import plistlib
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -31,9 +32,6 @@ def main():
     booted_here = device["state"] != "Booted"
     bundle_id = "org.baimifan.HUDWindowRegression"
     try:
-        if booted_here:
-            run("xcrun", "simctl", "boot", device_id)
-        run("xcrun", "simctl", "bootstatus", device_id, "-b", timeout=300)
         with tempfile.TemporaryDirectory(prefix="hud-uikit-") as directory:
             source = args.window_source
             if not source.exists():
@@ -41,7 +39,7 @@ def main():
                 # delegate. Compile those exact bytes for the RED comparison.
                 delegate = (ROOT / "app/Sources/HUD/MFHUDAppDelegate.mm").read_text()
                 start = delegate.index("@implementation MFHUDWindow")
-                end = delegate.index("@end", start) + len("@end")
+                end = start + re.search(r"(?m)^@end\s*$", delegate[start:]).end()
                 source = Path(directory) / "legacy-window.mm"
                 source.write_text('#import "MFHUDAppDelegate.h"\n' + delegate[start:end])
             app = Path(directory) / "HUDRegression.app"
@@ -65,6 +63,9 @@ def main():
                 str(ROOT / "tests/hud_uikit_regressions.mm"), str(source),
                 "-o", str(app / "HUDRegression"))
             run("codesign", "--force", "--sign", "-", str(app))
+            if booted_here:
+                run("xcrun", "simctl", "boot", device_id)
+            run("xcrun", "simctl", "bootstatus", device_id, "-b", timeout=300)
             run("xcrun", "simctl", "install", device_id, str(app))
             result = subprocess.run(["xcrun", "simctl", "launch", "--console",
                                      "--terminate-running-process", device_id, bundle_id],
