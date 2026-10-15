@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [input, windows, menu]
+        suite: [input, windows, menu, overlay]
     steps:
       - uses: actions/checkout@v4
       - name: Replay device touches through the production HID bridge
