@@ -18,6 +18,16 @@ def run(*args, capture=False, timeout=180):
     return subprocess.run(args, check=True, text=True, capture_output=capture, timeout=timeout)
 
 
+def finish_launcher(launcher):
+    if launcher.poll() is None:
+        launcher.terminate()
+        try:
+            launcher.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            launcher.kill()
+            launcher.wait(timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-source", type=Path,
@@ -136,6 +146,12 @@ def main():
                     while time.monotonic() < deadline:
                         report = output.read_text(errors="replace") if output.exists() else ""
                         if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
+                            # The fresh fixture report proves launch completed.
+                            # Release a CLI still awaiting its acknowledgement
+                            # before asking a second simctl client for the image.
+                            # No --console option was used, so the app stays live.
+                            print(f"Menu READY; simctl launch status={launcher.poll()}; releasing launch CLI", flush=True)
+                            finish_launcher(launcher)
                             destination = ROOT / "test-results/menu.png"
                             destination.parent.mkdir(exist_ok=True)
                             destination.unlink(missing_ok=True)
@@ -164,13 +180,7 @@ def main():
                         result_dir = ROOT / "test-results"
                         result_dir.mkdir(exist_ok=True)
                         (result_dir / "menu-result.txt").write_text(report)
-                    if launcher.poll() is None:
-                        launcher.terminate()
-                        try:
-                            launcher.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            launcher.kill()
-                            launcher.wait(timeout=5)
+                    finish_launcher(launcher)
             print(launch_log.read_text(errors="replace"), end="", flush=True)
             if marker not in report or "FAIL:" in report:
                 raise SystemExit("UIKit window regression failed")
