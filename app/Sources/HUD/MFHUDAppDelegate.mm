@@ -310,7 +310,15 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 - (void)failStartup:(NSString *)error {
     [self.menuOverlay stopRendering];
     [self.drawingOverlay stopRendering];
+    self.hudMenuWindow.hidden = YES;
+    self.drawingWindow.hidden = YES;
+    self.menuHost = nil;
+    self.drawingHost = nil;
     [self publishStartupState:@"failed" error:error];
+    // The HUD is root while the console may be mobile. Exit here rather than
+    // relying on the console being allowed to signal a root process.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ _exit(EXIT_FAILURE); });
 }
 
 - (void)handleFirstFrame:(NSString *)key error:(NSString *)error {

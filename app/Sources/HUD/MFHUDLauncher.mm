@@ -242,7 +242,31 @@ static BOOL MFPidAlive(pid_t p) {
                     usleep(100 * 1000); // Worker queue only; the console stays responsive.
                 }
                 if (!ready && !error)
-                    error = @"HUD 启动超时：未收到两窗注册与 GPU 首帧回报。请查看 HUD 日志，可结束后重试。";
+                    error = @"HUD 启动超时：未收到两窗注册与首帧回报。请查看 HUD 日志后重试。";
+            }
+            if (!ready && pid > 0) {
+                // Reap a failed child and remove only this launch's PID. The
+                // HUD also exits itself on failure (root/mobile signal rules).
+                int childStatus = 0;
+                pid_t observed = waitpid(pid, &childStatus, WNOHANG);
+                if (observed == 0) {
+                    int signalResult = kill(pid, SIGTERM);
+                    int signalError = errno;
+                    for (int attempt = 0; attempt < 50 && observed == 0; attempt++) {
+                        usleep(20 * 1000);
+                        observed = waitpid(pid, &childStatus, WNOHANG);
+                    }
+                    if (observed == 0) {
+                        error = [NSString stringWithFormat:@"%@\nHUD 尚未退出（PID %d，signal=%d errno=%d），请先结束该进程。",
+                                 error ?: @"初始化失败", pid, signalResult, signalError];
+                    }
+                }
+                if (observed != 0) {
+                    NSString *stored = [NSString stringWithContentsOfFile:kPIDFile
+                        encoding:NSUTF8StringEncoding error:NULL];
+                    if (stored.intValue == pid)
+                        [NSFileManager.defaultManager removeItemAtPath:kPIDFile error:NULL];
+                }
             }
             MFHUDLogLine(@"启动等待结果：pid=%d ready=%d %@", pid, ready, error ?: @"");
             NSString *reportPath = [MFHUDStartupStatus reportPathForToken:token];
