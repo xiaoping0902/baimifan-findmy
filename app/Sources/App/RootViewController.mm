@@ -21,6 +21,7 @@
 #import "../Game/Offsets.h"
 #import "../Game/MFUEReader.h"
 #import "../Game/MFGameReader.h"
+#import "../Read/MFReadBackend.h"   // [M5.15] 一键开始里读门条件用
 
 #import <mach-o/dyld.h>
 #import <spawn.h>
@@ -135,7 +136,19 @@ extern char **environ;
     MFSection *s1 = [[MFSection alloc] init];
     s1.header = @"功能";
     s1.footer = @"「启动内核」走后端 KFD 链：漏洞 → root → 内核端口 → 枚举全系统 task。";
-    [s1.rows addObject:[self actionRow:@"启动内核" detail:@"M3" action:@"actStartKernel"]];
+    /*
+     * ★ [M5.15] 一键开始放最前面 —— 这是主线路径。
+     *
+     * 走查确认：读取链完全不依赖 KFD（详见 actOneClick 的注释）。
+     * 而 KFD 已经让设备 panic 过一次、App 崩过两次。
+     * 所以主流程就是：找进程 → task_for_pid → 模块定位 → UE4 解析。
+     */
+    [s1.rows addObject:[self actionRow:@"★ 一键开始"
+                                detail:@"找游戏 → 绑定 → 定位模块 → 解析 UE4（不用内核，不会崩）"
+                                action:@"actOneClick"]];
+    [s1.rows addObject:[self actionRow:@"启动内核"
+                                detail:@"⚠️ 可选：KFD 已导致过 panic，主线不需要它"
+                                action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];
     [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
@@ -353,6 +366,131 @@ extern char **environ;
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+#pragma mark 一键开始（纯 TrollStore 模式，不用内核）
+
+/*
+ * ★★★ [M5.15] 一键开始 —— 不碰 KFD ★★★
+ *
+ * ── 为什么这是对的 ──
+ *
+ * 走查代码确认：整条读取链【完全不依赖 KFD】——
+ *     Read/MFReadBackend.mm      KFD 相关 0 处 / task-port 相关 13 处
+ *     Game/MFGameReader.mm       KFD 相关 0 处 / task-port 相关  4 处
+ *     Kernel/MFModuleLocator.mm  KFD 相关 0 处（只有 import）/ task-port 7 处
+ *
+ * 门条件也只认 task port：
+ *     gateOpen = modeFlag && targetTaskPort != MACH_PORT_NULL
+ *
+ * 而 task port 来自 task_for_pid —— 靠 task_for_pid-allow entitlement
+ * （从设备读出核对过，7 项权限全部生效）。
+ *
+ * ── 为什么必须绕开 KFD ──
+ *
+ * 真机已经付过代价：
+ *   · panic(cpu 5): pmap_map_cpu_windows_copy_internal:
+ *         attempted to map a managed page @pmap.c:10917
+ *     —— vm_copy 碰到 KFD 制造的悬空页时的典型后果
+ *   · App SIGSEGV 在 objc_autoreleasePoolPop
+ *     —— 悬空页被系统挪作他用，我们还在碰 → 内存破坏
+ *   · 而且 landa 的竞态是概率性的：成过一次（截图有「启动成功 puaf_pages=3072」），
+ *     但 6 次重试 6 次 0/768
+ *
+ * 这正是白米饭留「纯巨魔模式」的原因。
+ *
+ * ── 一键做什么 ──
+ *   ① 按进程名找游戏进程（sysctl KERN_PROC_ALL）
+ *   ② task_for_pid 拿 task port
+ *   ③ 模块定位（TASK_DYLD_INFO → libUE4 基址）
+ *   ④ UE4 链解析（GWorld → 玩家 → 相机 → Actors）
+ * 每一步都写在报告里，断在哪一环一目了然。
+ */
+- (void)actOneClick {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableString *rep = [NSMutableString string];
+        [rep appendString:@"复刻版 · 一键开始（纯 TrollStore，不用内核）\n"];
+        [rep appendString:@"─────────────────────────────────\n\n"];
+
+        MFGameProfile *prof = [MFOffsets shared].current;
+        NSString *pname = prof.processName.length ? prof.processName : @"DeltaForceClient";
+        [rep appendFormat:@"目标游戏：%@（进程名 %@）\n\n", prof.displayName, pname];
+
+        // ① 找进程
+        pid_t gpid = [MFModuleLocator pidForProcessName:pname];
+        if (gpid <= 0) {
+            [rep appendFormat:
+                @"✗ ① 没找到进程「%@」\n\n"
+                @"请先打开「%@」并进到游戏里，再回来点这里。\n",
+                pname, prof.displayName];
+            goto done;
+        }
+        [rep appendFormat:@"✓ ① 找到进程 pid=%d\n", gpid];
+
+        // ② 拿 task port
+        {
+            NSString *perr = nil;
+            uint32_t port = [MFKernel acquireTaskPortForPid:(int)gpid error:&perr];
+            if (port == MACH_PORT_NULL) {
+                [rep appendFormat:@"✗ ② 拿不到 task port：%@\n\n"
+                    @"检查 task_for_pid-allow entitlement 是否生效\n", perr ?: @"?"];
+                goto done;
+            }
+            [MFGameReader shared].targetTaskPort = port;
+            [[MFReadBackend shared] setTargetTaskPort:port];
+            [[NSUserDefaults standardUserDefaults] setInteger:gpid forKey:@"mf.target.pid"];
+            [[NSUserDefaults standardUserDefaults] setObject:pname forKey:@"mf.target.name"];
+            [rep appendFormat:@"✓ ② task port = 0x%x，读取链门条件=%d\n",
+                port, [MFReadBackend shared].gateOpen];
+        }
+
+        // ③ 模块定位
+        {
+            NSString *merr = nil;
+            MFModuleInfo *m = [MFModuleLocator mainModuleForPid:gpid error:&merr];
+            if (m == nil) {
+                [rep appendFormat:@"✗ ③ 模块定位失败：%@\n", merr ?: @"?"];
+                goto done;
+            }
+            [MFUEReader shared].libBase = m.base;
+            [[NSUserDefaults standardUserDefaults] setObject:@(m.base) forKey:@"mf.game.libbase"];
+            [[NSUserDefaults standardUserDefaults] setObject:m.name forKey:@"mf.game.module"];
+            [rep appendFormat:@"✓ ③ 主模块 %@  base=0x%llx  %@\n",
+                m.name, m.base, [m sizeText]];
+        }
+
+        // ④ UE4 链解析
+        {
+            [rep appendString:@"\n④ UE4 对象图逐级解析：\n"];
+            NSString *ue = [[MFUEReader shared] diagnosticReport];
+            // 缩进一下，读起来清楚
+            for (NSString *line in [ue componentsSeparatedByString:@"\n"]) {
+                if (line.length) [rep appendFormat:@"    %@\n", line];
+            }
+        }
+
+    done:
+        [rep appendString:@"\n─────────────────────────────────\n"];
+        [rep appendString:@"★ 全程没有用到 KFD —— 不会 panic、不会崩。\n"];
+        [rep appendString:@"如果 ④ 报「GWorld 不是合法指针」，说明 0x178AA5E0\n"];
+        [rep appendString:@"这个静态偏移已经随游戏版本失效，需要用扫描重新定位。\n"];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"一键开始"
+                                 message:rep
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制全文"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = rep;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 #pragma mark UE4 链解析
