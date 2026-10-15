@@ -2,6 +2,7 @@
 //  MFHUDAppDelegate.mm — HUD 角色（实现）
 //
 #import "MFHUDAppDelegate.h"
+#import "MFHUDApplication.h"   // [M5.18] MFMarkWindowSystemSecure
 #import "MFHUDLog.h"
 #import "MFMenuUI.h"
 #import "MFDrawingLayer.h"
@@ -188,6 +189,12 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     drawView.delegate = drawLayer;
     self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
     [drawVC.view addSubview:drawView];
+    /*
+     * [M5.18] 打系统窗口 / 安全窗口标记 —— 必须在 makeKeyAndVisible 之前。
+     * 对照白米饭已证的窗口特性：
+     *     _isSystemWindow / _isSecure / _shouldCreateContextAsSecure 均为 1
+     */
+    MFMarkWindowSystemSecure(drawWin);
     drawWin.hidden = NO;
     [drawWin makeKeyAndVisible];
     self.drawingWindow = drawWin;
@@ -211,6 +218,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuView.delegate = menu;
     self.menuController = menu;              // 强引用保活（delegate 是 weak）
     [menuVC.view addSubview:menuView];
+    MFMarkWindowSystemSecure(menuWin);       // [M5.18] 同上，必须在 visible 之前
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;

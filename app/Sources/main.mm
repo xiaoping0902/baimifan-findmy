@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #import "App/AppDelegate.h"
 #import "HUD/MFHUDAppDelegate.h"
+#import "HUD/MFHUDApplication.h"
 #import "HUD/MFHUDLog.h"
 #include <string.h>
 #include <unistd.h>
@@ -47,10 +48,29 @@ int main(int argc, char *argv[]) {
         if (MFIsHUDLaunch(argc, argv)) {
             MFDumpArgv("HUD", argc, argv);
             NSLog(@"[MF] 以 HUD 角色启动");
-            // ★ 这一步之后如果日志断了，说明卡在 UIApplicationMain 内部
-            MFHUDLogLine(@"即将调用 UIApplicationMain（HUD 角色）…");
-            int r = UIApplicationMain(argc, argv, nil, NSStringFromClass([MFHUDAppDelegate class]));
-            MFHUDLogLine(@"⚠️ UIApplicationMain 返回了 r=%d（通常意味着进程要退出）", r);
+            /*
+             * ★★★ [M5.18] 不再走标准 UIApplicationMain ★★★
+             *
+             * 真机症状：日志停在上一条 MFHUDLogLine，之后【再无任何输出】——
+             * 连 MFHUDAppDelegate 的 didFinishLaunching 第一行都没有，
+             * 而且没有新的崩溃报告。是卡住，不是崩。
+             *
+             * 原因：iOS 13+ 的 UIApplicationMain 会做 scene 协商，
+             * 而 posix_spawn 的子进程不走 FrontBoard → 没有 UIWindowScene
+             * → 协商永远等不到 → 卡死。
+             *
+             * 白米饭的做法（《白米饭补充分析-启动窗口与功能》§2 已证）：
+             *     「HUD 初始化局部读取 HUDMainApplication 和
+             *       HUDMainApplicationDelegate 类，并调用
+             *       UIApplicationInstantiateSingleton。」
+             * 它【完全不用】系统的 UIApplicationMain。
+             *
+             * 所以改成 MFLaunchHUDRole()：实例化单例 → 设 delegate →
+             * 手动触发 didFinishLaunching → CFRunLoopRun。
+             */
+            MFHUDLogLine(@"即将调用 MFLaunchHUDRole（绕开 UIApplicationMain）…");
+            int r = MFLaunchHUDRole(argc, argv);
+            MFHUDLogLine(@"⚠️ MFLaunchHUDRole 返回了 r=%d（通常意味着进程要退出）", r);
             return r;
         }
         MFDumpArgv("控制台", argc, argv);

@@ -57,6 +57,31 @@
 	</dict>
 	<key>UIRequiresFullScreen</key>
 	<true/>
+	<!--
+	  [M5.18] 对照白米饭 Info.plist 补的两个键（原版有、我们没有）：
+
+	    UIApplicationShowsViewsWhileLocked  = true
+	    UIApplicationSystemWindowsSecureKey = true
+
+	  它们让窗口在锁屏时也显示、并按「系统安全窗口」处理 ——
+	  跨 App 悬浮（SBSAccessibilityWindowHostingController 那条路）需要。
+
+	  分析报告已证原版的 DrawingWindow 上
+	    _isSystemWindow / _isSecure / _shouldCreateContextAsSecure / _ignoresHitTest
+	  全部直接返回 1，和这两个键是一套机制。
+
+	  ⚠️ 故意【不加】 NSPrincipalClass：
+	     它的作用是给 UIApplicationMain(argc,argv,nil,...) 提供 UIApplication 的类。
+	     原版写 HUDMainApplication。但我们主 App 也走同一条 nil 分支，
+	     加上去会让控制台进程也用 HUD 的 Application 类。
+	     我们改成在代码里显式指定（MFLaunchHUDRole 里
+	     UIApplicationInstantiateSingleton([MFHUDApplication class])），
+	     效果一致且不影响主 App。
+	-->
+	<key>UIApplicationShowsViewsWhileLocked</key>
+	<true/>
+	<key>UIApplicationSystemWindowsSecureKey</key>
+	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 	<key>UISupportedInterfaceOrientations</key>
