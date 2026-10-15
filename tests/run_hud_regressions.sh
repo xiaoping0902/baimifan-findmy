@@ -24,6 +24,16 @@ clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
     -framework Foundation -framework QuartzCore -lproc \
     "${launcher_sources[@]}" -o "$(dirname "$binary")/hud-launcher-regressions"
 "$(dirname "$binary")/hud-launcher-regressions"
+clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
+    -framework Foundation -framework QuartzCore -lproc \
+    tests/hud_lifecycle_regressions.mm app/Sources/HUD/MFHUDLauncher.mm \
+    app/Sources/HUD/MFHUDStartupStatus.mm app/Sources/HUD/MFHUDControl.mm \
+    -o "$(dirname "$binary")/hud-lifecycle-regressions"
+lifecycle_failed=0
+for lifecycle_case in retain-request failed-stop blocked-main session-isolation startup-cleanup foreign-pid restart reap; do
+    if ! "$(dirname "$binary")/hud-lifecycle-regressions" "$lifecycle_case"; then lifecycle_failed=1; fi
+done
+if [[ "$lifecycle_failed" != 0 ]]; then exit 1; fi
 touch_sources=(tests/hud_touch_regressions.mm)
 if [[ -f app/Sources/HUD/MFHUDTouchRouter.mm ]]; then
     touch_sources+=(app/Sources/HUD/MFHUDTouchRouter.mm)

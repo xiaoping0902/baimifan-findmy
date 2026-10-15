@@ -2,9 +2,9 @@ name: HUD regression tests
 on:
   workflow_dispatch:
   push:
-    branches: [fix/hud-context-startup]
+    branches: [fix/hud-context-startup, fix/hud-reliability]
 jobs:
-  test:
+  native:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -13,7 +13,14 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
       - name: Exercise context ownership and startup reports
         run: bash tests/run_hud_regressions.sh
+  uikit:
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [input, windows, menu]
+    steps:
+      - uses: actions/checkout@v4
       - name: Replay device touches through the production HID bridge
-        run: python3 tests/run_hud_uikit_regressions.py --suite input
-      - name: Exercise real UIKit window initialization
-        run: python3 tests/run_hud_uikit_regressions.py
+        run: python3 tests/run_hud_uikit_regressions.py --suite ${{ matrix.suite }}

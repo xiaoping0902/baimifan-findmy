@@ -5,6 +5,7 @@
 #import "MFHUDAppDelegate.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include "HUDRegressionOutput.h"
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fflush(stderr); exit(1); } } while (0)
 
@@ -68,7 +69,10 @@ static void TestDrawingIsPassthroughBeforeInitialization(void) {
 }
 
 static void TestMenuUsesItsVisiblePanel(void) {
-    MFHUDWindow *menu = [[MFHUDWindow alloc] initWithFrame:CGRectMake(24, 90, 348, 520)];
+    MFHUDWindow *allocated = [MFHUDWindow alloc];
+    CHECK(![allocated _ignoresHitTest],
+          "interactive menu role must be fixed before superclass context initialization");
+    MFHUDWindow *menu = [allocated initWithFrame:CGRectMake(24, 90, 348, 520)];
     CHECK(![menu _ignoresHitTest], "menu must remain eligible for server hit testing");
     menu.rootViewController = [UIViewController new];
     UIView *panel = [[UIView alloc] initWithFrame:menu.bounds];
@@ -98,5 +102,6 @@ static void TestMenuUsesItsVisiblePanel(void) {
 }
 @end
 int main(int argc, char **argv) {
+    MFOpenRegressionOutput();
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(RegressionDelegate.class)); }
 }

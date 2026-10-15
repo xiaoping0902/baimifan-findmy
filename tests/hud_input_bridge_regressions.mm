@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include "HUDRegressionOutput.h"
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fflush(stderr); exit(1); } } while (0)
 
@@ -70,6 +71,7 @@ static AXFixtureEvent *currentAX;
 // itself down to an idle frame rate).
 @interface InputPanel : UIView
 @property CGRect captureRect, headerDragRect;
+@property CGRect interactionRect;
 @property BOOL hasCompletedFrame;
 @property (strong) TouchRecorder *imgui;
 @property NSUInteger redrawRequests;
@@ -77,6 +79,10 @@ static AXFixtureEvent *currentAX;
 @end
 @implementation InputPanel
 - (void)requestRedraw { self.redrawRequests++; }
+- (BOOL)acceptsInteractionAtPoint:(CGPoint)point {
+    return CGRectContainsPoint(self.interactionRect, point) ||
+           CGRectContainsPoint(self.headerDragRect, point);
+}
 @end
 
 void MFHUDLogLine(NSString *format, ...) { }
@@ -126,6 +132,7 @@ static MFHUDInputBridge *NewBridge(UIWindow **windowOut, InputPanel **panelOut) 
     window.rootViewController = [UIViewController new];
     InputPanel *panel = [[InputPanel alloc] initWithFrame:window.bounds];
     panel.captureRect = panel.bounds; panel.headerDragRect = CGRectMake(0, 0, 248, 31);
+    panel.interactionRect = panel.bounds;
     panel.hasCompletedFrame = YES; panel.imgui = [TouchRecorder new];
     [window.rootViewController.view addSubview:panel]; window.hidden = NO;
     MFHUDInputBridge *bridge = [[MFHUDInputBridge alloc] initWithOverlay:(MFOverlayView *)panel window:window];
@@ -283,6 +290,56 @@ static void TestContinuityDoesNotTransferOwnershipAcrossTheScreen(void) {
     w.hidden = YES;
 }
 
+static void TestNearbySecondFingerCannotBorrowPrimaryIdentity(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    Send(b, w, p, 420, 3, 0, CGPointMake(80, 100));
+    Send(b, w, p, 676, 3, 0, CGPointMake(90, 105));
+    Send(b, w, p, 676, 2, 2, CGPointMake(90, 105));
+    CHECK(p.imgui.cancellations == 1 && p.imgui.releases == 0,
+          "a nearby new finger must cancel, never inherit an active button press");
+    w.hidden = YES;
+}
+
+static void TestRawIdentityCannotCollideWithInternalToken(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    Send(b, w, p, 420, 3, 0, CGPointMake(80, 100));
+    Send(b, w, p, 1, 2, 2, CGPointMake(310, 490));
+    CHECK(p.imgui.releases == 0,
+          "raw ID 1 must not release an unrelated internal gesture token 1");
+    [b cancelAll]; w.hidden = YES;
+}
+
+static void TestBlankSpaceCannotStartMenuInteraction(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    p.interactionRect = CGRectMake(30, 100, 80, 40);
+    Send(b, w, p, 420, 3, 0, CGPointMake(250, 300));
+    Send(b, w, p, 420, 3, 1, CGPointMake(60, 120));
+    Send(b, w, p, 420, 2, 2, CGPointMake(60, 120));
+    CHECK(p.imgui.presses == 0 && p.imgui.releases == 0,
+          "a gesture beginning in passthrough space must never slide into a menu control");
+    Send(b, w, p, 421, 3, 0, CGPointMake(60, 120));
+    Send(b, w, p, 421, 2, 2, CGPointMake(60, 120));
+    CHECK(p.imgui.presses == 1 && p.imgui.releases == 1,
+          "visible controls must still accept a fresh complete gesture");
+    w.hidden = YES;
+}
+
+static void TestBallTapAndDragHaveDifferentOutcomes(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    p.captureRect = p.interactionRect = p.headerDragRect = CGRectMake(0, 0, 56, 56);
+    Send(b, w, p, 420, 3, 0, CGPointMake(28, 28));
+    Send(b, w, p, 420, 2, 2, CGPointMake(28, 28));
+    CHECK(p.imgui.presses == 1 && p.imgui.releases == 1,
+          "tapping the collapsed ball must deliver an expansion click instead of swallowing it as a drag");
+    CGPoint start = w.center;
+    Send(b, w, p, 421, 3, 0, CGPointMake(28, 28));
+    Send(b, w, p, 421, 3, 1, CGPointMake(48, 38));
+    Send(b, w, p, 421, 2, 2, CGPointMake(28, 28));
+    CHECK(!CGPointEqualToPoint(start, w.center) && p.imgui.presses == 1,
+          "dragging the ball moves its window without also expanding it");
+    w.hidden = YES;
+}
+
 @interface InputRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation InputRegressionDelegate
@@ -302,6 +359,10 @@ static void TestContinuityDoesNotTransferOwnershipAcrossTheScreen(void) {
         TestNewFingerBeginCancelsAnExistingOwner();
         TestDeviceRawIdentityChangeReleasesWithContinuity();
         TestContinuityDoesNotTransferOwnershipAcrossTheScreen();
+        TestNearbySecondFingerCannotBorrowPrimaryIdentity();
+        TestRawIdentityCannotCollideWithInternalToken();
+        TestBlankSpaceCannotStartMenuInteraction();
+        TestBallTapAndDragHaveDifferentOutcomes();
         puts("PASS: production HID bridge releases device taps and drags with stable raw contact ownership");
         fflush(stdout); exit(0);
     });
@@ -309,5 +370,6 @@ static void TestContinuityDoesNotTransferOwnershipAcrossTheScreen(void) {
 }
 @end
 int main(int argc, char **argv) {
+    MFOpenRegressionOutput();
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(InputRegressionDelegate.class)); }
 }
