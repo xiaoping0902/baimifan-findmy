@@ -161,31 +161,46 @@
      */
     NSInteger pages = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafPages"];
     if (pages < 16) pages = 2048;      // 默认（kfd 对 16KB 页设备的标准值）
+    NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
+    if (pm < 0 || pm > 2) pm = 2;      // 默认 landa
 
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"启动内核"
                          message:[NSString stringWithFormat:
-                                 @"kopen(%ld, landa, kread_sem_open, kwrite_sem_open)\n\n"
-                                 @"目标悬空页门槛 = %ld/4 = %ld 个\n"
-                                 @"（凑不够就是内存压力，降档重试更容易成功）\n\n"
-                                 @"⚠️ 失败可能表现为卡顿或闪退，严重时设备重启。\n"
+                                 @"当前：%ld 页 · %@\n"
+                                 @"目标悬空页门槛 = %ld/4 = %ld 个\n\n"
+                                 @"⚠️ 真机证据：landa 在本机 grab_free_pages 恒为 0/256，\n"
+                                 @"   99999 轮一次没命中 —— 说明它【根本没建立悬空页】。\n"
+                                 @"   所以下面可以直接换 PUAF 方法试。\n\n"
                                  @"失败后本次运行会禁止再试。",
-                                 (long)pages, (long)pages, (long)(pages / 4)]
+                                 (long)pages,
+                                 pm == 2 ? @"landa" : (pm == 1 ? @"smith" : @"physpuppet"),
+                                 (long)pages, (long)(pages / 4)]
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
-    // 三个档位，各有说明
+    /*
+     * 六档组合：3 种 PUAF 方法 × 2 种页数。
+     * landa 已经证明结构性失败，所以主推 smith / physpuppet。
+     *
+     * ⚠️ 枚举值必须与 libkfd.h 一致：
+     *     enum puaf_method { puaf_physpuppet = 0, puaf_smith = 1, puaf_landa = 2 };
+     */
     NSArray *tiers = @[
-        @[@"2048（标准）", @2048, @"最稳，但内存紧张时容易凑不够 512"],
-        @[@"1024（推荐）", @1024, @"门槛降到 256，成功率明显提高"],
-        @[@"512（兜底）",  @512,  @"门槛只要 128，最宽松"],
+        @[@"smith · 1024",         @1, @1024, @"★ 先试这个 —— landa 已证不可用"],
+        @[@"smith · 2048",         @1, @2048, @"smith + 标准页数"],
+        @[@"physpuppet · 2048",    @0, @2048, @"经典方法，老设备常用"],
+        @[@"physpuppet · 512",     @0, @512,  @"physpuppet + 小页数"],
+        @[@"landa · 1024",         @2, @1024, @"再确认一次 landa（已知失败）"],
+        @[@"landa · 2048（原值）",  @2, @2048, @"原始配置"],
     ];
     for (NSArray *t in tiers) {
-        NSString *title = [NSString stringWithFormat:@"%@ — %@", t[0], t[2]];
+        NSString *title = [NSString stringWithFormat:@"%@ — %@", t[0], t[3]];
         [a addAction:[UIAlertAction actionWithTitle:title
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *_) {
-            [self reallyStartKernelWithPages:(uint64_t)[t[1] unsignedIntegerValue]];
+            [[NSUserDefaults standardUserDefaults] setInteger:[t[1] integerValue] forKey:@"mf.kfd.puafMethod"];
+            [self reallyStartKernelWithPages:(uint64_t)[t[2] unsignedIntegerValue]];
         }]];
     }
     [self presentViewController:a animated:YES completion:nil];

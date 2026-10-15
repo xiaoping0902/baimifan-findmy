@@ -3,6 +3,7 @@
 //
 #import "MFKernel.h"
 #import "MFKernelBridge.h"
+#import "../App/MFDebugExport.h"   // [M5.11] 内核失败时自动把日志镜像到 Media
 
 #import <UIKit/UIKit.h>          // forceRestartWithReason 弹窗用
 #import <mach/mach.h>
@@ -168,11 +169,30 @@ static BOOL gMFKernelPoisoned = NO;
         NSLog(@"[MF][Kernel] 机型判定：%@（arm64_link_addr 将由 patchfinder 定）",
               isM ? @"M 系列" : @"A 系列");
 
-        // 16.6.1 上唯一可用：landa + sem_open 组合
+        /*
+         * [M5.11] PUAF 方法可切换
+         *
+         * 真机证据：landa 路径下 grab_free_pages 历史最好恒为 0/256，
+         * 99999 轮一次都没命中 —— 这不是随机性问题，是【结构性】的，
+         * 说明 landa 在这台机器上根本没建立悬空页。
+         *
+         * 所以把方法做成可切换，让用户能试另外两条：
+         *   0 = physpuppet
+         *   1 = smith
+         *   2 = landa（默认）
+         *
+         * 注意：kread/kwrite 仍必须是 sem_open(1/1) —— 16.3+ 上 kqueue_workloop_ctl 已废。
+         */
+        NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
+        if (pm < 0 || pm > 2) pm = 2;      // 默认 landa
+
+        NSLog(@"[MF][Kernel] 开始 kopen：pages=%llu method=%ld（0=physpuppet 1=smith 2=landa）",
+              (unsigned long long)pages, (long)pm);
+
         int rc = mf_kopen(pages,
-                          2,   // puaf_landa
-                          1,   // kread_sem_open
-                          1);  // kwrite_sem_open
+                          (int)pm,   // PUAF 方法（可切换）
+                          1,         // kread_sem_open
+                          1);        // kwrite_sem_open
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (rc != 0) {
@@ -181,6 +201,9 @@ static BOOL gMFKernelPoisoned = NO;
                 gMFKernelPoisoned = YES;
                 self.lastError = [NSString stringWithUTF8String:mf_last_error() ?: "kopen 失败"];
                 NSLog(@"[MF][Kernel] kopen 失败: %@ —— 已上锁，需重启 App", self.lastError);
+                /* [M5.11] 自动把内核日志镜像到 Media —— 这样电脑侧一条命令就能拉，
+                   不用再让用户「点按钮 → 复制全文 → 粘贴」 */
+                [MFDebugExport syncLogs];
                 if (completion) completion(NO, self.lastError);
                 return;
             }
