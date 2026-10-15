@@ -5,6 +5,7 @@
 #import "MFHUDApplication.h"
 #import "MFHUDWindowHost.h"
 #import "MFHUDStartupStatus.h"
+#import "MFHUDInputBridge.h"
 #include <unistd.h>
 #include <stdlib.h>
 #import "MFHUDLog.h"
@@ -16,6 +17,8 @@
 #import "../Read/MFReadBackend.h"
 #import <objc/message.h>
 #include <string.h>
+#include <math.h>
+#include <dlfcn.h>
 
 #pragma mark - HUD 窗口
 
@@ -54,19 +57,42 @@
 
 /// 让窗口内容不参与命中（绘制层用）
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.ignoresHitTestOverride) return nil;
-    return [super hitTest:point withEvent:event];
+    if (self.ignoresHitTestOverride || self.hidden || !self.userInteractionEnabled) return nil;
+    UIView *content = self.interactiveView;
+    if (!content) return nil;
+    return [content hitTest:[content convertPoint:point fromView:self] withEvent:event];
 }
 
 @end
 
 #pragma mark - HUD 应用代理
 
+@interface MFHUDFixedRootController : UIViewController
+@end
+@implementation MFHUDFixedRootController
+- (BOOL)shouldAutorotate { return NO; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskPortrait; }
+@end
+
+@protocol MFHUDOrientationUpdate <NSObject>
+- (NSInteger)orientation;
+@end
+@protocol MFHUDOrientationObserver <NSObject>
+- (NSInteger)activeInterfaceOrientation;
+- (void)setHandler:(void (^)(id<MFHUDOrientationUpdate>))handler;
+- (void)invalidate;
+@end
+
 @interface MFHUDAppDelegate ()
 @property (nonatomic, strong) MFOverlayView *menuOverlay;
 @property (nonatomic, strong) MFOverlayView *drawingOverlay;
 @property (nonatomic, strong) NSMutableDictionary *startupReport;
 @property (nonatomic, copy) NSString *startupToken;
+@property (nonatomic, strong) MFHUDInputBridge *inputBridge;
+@property (nonatomic, strong) UIView *menuContent;
+@property (nonatomic, strong) UIView *drawingContent;
+@property (nonatomic, strong) id<MFHUDOrientationObserver> orientationObserver;
+@property (nonatomic) UIInterfaceOrientation hudOrientation;
 @end
 
 @implementation MFHUDAppDelegate
@@ -120,19 +146,24 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
     // [M5.22] 层级对齐 TrollSpeed 的 10000010.0（原来 1020，差了四个数量级）
-    MFHUDWindow *drawWin = [[MFHUDWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    CGRect fixedScreen = UIScreen.mainScreen.fixedCoordinateSpace.bounds;
+    MFHUDWindow *drawWin = [[MFHUDWindow alloc] initWithFrame:fixedScreen];
     drawWin.ignoresHitTestOverride = YES;
     drawWin.windowLevel = 10000010.0;
     drawWin.backgroundColor = [UIColor clearColor];
     drawWin.opaque = NO;
     drawWin.userInteractionEnabled = NO;
 
-    UIViewController *drawVC = [[UIViewController alloc] init];
+    UIViewController *drawVC = [[MFHUDFixedRootController alloc] init];
     drawVC.view.backgroundColor = [UIColor clearColor];
     drawVC.view.userInteractionEnabled = NO;
     drawWin.rootViewController = drawVC;
+    drawVC.view.frame = drawWin.bounds;
+    self.drawingContent = [[UIView alloc] initWithFrame:drawVC.view.bounds];
+    self.drawingContent.userInteractionEnabled = NO;
+    [drawVC.view addSubview:self.drawingContent];
 
-    MFOverlayView *drawView = [[MFOverlayView alloc] initWithFrame:drawVC.view.bounds
+    MFOverlayView *drawView = [[MFOverlayView alloc] initWithFrame:self.drawingContent.bounds
                                                        interactive:NO];
     drawView.automaticallyStartsRendering = NO;
     self.drawingOverlay = drawView;
@@ -141,23 +172,28 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     drawLayer.overlay = drawView;
     drawView.delegate = drawLayer;
     self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
-    [drawVC.view addSubview:drawView];
+    [self.drawingContent addSubview:drawView];
     drawWin.hidden = NO;
     [drawWin makeKeyAndVisible];
     self.drawingWindow = drawWin;
 
     // ── ② 菜单窗（可交互）────────────────────────────
     // [M5.22] 对齐 TrollSpeed（绘制窗 10000010，菜单窗略低一点）
-    MFHUDWindow *menuWin = [[MFHUDWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    // A full-screen interactive UIWindow blocks the desktop even when its
+    // Metal view rejects points. Keep the actual native surface panel-sized.
+    MFHUDWindow *menuWin = [[MFHUDWindow alloc] initWithFrame:CGRectMake(24, 90, 348, 520)];
     menuWin.windowLevel = 10000009.0;
     menuWin.backgroundColor = [UIColor clearColor];
     menuWin.opaque = NO;
 
-    UIViewController *menuVC = [[UIViewController alloc] init];
+    UIViewController *menuVC = [[MFHUDFixedRootController alloc] init];
     menuVC.view.backgroundColor = [UIColor clearColor];
     menuWin.rootViewController = menuVC;
+    menuVC.view.frame = menuWin.bounds;
+    self.menuContent = [[UIView alloc] initWithFrame:menuVC.view.bounds];
+    [menuVC.view addSubview:self.menuContent];
 
-    MFOverlayView *menuView = [[MFOverlayView alloc] initWithFrame:menuVC.view.bounds
+    MFOverlayView *menuView = [[MFOverlayView alloc] initWithFrame:self.menuContent.bounds
                                                        interactive:YES];
     menuView.automaticallyStartsRendering = NO;
     self.menuOverlay = menuView;
@@ -166,50 +202,25 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menu.overlay = menuView;
     menuView.delegate = menu;
     self.menuController = menu;              // 强引用保活（delegate 是 weak）
-    [menuVC.view addSubview:menuView];
+    [self.menuContent addSubview:menuView];
+    menuWin.interactiveView = menuView;
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
-
-    /*
-     * ══════════════════════════════════════════════════════════════
-     *  ★ [M5.24] 显示链路自检色块 —— 采纳另一位分析者的建议
-     * ══════════════════════════════════════════════════════════════
-     *
-     * 原话：「验证这一层时，可以先显示一个固定位置、颜色明显的普通 UIView 色块。
-     *        色块能跨应用显示，就说明基础窗口显示链路已经接通，
-     *        再继续验证 ImGui 菜单，排查范围会清楚很多。」
-     *
-     * 这个思路很对 —— 把「窗口能不能显示」和「ImGui 能不能渲染」
-     * 拆开验证。色块用的是最朴素的东西（UIView + backgroundColor），
-     * 只要它不显示，问题就一定在窗口/托管层，与渲染无关。
-     *
-     * 放在屏幕右上角，不挡菜单；尺寸够大，一眼能看到。
-     */
-    {
-        CGFloat w = 120, h = 120;
-        CGRect f = CGRectMake(UIScreen.mainScreen.bounds.size.width - w - 24,
-                              60, w, h);
-        UIView *tv = [[UIView alloc] initWithFrame:f];
-        tv.backgroundColor = [UIColor colorWithRed:1.0 green:0.15 blue:0.45 alpha:0.92];
-        tv.layer.cornerRadius = 16;
-        tv.layer.borderWidth = 4;
-        tv.layer.borderColor = [UIColor whiteColor].CGColor;
-        tv.userInteractionEnabled = NO;
-
-        UILabel *lbl = [[UILabel alloc] initWithFrame:tv.bounds];
-        lbl.text = @"色块\n测试";
-        lbl.numberOfLines = 0;
-        lbl.textAlignment = NSTextAlignmentCenter;
-        lbl.font = [UIFont boldSystemFontOfSize:26];
-        lbl.textColor = [UIColor whiteColor];
-        [tv addSubview:lbl];
-
-        [menuVC.view addSubview:tv];
-        self.testColorView = tv;
-        MFHUDLogLine(@"已放入测试色块：frame=%@（右上角粉红色方块）",
-                     NSStringFromCGRect(f));
+    self.inputBridge = [[MFHUDInputBridge alloc] initWithOverlay:menuView window:menuWin];
+    NSString *inputError = nil;
+    if (![self.inputBridge installWithError:&inputError]) {
+        [self failStartup:inputError];
+        return YES;
     }
+    __weak MFHUDAppDelegate *weakSelfForInput = self;
+    menuView.captureRectDidChange = ^(CGRect rect) {
+        MFHUDAppDelegate *owner = weakSelfForInput;
+        BOOL empty = CGRectIsNull(rect) || CGRectIsEmpty(rect);
+        owner.hudMenuWindow.hidden = empty;
+        if (empty) [owner.inputBridge cancelAll];
+    };
+    [self startObservingOrientation];
 
     // Let UIKit finish initial window layout before reading its native context.
     // Keep rendering stopped until both layer trees have been registered.
@@ -296,6 +307,75 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     return contextID;
 }
 
+- (void)startObservingOrientation {
+    Class cls = NSClassFromString(@"FBSOrientationObserver");
+    if (!cls) {
+        dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_LAZY);
+        cls = NSClassFromString(@"FBSOrientationObserver");
+    }
+    id<MFHUDOrientationObserver> observer = [[cls alloc] init];
+    if ([observer respondsToSelector:@selector(setHandler:)] &&
+        [observer respondsToSelector:@selector(activeInterfaceOrientation)]) {
+        self.orientationObserver = observer;
+        __weak MFHUDAppDelegate *weakSelf = self;
+        [observer setHandler:^(id<MFHUDOrientationUpdate> update) {
+            UIInterfaceOrientation orientation = (UIInterfaceOrientation)update.orientation;
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf applyHUDOrientation:orientation]; });
+        }];
+        [self applyHUDOrientation:(UIInterfaceOrientation)observer.activeInterfaceOrientation];
+    } else {
+        MFHUDLogLine(@"方向观察器不可用，菜单先使用竖屏坐标");
+        [self applyHUDOrientation:UIInterfaceOrientationPortrait];
+    }
+}
+
+- (void)applyHUDOrientation:(UIInterfaceOrientation)orientation {
+    if (orientation < UIInterfaceOrientationPortrait || orientation > UIInterfaceOrientationLandscapeRight)
+        orientation = UIInterfaceOrientationPortrait;
+    if (self.hudOrientation == orientation) return;
+    [self.inputBridge cancelAll];
+    self.hudOrientation = orientation;
+    CGFloat angle = orientation == UIInterfaceOrientationPortraitUpsideDown ? M_PI :
+        (orientation == UIInterfaceOrientationLandscapeLeft ? -M_PI_2 :
+         (orientation == UIInterfaceOrientationLandscapeRight ? M_PI_2 : 0));
+    CGRect fixed = UIScreen.mainScreen.fixedCoordinateSpace.bounds;
+    BOOL landscape = UIInterfaceOrientationIsLandscape(orientation);
+    CGSize logicalScreen = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
+    CGSize panel = CGSizeMake(348, 520);
+    CGSize physicalPanel = landscape ? CGSizeMake(panel.height, panel.width) : panel;
+    // Position (24,90) in the displayed orientation, then rotate into fixed space.
+    CGFloat dx = 24 + panel.width / 2 - logicalScreen.width / 2;
+    CGFloat dy = 90 + panel.height / 2 - logicalScreen.height / 2;
+    CGPoint center = CGPointMake(CGRectGetMidX(fixed) + cos(angle)*dx - sin(angle)*dy,
+                                 CGRectGetMidY(fixed) + sin(angle)*dx + cos(angle)*dy);
+    UIWindow *menuWindow = self.hudMenuWindow;
+    menuWindow.bounds = (CGRect){CGPointZero, physicalPanel};
+    menuWindow.center = center;
+    menuWindow.rootViewController.view.frame = menuWindow.bounds;
+    // Only the content rotates. Setting a transformed UIView's frame is undefined.
+    self.menuContent.bounds = (CGRect){CGPointZero, panel};
+    self.menuContent.center = CGPointMake(physicalPanel.width / 2, physicalPanel.height / 2);
+    self.menuContent.transform = CGAffineTransformMakeRotation(angle);
+    self.menuOverlay.frame = self.menuContent.bounds;
+    self.drawingContent.bounds = (CGRect){CGPointZero, logicalScreen};
+    self.drawingContent.center = CGPointMake(fixed.size.width / 2, fixed.size.height / 2);
+    self.drawingContent.transform = CGAffineTransformMakeRotation(angle);
+    self.drawingOverlay.frame = self.drawingContent.bounds;
+    [menuWindow layoutIfNeeded];
+    [self.menuOverlay layoutIfNeeded];
+    [self.drawingOverlay layoutIfNeeded];
+    [CATransaction flush];
+    MFHUDLogLine(@"HUD 方向=%ld menu frame=%@ content=%@ drawing=%@",
+        (long)orientation, NSStringFromCGRect(menuWindow.frame),
+        NSStringFromCGRect(self.menuOverlay.bounds), NSStringFromCGRect(self.drawingOverlay.bounds));
+    // Never leave a stale registered context silently owning an invisible input surface.
+    if ((self.menuHost && [self nativeContextIDForWindow:menuWindow] != self.menuHost.contextID) ||
+        (self.drawingHost && [self nativeContextIDForWindow:self.drawingWindow] != self.drawingHost.contextID))
+        [self failStartup:@"旋转后窗口 context 已变化，悬浮窗已退出，请重新启动悬浮窗。"];
+}
+
+- (void)dealloc { [self.orientationObserver invalidate]; }
+
 - (void)publishStartupState:(NSString *)state error:(NSString *)error {
     if ([self.startupReport[@"state"] isEqual:@"failed"] && ![state isEqual:@"failed"]) return;
     self.startupReport[@"state"] = state;
@@ -309,6 +389,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 }
 
 - (void)failStartup:(NSString *)error {
+    [self.inputBridge cancelAll];
     [self.menuOverlay stopRendering];
     [self.drawingOverlay stopRendering];
     self.hudMenuWindow.hidden = YES;

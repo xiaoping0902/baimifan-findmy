@@ -176,44 +176,17 @@
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     if (!self.interactive) return NO;                    // 绘制层完全穿透
-
     CGRect rect = self.captureRect;
+    return !CGRectIsNull(rect) && !CGRectIsEmpty(rect) && CGRectContainsPoint(rect, point);
+}
 
-    /*
-     * ★★ 审查修正（HUD 报告 §1.8「自锁」）★★
-     *
-     * 原来这里是：
-     *     if (CGRectIsNull(self.captureRect)) return NO;
-     *
-     * captureRect 只有渲染【成功】之后才会被 MFMenuUI 每帧写进去。
-     * 于是形成一个死锁：
-     *     渲染没起来 → captureRect 恒为 CGRectNull
-     *               → pointInside 恒返回 NO
-     *               → 你既看不见菜单，也【点不动】它
-     *               → 连"点一下试试渲染到底起来没有"这个自检手段都失效
-     *
-     * 现在：captureRect 为空时退回【菜单面板的默认矩形】——
-     *   与 MFMenuUI.mm 的 W=348 / H=min(520,max(240,screen.y-120)) / pos=(24,90) 一致。
-     * 这样即使渲染挂了，那片区域的触摸仍能传进来，用户点一下就有反馈，
-     * 能立刻区分「窗口没显示」和「窗口显示了但内容没渲染」两种故障。
-     */
-    if (CGRectIsNull(rect) || CGRectIsEmpty(rect)) {
-        CGRect b = self.bounds;
-        CGFloat h = MIN(520.0, MAX(240.0, b.size.height - 120.0));
-        rect = CGRectMake(24.0, 90.0, 348.0, h);
-
-        static int sFallbackWarn = 0;
-        if (sFallbackWarn < 3) {
-            sFallbackWarn++;
-            NSLog(@"[MF][Overlay] captureRect 为空（渲染未成功？），触摸回退到默认面板矩形 %@",
-                  NSStringFromCGRect(rect));
-        }
-    }
-
-    return CGRectContainsPoint(rect, point);
+- (void)setCaptureRect:(CGRect)rect {
+    _captureRect = rect;
+    if (self.captureRectDidChange) self.captureRectDidChange(rect);
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.usesExternalTouchInput) return;
     NSSet *all = event.allTouches;
     if (all.count >= 2) {
         _twoFingerActive = YES;
@@ -227,6 +200,7 @@
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.usesExternalTouchInput) return;
     NSSet *all = event.allTouches;
 
     // 双指 → 滚轮
@@ -248,10 +222,12 @@
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.usesExternalTouchInput) return;
     [self maybeRelease:touches];
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.usesExternalTouchInput) return;
     // ★ 必须处理：来电/系统手势/切后台会走这里，漏掉会造成按钮永久按下
     [self maybeRelease:touches];
     _twoFingerActive = NO;

@@ -12,7 +12,7 @@ typedef NS_ENUM(NSInteger, MFHUDTouchPhase) {
 };
 @protocol MFHUDTouchOutput <NSObject>
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down;
-- (void)scrollY:(CGFloat)delta;
+- (void)cancelTouch;
 @end
 @interface MFHUDTouchRouter : NSObject
 - (instancetype)initWithOutput:(id<MFHUDTouchOutput>)output;
@@ -24,16 +24,15 @@ typedef NS_ENUM(NSInteger, MFHUDTouchPhase) {
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 @interface TouchOutput : NSObject <MFHUDTouchOutput>
-@property NSUInteger presses, releases, positions, scrolls;
+@property NSUInteger presses, releases, positions, cancellations;
 @property CGPoint lastPoint;
-@property CGFloat lastScroll;
 @end
 @implementation TouchOutput
 - (void)touchAtPoint:(CGPoint)p down:(BOOL)down {
     self.positions++; self.lastPoint = p;
     if (down) self.presses++; else self.releases++;
 }
-- (void)scrollY:(CGFloat)delta { self.scrolls++; self.lastScroll = delta; }
+- (void)cancelTouch { self.cancellations++; }
 @end
 
 static CGRect panel = CGRectMake(24, 90, 348, 520);
@@ -53,7 +52,7 @@ static void TestOutsideAndHiddenAreNotCaptured(void) {
           "a hidden panel must not reserve a fallback touch rectangle");
     CHECK(![r handleTouchID:0 point:CGPointMake(70, 110) phase:MFHUDTouchBegan captureRect:panel],
           "invalid pointer IDs must not create a stuck press");
-    CHECK(o.positions == 0 && o.scrolls == 0, "pass-through gestures must not enter ImGui");
+    CHECK(o.positions == 0, "pass-through gestures must not enter ImGui");
 }
 
 static void TestDragOwnsFingerUntilRelease(void) {
@@ -74,25 +73,23 @@ static void TestCancelAndHideReleaseButton(void) {
     TouchOutput *o = [TouchOutput new]; MFHUDTouchRouter *r = NewRouter(o);
     [r handleTouchID:1 point:CGPointMake(60, 110) phase:MFHUDTouchBegan captureRect:panel];
     [r handleTouchID:1 point:CGPointMake(60, 110) phase:MFHUDTouchCancelled captureRect:panel];
-    CHECK(o.releases == 1, "cancel must not leave a button held");
+    CHECK(o.cancellations == 1 && o.releases == 0, "cancel must not activate a pressed button");
     [r handleTouchID:2 point:CGPointMake(60, 110) phase:MFHUDTouchBegan captureRect:panel];
     [r handleTouchID:2 point:CGPointMake(65, 115) phase:MFHUDTouchMoved captureRect:CGRectNull];
-    CHECK(o.releases == 2, "hiding a panel during a gesture must release its button");
+    CHECK(o.cancellations == 2, "hiding a panel during a gesture must cancel its button");
     [r cancelAll];
-    CHECK(o.releases == 2, "cancelling an empty router must be idempotent");
+    CHECK(o.cancellations == 2, "cancelling an empty router must be idempotent");
 }
 
-static void TestTwoFingerScrollDoesNotClickOnLift(void) {
+static void TestSecondaryFingerDoesNotStealPrimary(void) {
     TouchOutput *o = [TouchOutput new]; MFHUDTouchRouter *r = NewRouter(o);
     [r handleTouchID:1 point:CGPointMake(60, 110) phase:MFHUDTouchBegan captureRect:panel];
-    [r handleTouchID:2 point:CGPointMake(100, 150) phase:MFHUDTouchBegan captureRect:panel];
-    CHECK(o.releases == 1, "starting a scroll must release the single-finger button");
-    [r handleTouchID:2 point:CGPointMake(100, 170) phase:MFHUDTouchMoved captureRect:panel];
-    CHECK(o.scrolls == 1 && fabs(o.lastScroll) > 0, "two fingers must generate scroll input");
+    CHECK(![r handleTouchID:2 point:CGPointMake(100, 150) phase:MFHUDTouchBegan captureRect:panel],
+          "a second finger must not steal the primary press");
     [r handleTouchID:2 point:CGPointMake(100, 170) phase:MFHUDTouchEnded captureRect:panel];
     [r handleTouchID:1 point:CGPointMake(60, 120) phase:MFHUDTouchMoved captureRect:panel];
     [r handleTouchID:1 point:CGPointMake(60, 120) phase:MFHUDTouchEnded captureRect:panel];
-    CHECK(o.presses == 1 && o.releases == 1, "lifting one scroll finger must not create a phantom click");
+    CHECK(o.presses == 2 && o.releases == 1, "only the primary finger may move or release the button");
 }
 
 int main(void) {
@@ -100,8 +97,8 @@ int main(void) {
         TestOutsideAndHiddenAreNotCaptured();
         TestDragOwnsFingerUntilRelease();
         TestCancelAndHideReleaseButton();
-        TestTwoFingerScrollDoesNotClickOnLift();
-        puts("PASS: HUD capture boundaries, drag lifetime, cancellation and two-finger scrolling");
+        TestSecondaryFingerDoesNotStealPrimary();
+        puts("PASS: HUD capture boundaries, drag lifetime, cancellation and primary finger ownership");
     }
     return 0;
 }

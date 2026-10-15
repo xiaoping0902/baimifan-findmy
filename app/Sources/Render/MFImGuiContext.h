@@ -44,6 +44,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 输入事件转发
 - (void)addTouchX:(float)x y:(float)y down:(BOOL)down;
+- (void)cancelTouch;
 - (void)addScrollY:(float)dy;
 - (void)addFocus:(BOOL)focused;
 

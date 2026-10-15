@@ -50,8 +50,6 @@ static bool MFUIColorEdit(const char *label, UIColor **io, MFColorSlot slot) {
 
 @implementation MFMenuUI {
     int _tab;
-    ImVec2 _pos;
-    BOOL _posInit;
     float _alpha;
 }
 
@@ -63,9 +61,7 @@ static BOOL gVisible = YES;
 - (instancetype)init {
     if ((self = [super init])) {
         _tab = 0;
-        _posInit = NO;
         _alpha = 0.96f;
-        _pos = ImVec2(24, 90);
     }
     return self;
 }
@@ -83,19 +79,15 @@ static BOOL gVisible = YES;
 
     ImGuiIO &io = ImGui::GetIO();
     const ImVec2 screen = io.DisplaySize;
-    const float W = 348.0f;
-    const float H = MIN(520.0f, MAX(240.0f, screen.y - 120.0f));
-
-    if (!_posInit) {
-        _pos = ImVec2(24, 90);
-        _posInit = YES;
-    }
-    ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(_pos, ImGuiCond_Always);
+    // The native UIWindow is the panel. Its title gesture moves that window;
+    // ImGui stays in local coordinates so drawing and hit bounds move together.
+    ImGui::SetNextWindowSize(screen, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar;
+                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoTitleBar;
     if (!ImGui::Begin("##mfmenu", nullptr, flags)) {
         ImGui::End();
         overlay.captureRect = CGRectNull;
@@ -103,9 +95,9 @@ static BOOL gVisible = YES;
     }
 
     // 拖动后同步位置；主面板矩形交给 overlay 做命中判定
-    _pos = ImGui::GetWindowPos();
+    ImVec2 pos = ImGui::GetWindowPos();
     ImVec2 ws = ImGui::GetWindowSize();
-    overlay.captureRect = CGRectMake(_pos.x, _pos.y, ws.x, ws.y);
+    overlay.captureRect = CGRectMake(pos.x, pos.y, ws.x, ws.y);
 
     // ── 标题行 ──
     ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), "复刻版");

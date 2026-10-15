@@ -264,14 +264,9 @@ int MFLaunchHUDRole(int argc, char *argv[]) {
      * ⑨ BKSHIDEventRegisterEventCallback —— 注册 HID 事件回调
      *    （没有它窗口收不到触摸；TrollSpeed 传的是自己的 _HUDEventCallback）
      */
-    typedef void *(*mf_hidreg_t)(void *);
-    mf_hidreg_t p_BKSHIDReg = (mf_hidreg_t)dlsym(RTLD_DEFAULT,
-                                                 "BKSHIDEventRegisterEventCallback");
-    MFHUDLogLine(@"⑨ BKSHIDEventRegisterEventCallback = %p", (void *)p_BKSHIDReg);
-    if (p_BKSHIDReg) {
-        p_BKSHIDReg((void *)NULL);   // 先传 NULL，只要注册动作本身生效即可
-        MFHUDLogLine(@"   已注册 ✓");
-    }
+    // Register a real callback after the menu overlay exists in the delegate.
+    // Registering NULL here left a visible window with no touch receiver.
+    MFHUDLogLine(@"⑨ HID 输入将在菜单视图建立后由 MFHUDInputBridge 注册");
 
     /*
      * ⑩ GSEvent 初始化（iOS 15+）

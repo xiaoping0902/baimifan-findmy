@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 ///   HUDImguiWindow 的前三项同样返回 1
 @interface MFHUDWindow : UIWindow
 @property (nonatomic, assign) BOOL ignoresHitTestOverride;
+@property (nonatomic, weak, nullable) UIView *interactiveView;
 @end
 
 @interface MFHUDAppDelegate : UIResponder <UIApplicationDelegate>

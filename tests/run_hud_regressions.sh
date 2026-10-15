@@ -23,3 +23,8 @@ fi
 clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -framework Foundation -framework CoreGraphics \
     "${touch_sources[@]}" -o "$(dirname "$binary")/hud-touch-regressions"
 "$(dirname "$binary")/hud-touch-regressions"
+clang++ -std=c++17 -Iapp/Sources/Render -Iapp/Sources/Render/imgui \
+    tests/imgui_touch_regressions.cpp app/Sources/Render/imgui/imgui.cpp \
+    app/Sources/Render/imgui/imgui_draw.cpp app/Sources/Render/imgui/imgui_tables.cpp \
+    app/Sources/Render/imgui/imgui_widgets.cpp -o "$(dirname "$binary")/imgui-touch-regressions"
+"$(dirname "$binary")/imgui-touch-regressions"

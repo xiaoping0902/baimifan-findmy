@@ -5,6 +5,7 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"           // ImLerp 等
+#include "MFImGuiInput.h"
 #include "backends/imgui_impl_metal.h"
 
 @implementation MFImGuiContext {
@@ -214,11 +215,18 @@
 #pragma mark - 输入
 
 - (void)addTouchX:(float)x y:(float)y down:(BOOL)down {
+    if (!_initialized) return;
     ImGui::SetCurrentContext(_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
     io.AddMousePosEvent(x, y);
     io.AddMouseButtonEvent(0, down);
+}
+
+- (void)cancelTouch {
+    if (!_initialized) return;
+    ImGui::SetCurrentContext(_ctx);
+    MFCancelImGuiTouch();
 }
 
 - (void)addScrollY:(float)dy {
