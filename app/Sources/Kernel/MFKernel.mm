@@ -12,6 +12,7 @@
 #import <sys/stat.h>
 #import <sys/resource.h>       // getrlimit / struct rlimit
 #import <sys/sysctl.h>         // sysctlbyname
+#import <os/proc.h>            // os_proc_available_memory
 #import <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -103,6 +104,64 @@ extern "C" {
 }
 
 #pragma mark - 启动
+
+/*
+ * ★★ [M5.12] PUAF 页数应该按设备内存自动选 ★★
+ *
+ * 依据：Dopamine（久经考验的越狱工具）的 exploit_init 原文 ——
+ *
+ *     int puaf_pages = 512;
+ *     if (device_memory >= 5GB) {                 // 6GB 及以上设备
+ *         // These devices are remarkably more reliable with 3072
+ *         puaf_pages = 3072;
+ *     } else if (cpuFamily == CPUFAMILY_ARM_TWISTER) {   // A9
+ *         puaf_pages = 128;
+ *         if (@available(iOS 16.0, *)) { puaf_pages = 160; }   // sem_open 不喜欢 128
+ *     } else if (cpuFamily == CPUFAMILY_ARM_TYPHOON) {   // A8
+ *         puaf_pages = 256;
+ *     }
+ *
+ * Dopamine 对 6GB 设备的原话是「remarkably more reliable with 3072」。
+ *
+ * 我们之前一直用 2048 —— grab_free_pages 的目标是 pages/4：
+ *     2048 → 512      3072 → 768
+ * 页数越多，悬空页越多，vm_copy 复用到其中某个的概率越高。
+ * 这是 Dopamine 实测出来的结论，不是推测。
+ *
+ * 本机（iPad8,11 / A12Z）hw.memsize ≈ 6GB → 应该用 3072。
+ */
++ (uint64_t)recommendedPuafPages {
+    uint64_t mem = 0;
+    size_t sz = sizeof(mem);
+    if (sysctlbyname("hw.memsize", &mem, &sz, NULL, 0) != 0) mem = 0;
+
+    int cpuFamily = 0;
+    size_t cs = sizeof(cpuFamily);
+    sysctlbyname("hw.cpufamily", &cpuFamily, &cs, NULL, 0);
+
+    // CPUFAMILY_ARM_TWISTER = A9 = 0x37b32da7
+    const int kTwister = 0x37b32da7;
+    // CPUFAMILY_ARM_TYPHOON = A8 = 0x37a09642
+    const int kTyphoon = 0x37a09642;
+
+    uint64_t pages = 512;
+    if (mem >= 5ULL * 1024 * 1024 * 1024) {
+        pages = 3072;                       // ★ 6GB+ 设备（Dopamine 的推荐值）
+    } else if (cpuFamily == kTwister) {
+        pages = 160;                        // A9 + iOS16（128 会被 sem_open 拒绝）
+    } else if (cpuFamily == kTyphoon) {
+        pages = 256;                        // A8
+    }
+
+    NSLog(@"[MF][Kernel] 自动 PUAF 页数：%llu  （RAM=%.2fGB cpufamily=0x%x）",
+          (unsigned long long)pages, mem / 1073741824.0, cpuFamily);
+    return pages;
+}
+
+/// 当前进程可用内存 —— Dopamine 用它做 hog 决策，我们用它做诊断
++ (size_t)availableMemory {
+    return os_proc_available_memory();
+}
 
 /*
  * ★ 进程级「已失败，禁止再试」闸门（[MF PATCH 10]）

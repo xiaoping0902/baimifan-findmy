@@ -160,19 +160,26 @@
      * 所以把页数做成可选，失败时用户可以降档重试。
      */
     NSInteger pages = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafPages"];
-    if (pages < 16) pages = 2048;      // 默认（kfd 对 16KB 页设备的标准值）
+    if (pages < 16) pages = (NSInteger)[MFKernel recommendedPuafPages];   // ★ 自动（Dopamine 的表）
     NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
-    if (pm < 0 || pm > 2) pm = 2;      // 默认 landa
+    if (pm < 0 || pm > 2) pm = 2;      // 默认 landa （16.6.1 上唯一可用，见分析报告）
+
+    uint64_t mem = 0; size_t ms = sizeof(mem);
+    sysctlbyname("hw.memsize", &mem, &ms, NULL, 0);
+    size_t avail = [MFKernel availableMemory];
 
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"启动内核"
                          message:[NSString stringWithFormat:
-                                 @"当前：%ld 页 · %@\n"
-                                 @"目标悬空页门槛 = %ld/4 = %ld 个\n\n"
-                                 @"⚠️ 真机证据：landa 在本机 grab_free_pages 恒为 0/256，\n"
-                                 @"   99999 轮一次没命中 —— 说明它【根本没建立悬空页】。\n"
-                                 @"   所以下面可以直接换 PUAF 方法试。\n\n"
+                                 @"RAM %.1f GB · 可用内存 %.0f MB\n"
+                                 @"本次：%ld 页 · %@\n"
+                                 @"目标悬空页门槛 = %ld/4 = %ld\n\n"
+                                 @"★ 页数按 Dopamine 的表自动选（6GB+ → 3072，\n"
+                                 @"  原话「remarkably more reliable with 3072」）\n\n"
+                                 @"⚠️ 16.6.1 上只有 landa 可用：\n"
+                                 @"   physpuppet 修复于 16.4 · smith 修复于 16.5.1\n\n"
                                  @"失败后本次运行会禁止再试。",
+                                 mem / 1073741824.0, avail / 1048576.0,
                                  (long)pages,
                                  pm == 2 ? @"landa" : (pm == 1 ? @"smith" : @"physpuppet"),
                                  (long)pages, (long)(pages / 4)]
@@ -180,19 +187,17 @@
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
     /*
-     * 六档组合：3 种 PUAF 方法 × 2 种页数。
-     * landa 已经证明结构性失败，所以主推 smith / physpuppet。
-     *
      * ⚠️ 枚举值必须与 libkfd.h 一致：
      *     enum puaf_method { puaf_physpuppet = 0, puaf_smith = 1, puaf_landa = 2 };
+     * ⚠️ 16.6.1 上 landa 是【唯一】可用的（physpuppet 修复于 16.4，smith 修复于 16.5.1）
      */
     NSArray *tiers = @[
-        @[@"smith · 1024",         @1, @1024, @"★ 先试这个 —— landa 已证不可用"],
-        @[@"smith · 2048",         @1, @2048, @"smith + 标准页数"],
-        @[@"physpuppet · 2048",    @0, @2048, @"经典方法，老设备常用"],
-        @[@"physpuppet · 512",     @0, @512,  @"physpuppet + 小页数"],
-        @[@"landa · 1024",         @2, @1024, @"再确认一次 landa（已知失败）"],
-        @[@"landa · 2048（原值）",  @2, @2048, @"原始配置"],
+        @[@"landa · 3072（★ Dopamine 推荐）", @2, @3072, @"6GB 设备首选"],
+        @[@"landa · 2048（我们一直用的）",     @2, @2048, @"之前失败的配置"],
+        @[@"landa · 4096（更激进）",           @2, @4096, @"若 3072 仍不行可试"],
+        @[@"landa · 1024",                     @2, @1024, @"小页数对照"],
+        @[@"smith · 1024（应无效）",           @1, @1024, @"16.5.1 已修复"],
+        @[@"physpuppet · 2048（应无效）",      @0, @2048, @"16.4 已修复"],
     ];
     for (NSArray *t in tiers) {
         NSString *title = [NSString stringWithFormat:@"%@ — %@", t[0], t[3]];

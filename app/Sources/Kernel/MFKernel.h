@@ -54,6 +54,13 @@ typedef NS_ENUM(NSInteger, MFEnumRoute) {
 /// 内核编译串（kern.version）。环境检测用 —— 机型判定 / 越狱可用性都看它。
 + (NSString *)kernelVersion;
 
+/// [M5.12] 按设备内存自动推荐 PUAF 页数。
+/// 依据 Dopamine 的 exploit_init：6GB+ 设备用 3072（原话「remarkably more reliable」）
++ (uint64_t)recommendedPuafPages;
+
+/// 当前进程可用内存（os_proc_available_memory），诊断用
++ (size_t)availableMemory;
+
 #pragma mark 生命周期
 
 /// 启动内核链（在后台线程跑，completion 回主线程）
