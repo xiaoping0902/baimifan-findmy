@@ -310,8 +310,7 @@ extern char **environ;
         if (ready) {
             [self alert:@"悬浮窗初始化完成" message:[NSString stringWithFormat:
                 @"PID = %d\n\n窗口注册和首帧渲染已完成。\n"
-                @"屏幕右上方会短暂显示粉红色测试方块。\n"
-                @"如果仍看不到菜单或方块，请打开「其他 → HUD 日志」。",
+                @"如果菜单未显示或无法操作，请打开「其他 → HUD 日志」。",
                 [MFHUDLauncher hudPID]]];
         } else {
             [self alert:@"悬浮窗启动未完成" message:error ?: @"未知错误，请查看 HUD 日志。"];

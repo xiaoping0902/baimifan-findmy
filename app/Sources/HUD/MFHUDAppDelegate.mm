@@ -20,51 +20,6 @@
 #include <math.h>
 #include <dlfcn.h>
 
-#pragma mark - HUD 窗口
-
-@implementation MFHUDWindow
-
-/*
- * ★★★ [M5.22] 这一组就是 TrollSpeed（Lessica，开源，ch.xxtou.hudapp）的做法 ★★★
- *
- * 来源：https://github.com/Lessica/TrollSpeed
- *       sources/HUDMainWindow.mm
- *
- *     @implementation HUDMainWindow
- *     + (BOOL)_isSystemWindow            { return YES; }
- *     - (BOOL)_isWindowServerHostingManaged { return NO; }
- *     - (BOOL)_ignoresHitTest            { return [HUDRootViewController passthroughMode]; }
- *     - (BOOL)_isSecure                  { return YES; }
- *     - (BOOL)_shouldCreateContextAsSecure { return YES; }
- *     @end
- *
- * ★ 三个关键修正（之前全搞错了）：
- *
- *   ① 这些是【重写 getter】，不是「调 setter」。
- *      我前面一直在试 set_isSystemWindow: / _setSystemWindow: 之类的名字，
- *      8 个里只有 1 个存在 —— 因为根本不该去 set，UIWindow 内部会问这些问题。
- *
- *   ② _isSystemWindow 是【类方法】(+) 不是实例方法。
- *
- *   ③ _isWindowServerHostingManaged 返回的是【NO】不是 YES。
- *      我前面把语义理解反了。
- */
-+ (BOOL)_isSystemWindow { return YES; }
-- (BOOL)_isWindowServerHostingManaged { return NO; }
-- (BOOL)_isSecure { return YES; }
-- (BOOL)_shouldCreateContextAsSecure { return YES; }
-- (BOOL)_ignoresHitTest { return self.ignoresHitTestOverride; }
-
-/// 让窗口内容不参与命中（绘制层用）
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.ignoresHitTestOverride || self.hidden || !self.userInteractionEnabled) return nil;
-    UIView *content = self.interactiveView;
-    if (!content) return nil;
-    return [content hitTest:[content convertPoint:point fromView:self] withEvent:event];
-}
-
-@end
-
 #pragma mark - HUD 应用代理
 
 @interface MFHUDFixedRootController : UIViewController
@@ -147,8 +102,9 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
     // [M5.22] 层级对齐 TrollSpeed 的 10000010.0（原来 1020，差了四个数量级）
     CGRect fixedScreen = UIScreen.mainScreen.fixedCoordinateSpace.bounds;
-    MFHUDWindow *drawWin = [[MFHUDWindow alloc] initWithFrame:fixedScreen];
-    drawWin.ignoresHitTestOverride = YES;
+    // UIKit consults _ignoresHitTest while creating its native context. A
+    // mutable property assigned after init is too late for that first query.
+    MFHUDDrawingWindow *drawWin = [[MFHUDDrawingWindow alloc] initWithFrame:fixedScreen];
     drawWin.windowLevel = 10000010.0;
     drawWin.backgroundColor = [UIColor clearColor];
     drawWin.opaque = NO;
@@ -174,7 +130,6 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
     [self.drawingContent addSubview:drawView];
     drawWin.hidden = NO;
-    [drawWin makeKeyAndVisible];
     self.drawingWindow = drawWin;
 
     // ── ② 菜单窗（可交互）────────────────────────────
@@ -237,6 +192,14 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             Class hostingClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
             uint32_t nativeMenu = [self nativeContextIDForWindow:self.hudMenuWindow];
             uint32_t nativeDrawing = [self nativeContextIDForWindow:self.drawingWindow];
+            MFHUDLogLine(@"绘制窗口=%@ nativeContext=0x%x（创建时固定忽略命中）",
+                         NSStringFromClass(self.drawingWindow.class), nativeDrawing);
+            if (nativeDrawing == 0) {
+                // A generic remote CAContext does not inherit the window's
+                // input policy. Do not silently create a full-screen blocker.
+                [self failStartup:@"绘制窗口未取得原生 context，已停止悬浮窗以免遮挡触摸。"];
+                return;
+            }
             self.menuHost = [[MFHUDWindowHost alloc] initWithLayer:self.hudMenuWindow.layer
                 nativeContextID:nativeMenu level:self.hudMenuWindow.windowLevel
                 contextClass:contextClass hostingClass:hostingClass];
@@ -330,8 +293,17 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 }
 
 - (void)applyHUDOrientation:(UIInterfaceOrientation)orientation {
-    if (orientation < UIInterfaceOrientationPortrait || orientation > UIInterfaceOrientationLandscapeRight)
-        orientation = UIInterfaceOrientationPortrait;
+    // LandscapeLeft is 4, LandscapeRight is 3; their names are not a range.
+    switch (orientation) {
+        case UIInterfaceOrientationPortrait:
+        case UIInterfaceOrientationPortraitUpsideDown:
+        case UIInterfaceOrientationLandscapeLeft:
+        case UIInterfaceOrientationLandscapeRight:
+            break;
+        default:
+            orientation = UIInterfaceOrientationPortrait;
+            break;
+    }
     if (self.hudOrientation == orientation) return;
     [self.inputBridge cancelAll];
     self.hudOrientation = orientation;

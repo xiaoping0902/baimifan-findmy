@@ -9,13 +9,14 @@
 NS_ASSUME_NONNULL_BEGIN
 @class MFHUDWindowHost;
 
-/// HUD 窗口：对齐分析已证的实现
-///   DrawingWindow 的 _isSystemWindow / _isSecure /
-///   _shouldCreateContextAsSecure / _ignoresHitTest 均返回 1
-///   HUDImguiWindow 的前三项同样返回 1
+/// Interactive HUD window. Its native surface is limited to the visible panel.
 @interface MFHUDWindow : UIWindow
-@property (nonatomic, assign) BOOL ignoresHitTestOverride;
 @property (nonatomic, weak, nullable) UIView *interactiveView;
+@end
+
+/// Display-only window: never participates in hit testing or key focus, including
+/// while UIWindow's superclass initializer is creating its native context.
+@interface MFHUDDrawingWindow : MFHUDWindow
 @end
 
 @interface MFHUDAppDelegate : UIResponder <UIApplicationDelegate>

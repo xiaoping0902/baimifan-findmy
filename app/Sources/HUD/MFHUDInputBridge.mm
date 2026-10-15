@@ -2,6 +2,7 @@
 #import "MFHUDTouchRouter.h"
 #import "MFHUDLog.h"
 #import "../Render/MFOverlayView.h"
+#import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <notify.h>
 #include <math.h>
@@ -22,19 +23,21 @@
 - (BOOL)isCancel;
 - (BOOL)isLift;
 - (BOOL)isInRangeLift;
+- (BOOL)isInRange;
 @end
 
 @interface MFHUDInputBridge () <MFHUDTouchOutput>
-- (void)receiveHIDEvent:(CFTypeRef)event;
+- (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt;
 @end
 static __weak MFHUDInputBridge *sActiveBridge;
 static void MFHUDEventCallback(void *target, void *refcon, void *service, CFTypeRef event) {
     if (!event) return;
     // BKS owns event only during this callback. Preserve it until main consumes it.
     CFRetain(event);
+    CFTimeInterval queuedAt = CACurrentMediaTime();
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
-            @try { [sActiveBridge receiveHIDEvent:event]; }
+            @try { [sActiveBridge receiveHIDEvent:event queuedAt:queuedAt]; }
             @catch (NSException *exception) {
                 [sActiveBridge cancelAll];
                 MFHUDLogLine(@"HUD 触摸解析异常：%@", exception.reason);
@@ -51,7 +54,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     MFHUDTouchRouter *_router;
     NSNumber *_dragIdentity;
     CGPoint _dragStart, _windowStart;
-    unsigned _loggedBegins;
+    unsigned _loggedBegins, _loggedMoves, _loggedOther, _loggedLag, _loggedTraces;
     int _lockToken;
     BOOL _installed;
 }
@@ -91,13 +94,30 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
 }
 - (void)cancelTouch { [_overlay.imgui cancelTouch]; }
-- (void)receiveHIDEvent:(CFTypeRef)event {
+- (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt {
+    CFTimeInterval receivedAt = CACurrentMediaTime();
+    CFTimeInterval delay = receivedAt - queuedAt;
     MFOverlayView *overlay = _overlay; UIWindow *window = _window;
     if (!overlay.hasCompletedFrame || window.hidden || CGRectIsNull(overlay.captureRect) ||
         CGRectIsEmpty(overlay.captureRect)) { [self cancelAll]; return; }
     id<MFAXEvent> rep = [(Class<MFAXEvent>)_representationClass
         representationWithHIDEvent:event hidStreamIdentifier:@"UIApplicationEvents"];
     NSArray<id<MFAXPath>> *paths = rep.handInfo.paths;
+    CFTimeInterval parseDelay = CACurrentMediaTime() - receivedAt;
+    if ((delay > 0.1 || parseDelay > 0.05) && _loggedLag++ < 8)
+        MFHUDLogLine(@"HID 主队列等待 %.0fms，AX 解析 %.0fms", delay * 1000, parseDelay * 1000);
+    if (rep.isTouchDown) { _loggedBegins++; _loggedMoves = 0; }
+    BOOL trace = _loggedTraces < 192 && _loggedBegins <= 32 && (rep.isTouchDown || rep.isLift ||
+        rep.isInRangeLift || rep.isCancel || (rep.isMove && _loggedMoves++ < 2) ||
+        (!rep.isMove && _loggedOther++ < 8));
+    if (trace) {
+        _loggedTraces++;
+        MFHUDLogLine(@"AX paths=%lu down=%d move=%d lift=%d rangeLift=%d range=%d cancel=%d id=%u point=%@ active=%d drag=%@ lag=%.1fms",
+            (unsigned long)paths.count, rep.isTouchDown, rep.isMove, rep.isLift,
+            rep.isInRangeLift, rep.isInRange, rep.isCancel,
+            (unsigned)(paths.firstObject ? paths.firstObject.pathIdentity : 0),
+            NSStringFromCGPoint(rep.location), _router.hasActiveTouch, _dragIdentity, delay * 1000);
+    }
     // AX's aggregate location describes one path. Never assign it to other fingers.
     // Use the visible scrollbar for content scrolling; multi-touch cancels input.
     if (paths.count > 1 || rep.isCancel) { [self cancelAll]; return; }
@@ -112,10 +132,6 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     if (!isfinite(global.x) || !isfinite(global.y) || identity <= 0) return;
     CGPoint inWindow = [window convertPoint:global fromCoordinateSpace:window.screen.fixedCoordinateSpace];
     CGPoint local = [overlay convertPoint:inWindow fromView:window];
-    if (phase == MFHUDTouchBegan && _loggedBegins++ < 24)
-        MFHUDLogLine(@"触摸 begin id=%ld fixed=%@ window=%@ local=%@ capture=%@",
-            (long)identity, NSStringFromCGPoint(global), NSStringFromCGPoint(inWindow),
-            NSStringFromCGPoint(local), NSStringFromCGRect(overlay.captureRect));
 
     CGRect dragRect = overlay.headerDragRect;
     if (phase == MFHUDTouchBegan && !_dragIdentity && !_router.hasActiveTouch &&
@@ -132,8 +148,13 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         center.y = MIN(CGRectGetMaxY(screen) - halfH, MAX(CGRectGetMinY(screen) + halfH, center.y));
         window.center = center;
         if (phase == MFHUDTouchEnded) _dragIdentity = nil;
+        if (trace) MFHUDLogLine(@"触摸路由=drag phase=%ld local=%@ center=%@",
+            (long)phase, NSStringFromCGPoint(local), NSStringFromCGPoint(center));
         return;
     }
-    [_router handleTouchID:identity point:local phase:phase captureRect:overlay.captureRect];
+    BOOL handled = [_router handleTouchID:identity point:local phase:phase captureRect:overlay.captureRect];
+    if (trace) MFHUDLogLine(@"触摸路由=menu phase=%ld id=%ld local=%@ handled=%d header=%@",
+        (long)phase, (long)identity, NSStringFromCGPoint(local), handled,
+        NSStringFromCGRect(overlay.headerDragRect));
 }
 @end

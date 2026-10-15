@@ -15,6 +15,7 @@
     BOOL _firstFrameReported;
     BOOL _firstFramePending;
     BOOL _loggedMissingDrawable;
+    unsigned _loggedDrawableLag;
 }
 
 + (Class)layerClass {
@@ -120,7 +121,12 @@
     if (ml.drawableSize.width < 1) [self layoutSubviews];
 
     @autoreleasepool {
+        CFTimeInterval drawableStart = CACurrentMediaTime();
         id<CAMetalDrawable> drawable = [ml nextDrawable];
+        CFTimeInterval drawableDelay = CACurrentMediaTime() - drawableStart;
+        if (drawableDelay > 0.05 && _loggedDrawableLag++ < 8)
+            MFHUDLogLine(@"%@ nextDrawable 等待 %.0fms hidden=%d",
+                self.interactive ? @"菜单" : @"绘制", drawableDelay * 1000, self.window.hidden);
         if (!drawable) {
             if (!_loggedMissingDrawable) {
                 _loggedMissingDrawable = YES;
