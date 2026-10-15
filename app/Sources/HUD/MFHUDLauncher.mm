@@ -6,6 +6,7 @@
 #import <spawn.h>
 #import <signal.h>
 #import <sys/stat.h>
+#import <sys/types.h>     // uid_t / gid_t（persona 私有 API 的参数类型）
 #import <sys/wait.h>
 #import <unistd.h>
 #include <errno.h>
@@ -21,6 +22,24 @@
 
 extern "C" {
 int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+
+/*
+ * ★ [M5.22] persona 相关私有 API —— 必须放在【文件作用域】。
+ *
+ * 之前写在函数体内（extern "C" { ... } 在块作用域），
+ * 构建 #50 报：
+ *     error: use of undeclared identifier 'posix_spawnattr_set_persona_uid_np'
+ *     error: use of undeclared identifier 'posix_spawnattr_set_persona_gid_np'
+ *     did you mean 'posix_spawnattr_set_csm_np'?
+ * 说明块作用域的 extern "C" 声明没生效到调用点。
+ *
+ * 这三个是 Apple 私有 API，iOS 公开 SDK 的 <spawn.h> 里没有，所以自己声明。
+ * 用途见 spawnHUD 里的注释（以 root 身份派生 HUD 子进程）。
+ */
+#define MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
+int posix_spawnattr_set_persona_np(const posix_spawnattr_t *attr, uid_t persona, uint32_t flags);
+int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *attr, uid_t uid);
+int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *attr, uid_t gid);
 }
 
 extern char **environ;
@@ -141,13 +160,7 @@ static BOOL MFPidAlive(pid_t p) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
 
-    extern "C" {
-        int posix_spawnattr_set_persona_np(const posix_spawnattr_t *, uid_t, uint32_t);
-        int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *, uid_t);
-        int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *, uid_t);
-    }
-
-    int pr1 = posix_spawnattr_set_persona_np(&attr, 99, 1 /* OVERRIDE */);
+    int pr1 = posix_spawnattr_set_persona_np(&attr, 99, MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
     int pr2 = posix_spawnattr_set_persona_uid_np(&attr, 0);
     int pr3 = posix_spawnattr_set_persona_gid_np(&attr, 0);
     MFHUDLogLine(@"persona 设定：np=%d uid=%d gid=%d（0 表示成功）", pr1, pr2, pr3);
