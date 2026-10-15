@@ -45,7 +45,7 @@
                 id<MFRemoteLayerContext> context = nil;
                 if ([cls respondsToSelector:@selector(remoteContextWithOptions:)]) {
                     context = [cls remoteContextWithOptions:@{}];
-                } else if ([cls instancesRespondToSelector:@selector(initRemoteWithOptions:)]) {
+                } else if ([(Class)cls instancesRespondToSelector:@selector(initRemoteWithOptions:)]) {
                     context = [[(Class)cls alloc] initRemoteWithOptions:@{}];
                 }
                 if (!context || ![context respondsToSelector:@selector(setLayer:)] ||
