@@ -191,6 +191,9 @@ static BOOL MFPidAlive(pid_t p) {
 
     NSLog(@"[MF][HUDLaunch] 已拉起 HUD 进程 pid=%d", pid);
     MFHUDLogLine(@"posix_spawn 成功，子进程 pid=%d", pid);
+    // Return the child's identity even if saving its PID file fails, so the
+    // caller can still perform cleanup and report a root/mobile signal error.
+    if (spawnedPID) *spawnedPID = pid;
 
     // 记 PID（目录不存在则忽略）
     [[NSFileManager defaultManager] createDirectoryAtPath:
@@ -201,11 +204,9 @@ static BOOL MFPidAlive(pid_t p) {
     NSError *writeError = nil;
     if (![[NSString stringWithFormat:@"%d", pid] writeToFile:kPIDFile atomically:YES
                 encoding:NSUTF8StringEncoding error:&writeError]) {
-        kill(pid, SIGTERM);
         if (err) *err = [NSString stringWithFormat:@"无法保存 HUD PID：%@", writeError.localizedDescription];
         return NO;
     }
-    if (spawnedPID) *spawnedPID = pid;
     return YES;
 }
 
@@ -257,24 +258,30 @@ static BOOL MFPidAlive(pid_t p) {
                 // Reap a failed child and remove only this launch's PID. The
                 // HUD also exits itself on failure (root/mobile signal rules).
                 int childStatus = 0;
-                pid_t observed = waitpid(pid, &childStatus, WNOHANG);
+                pid_t observed;
+                do { observed = waitpid(pid, &childStatus, WNOHANG); }
+                while (observed < 0 && errno == EINTR);
+                int signalResult = 0, signalError = 0;
                 if (observed == 0) {
-                    int signalResult = kill(pid, SIGTERM);
-                    int signalError = errno;
+                    signalResult = kill(pid, SIGTERM);
+                    signalError = signalResult < 0 ? errno : 0;
                     for (int attempt = 0; attempt < 50 && observed == 0; attempt++) {
                         usleep(20 * 1000);
-                        observed = waitpid(pid, &childStatus, WNOHANG);
-                    }
-                    if (observed == 0) {
-                        error = [NSString stringWithFormat:@"%@\nHUD 尚未退出（PID %d，signal=%d errno=%d），请先结束该进程。",
-                                 error ?: @"初始化失败", pid, signalResult, signalError];
+                        do { observed = waitpid(pid, &childStatus, WNOHANG); }
+                        while (observed < 0 && errno == EINTR);
                     }
                 }
-                if (observed != 0) {
+                int waitError = observed < 0 ? errno : 0;
+                BOOL confirmedExit = observed == pid ||
+                    (observed < 0 && waitError == ECHILD && !MFPidAlive(pid));
+                if (confirmedExit) {
                     NSString *stored = [NSString stringWithContentsOfFile:kPIDFile
                         encoding:NSUTF8StringEncoding error:NULL];
                     if (stored.intValue == pid)
                         [NSFileManager.defaultManager removeItemAtPath:kPIDFile error:NULL];
+                } else {
+                    error = [NSString stringWithFormat:@"%@\nHUD 尚未确认退出（PID %d，signal=%d errno=%d wait=%d），请先结束该进程。",
+                             error ?: @"初始化失败", pid, signalResult, signalError, waitError];
                 }
             }
             MFHUDLogLine(@"启动等待结果：pid=%d ready=%d %@", pid, ready, error ?: @"");
