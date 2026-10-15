@@ -855,6 +855,48 @@ def check_mach_headers():
     ok(f"mach 头文件检查完成，扫描 {checked} 个文件")
 
 
+# ------------------------------------ 7.13 ObjC++ 的 void* 必须显式转换
+def check_objcpp_void_casts():
+    """
+    2026-10-15 构建 #26 实际踩过：
+        MFDebugExport.mm:124: error: cannot initialize a variable of type 'char *'
+                              with an rvalue of type 'void *'
+
+    ObjC++（.mm）按 C++ 规则编译 —— C++ 不允许 void* 隐式转成别的指针类型，
+    而 malloc/calloc 返回的都是 void*。
+    所以 .mm 里 `char *p = malloc(n);` 是【编译错误】，必须显式转换。
+
+    .m 文件不受影响（C 允许隐式转换），所以只查 .mm。
+    """
+    pat = re.compile(
+        r'\b(char|uint8_t|u8|unsigned\s+char|int|unsigned\s+int|uint32_t|u32|'
+        r'uint64_t|u64|short|float|double)\s*\*\s*(\w+)\s*=\s*'
+        r'(malloc|calloc|realloc|aligned_alloc|valloc)\s*\(')
+
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in ("imgui", "vendor")):
+            continue
+        for fn in filenames:
+            if not fn.endswith(".mm"):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            checked += 1
+            for i, line in enumerate(lines, 1):
+                code = line.split("//")[0]
+                for m in pat.finditer(code):
+                    before = code[max(0, m.start() - 26):m.start(2)]
+                    if re.search(r'\(\s*[A-Za-z_][\w\s]*\*\s*\)\s*$', before):
+                        continue
+                    err(f"{rel}:{i}: ObjC++ 里 {m.group(3)}() 的 void* 不能隐式转成 "
+                        f"{m.group(1)}*（构建 #26 踩过）—— 写成 "
+                        f"({m.group(1)} *){m.group(3)}(...)")
+    ok(f"ObjC++ void* 转换检查完成，扫描 {checked} 个 .mm")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -904,6 +946,7 @@ def main():
     check_krw_size_granularity()
     check_source_encoding()
     check_mach_headers()
+    check_objcpp_void_casts()
     check_project_paths()
     check_identity()
 

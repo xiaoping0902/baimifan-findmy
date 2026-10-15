@@ -121,11 +121,14 @@ static BOOL MFWriteText(NSString *name, NSString *text) {
     size_t sz = 0;
     sysctlbyname("kern.version", NULL, &sz, NULL, 0);
     if (sz > 0) {
-        char *buf = malloc(sz);
-        if (sysctlbyname("kern.version", buf, &sz, NULL, 0) == 0) {
-            d[@"kernversion"] = @(buf);
+        /* ObjC++ 下 malloc 的 void* 不能隐式转 char*，必须显式转换 */
+        char *buf = (char *)malloc(sz);
+        if (buf != NULL) {
+            if (sysctlbyname("kern.version", buf, &sz, NULL, 0) == 0) {
+                d[@"kernversion"] = @(buf);
+            }
+            free(buf);
         }
-        free(buf);
     }
     int mfp = 0; size_t ms = sizeof(mfp);
     if (sysctlbyname("kern.maxfilesperproc", &mfp, &ms, NULL, 0) == 0) {
@@ -145,12 +148,17 @@ static BOOL MFWriteText(NSString *name, NSString *text) {
 
     // ── 内核 ──
     MFKernel *k = [MFKernel shared];
+    MFEnumRoute route = [k availableRoute];        // 只读属性，会顺手探测
     d[@"kernel"] = @{
         @"open":     @([k isOpen]),
         @"state":    @(k.state),
         @"kbase":    @([k isOpen] ? k.kbase : 0),
         @"lastErr":  k.lastError ?: @"",
-        @"route":    @((NSInteger)[[MFKernel shared] cachedRoute]),
+        @"route":    @((NSInteger)route),
+        @"routeName": route == MFEnumRouteTaskForPid ? @"C: task_for_pid"
+                    : route == MFEnumRoutePrivileged  ? @"A: host_priv"
+                    : route == MFEnumRouteDefault     ? @"B: processor_set_default"
+                                                      : @"无可用枚举路",
     };
 
     // ── 读取链 ──
