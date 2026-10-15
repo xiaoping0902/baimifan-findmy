@@ -2,30 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ══════════════════════════════════════════════════════════
-	     [M5.24] 权限对齐 TrollSpeed（Lessica，开源，ch.xxtou.hudapp）
-	     ══════════════════════════════════════════════════════════
+	<!-- ══════════════════════════════════════════════════════════════════
+	     [M5.26] 权限全开版
+	     ══════════════════════════════════════════════════════════════════
 
-	     起因：用户点出「我们的这个软件不是所有的给他所有的权限呀」。
-	     拿 TrollSpeed 的 supports/entitlements.plist 逐条比对，
-	     我们少了 17 项 —— 其中两项直接决定 HUD 能不能显示：
+	     用户要求：「把我们现在所有的功能全部给这个 root 权限呢
+	                和这个这些权限都要给够 都是这个巨魔安装的权限都有」
 
-	       com.apple.QuartzCore.displayable-context
-	           字面意思就是「可显示的 context」。
-	           没有它，QuartzCore 不会分配可用的 display context，
-	           于是 CAContext.contextId 恒为 0，
-	           registerWindowWithContextID:0 静默无效 —— 窗口永远不显示。
-	           这正是我们卡了很多轮的那个现象。
+	     TrollStore 用 ldid 做伪签名，【不校验】entitlements 是否
+	     与 provisioning profile 匹配 —— 所以这里可以放开列。
 
-	       com.apple.backboard.client
-	           BackBoardServices 客户端权限。
-	           TrollSpeed 的 HUDApp.mm 里那句 BKSDisplayServicesStart()
-	           需要它；缺权限时该调用会静默失败，
-	           于是 GSInitialize / GSEvent 这条图形栈初始化链不完整。
+	     三个来源都对齐了：
+	       · 白米饭原版 7 项（逐条从 Mach-O 里扣出来核对过，我们原本一字不差）
+	       · TrollSpeed 23 项（Lessica 开源，ch.xxtou.hudapp）
+	       · TrollStore 时代通用高权限集
 
-	     其它补上的（HID 事件、内存状态、后台样式等）也都是 TrollSpeed
-	     在用的，属于「HUD 应用的标准配置」。
-	     ══════════════════════════════════════════════════════════ -->
+	     ⚠️ 说明：entitlements 只对【本进程】生效。
+	        子进程要 root 得靠 posix_spawn 的 persona 参数，
+	        见 MFHUDLauncher.mm（persona 99 + uid 0 + gid 0）。
+	     ══════════════════════════════════════════════════════════════════ -->
 
 	<!-- ── 身份 ── -->
 	<key>application-identifier</key>
@@ -33,7 +28,7 @@
 	<key>platform-application</key>
 	<true/>
 
-	<!-- ── ★★★ 显示链路核心（我们之前完全没有）─── -->
+	<!-- ── ★★★ 显示链路（HUD 悬浮窗的核心）─── -->
 	<key>com.apple.QuartzCore.displayable-context</key>
 	<true/>
 	<key>com.apple.QuartzCore.secure-mode</key>
@@ -41,17 +36,45 @@
 	<key>com.apple.backboard.client</key>
 	<true/>
 
-	<!-- ── 沙盒豁免 ── -->
+	<!-- ── 沙盒完全豁免 ── -->
 	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.security.container-required</key>
+	<false/>
+	<key>com.apple.private.security.no-container</key>
 	<true/>
 	<key>com.apple.private.security.storage.AppBundles</key>
 	<true/>
-
-	<!-- ── persona 管理（HUD 子进程 root 身份派生要用）─── -->
-	<key>com.apple.private.persona-mgmt</key>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
 
-	<!-- ── HUD 跨 App 窗口托管（SpringBoard 辅助窗口）─── -->
+	<!-- ── 进程 / 调试 / 任务端口 ── -->
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.system-task-ports.read</key>
+	<true/>
+	<key>com.apple.private.cs.debugger</key>
+	<true/>
+	<key>dynamic-codesigning</key>
+	<true/>
+
+	<!-- ── 越狱 / rootful 安装 ── -->
+	<key>com.apple.rootless.install</key>
+	<true/>
+	<key>com.apple.rootless.install.heritable</key>
+	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
+	<key>com.apple.private.amfi.can-load-cdhash</key>
+	<true/>
+	<key>com.apple.private.amfi.can-validate-boot-args</key>
+	<true/>
+
+	<!-- ── HUD 跨 App 窗口托管 ── -->
 	<key>com.apple.springboard.accessibility-window-hosting</key>
 	<true/>
 	<key>com.apple.springboard.appbackgroundstyle</key>
@@ -61,6 +84,8 @@
 	<key>com.apple.springboard.disallowControlCenter</key>
 	<true/>
 	<key>com.apple.springboard.disallowNotificationCenter</key>
+	<true/>
+	<key>com.apple.springboard.opensensitiveurl</key>
 	<true/>
 
 	<!-- ── HID 事件（HUD 菜单要能收到触摸）─── -->
@@ -74,36 +99,109 @@
 	<true/>
 	<key>com.apple.private.hid.manager.client</key>
 	<true/>
+	<key>com.apple.private.allow-background-haptics</key>
+	<true/>
 
-	<!-- ── 内存状态 / jetsam ── -->
+	<!-- ── IOKit 用户客户端（GPU / Surface / NVRAM / 硬件）─── -->
+	<key>com.apple.security.exception.iokit-user-client-class</key>
+	<array>
+		<string>AGXDeviceUserClient</string>
+		<string>IOSurfaceRootUserClient</string>
+		<string>AppleSMC</string>
+		<string>IOHIDEventServiceFastPathUserClient</string>
+		<string>AppleNVMe</string>
+		<string>IOUSBDeviceInterface</string>
+	</array>
+	<key>com.apple.private.iokit.nvram-write-access</key>
+	<true/>
+	<key>com.apple.private.iokit.system-nvram</key>
+	<true/>
+	<key>com.apple.private.iokit.allow-accelerometer</key>
+	<true/>
+	<key>com.apple.private.iokit.serial-port</key>
+	<true/>
+
+	<!-- ── 内核 / 内存 ── -->
 	<key>com.apple.private.memorystatus</key>
 	<true/>
 	<key>com.apple.private.kernel.jetsam</key>
 	<true/>
-
-	<!-- ── 其它 ── -->
-	<key>com.apple.private.allow-background-haptics</key>
+	<key>com.apple.private.kernel.get-kext-info</key>
 	<true/>
+	<key>com.apple.private.kernel.global-control</key>
+	<true/>
+	<key>com.apple.private.kernel.kdebug</key>
+	<true/>
+
+	<!-- ── launchd / XPC ── -->
+	<key>com.apple.private.xpc.launchd</key>
+	<true/>
+	<key>com.apple.private.xpc.launchd.job-manager</key>
+	<true/>
+	<key>com.apple.security.exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.springboard.services</string>
+		<string>com.apple.backboardd</string>
+		<string>com.apple.frontboard.systemappservices</string>
+		<string>com.apple.runningboardd</string>
+		<string>com.apple.distnoted.xpc.daemon</string>
+		<string>com.apple.system.notification_center</string>
+	</array>
+
+	<!-- ── 文件系统 ── -->
 	<key>file-read-data</key>
 	<true/>
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.private.security.storage.MobileAssetGenerativeModels</key>
+	<true/>
+
+	<!-- ── 系统状态 / 账号 ── -->
+	<key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
+	<true/>
+	<key>com.apple.private.accounts.allaccounts</key>
+	<true/>
+	<key>com.apple.private.tcc.allow</key>
+	<true/>
+	<key>com.apple.private.tcc.manager</key>
+	<true/>
+	<key>com.apple.private.aps-connection-initiate</key>
+	<true/>
+	<key>com.apple.private.diskimages.kext.user-client-access</key>
+	<true/>
+
+	<!-- ── 偏好设置 ── -->
 	<key>user-preference-read</key>
 	<true/>
 	<key>user-preference-write</key>
 	<true/>
 
-	<!-- ══════════════════════════════════════════════════════════
-	     以下是我们自己那条主线要用的（TrollSpeed 没有）
-	     ══════════════════════════════════════════════════════════ -->
-
-	<!-- task_for_pid：读游戏进程内存（「一键开始」四步链路的前提） -->
-	<key>task_for_pid-allow</key>
+	<!-- ── 其它常见的高权限位 ── -->
+	<key>com.apple.private.sandbox.profile</key>
+	<string>com.apple.uikit.viewservice</string>
+	<key>com.apple.private.network.socket-delegate</key>
 	<true/>
-
-	<!-- IOKit 用户客户端（GPU / Surface，Metal 绘制层） -->
-	<key>com.apple.security.exception.iokit-user-client-class</key>
-	<array>
-		<string>AGXDeviceUserClient</string>
-		<string>IOSurfaceRootUserClient</string>
-	</array>
+	<key>com.apple.private.network.socket-info</key>
+	<true/>
+	<key>com.apple.private.network.statistics</key>
+	<true/>
+	<key>com.apple.private.networkextension.configuration</key>
+	<true/>
+	<key>com.apple.private.sysctl.allow</key>
+	<true/>
+	<key>com.apple.private.kernel.override-cpumon</key>
+	<true/>
+	<key>com.apple.private.cpu-throttle</key>
+	<true/>
+	<key>com.apple.private.vfs.authorized-access</key>
+	<true/>
+	<key>com.apple.private.vfs.open-by-id</key>
+	<true/>
+	<key>com.apple.private.mobile.host-identifiers</key>
+	<true/>
+	<key>com.apple.private.security.disk-device-access</key>
+	<true/>
 </dict>
 </plist>

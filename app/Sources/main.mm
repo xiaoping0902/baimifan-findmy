@@ -12,6 +12,8 @@
 #import "HUD/MFHUDLog.h"
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>      // printf（root 助手回报身份用）
+#include <stdlib.h>
 
 /*
  * 参数检测：-hud / -hud1 / -hud2 / -hud3（对齐分析已证的自派生参数）
@@ -66,6 +68,43 @@ static void MFDumpArgv(const char *who, int argc, char *argv[]) {
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        /*
+         * ★ [M5.26] root 助手分支
+         *
+         * 由 [MFHUDLauncher runAsRootWithArgs:] 以
+         *     persona 99 + uid 0 + gid 0
+         * 派生出来。走到这里说明已经是 root 了，跑特权活然后退出。
+         *
+         * 第一行就打印真实身份 —— 这是「到底有没有拿到 root」的唯一可信证据，
+         * 父进程会从 stdout 里把它读出来。
+         */
+        if (argc > 1 && strcmp(argv[1], "-root") == 0) {
+            printf("UID=%d EUID=%d GID=%d PID=%d\n",
+                   getuid(), geteuid(), getgid(), getpid());
+            fflush(stdout);
+
+            // 第二段参数是子命令；没有就只回报身份
+            const char *cmd = (argc > 2) ? argv[2] : "whoami";
+            NSLog(@"[MF][Root] cmd=%s uid=%d euid=%d", cmd, getuid(), geteuid());
+
+            if (strcmp(cmd, "whoami") == 0) {
+                printf("根目录可写：%s\n", (access("/", W_OK) == 0) ? "是" : "否");
+                printf("可读 /var/mobile：%s\n", (access("/var/mobile", R_OK) == 0) ? "是" : "否");
+                fflush(stdout);
+                return 0;
+            }
+
+            /*
+             * 其它特权子命令在这里扩展。
+             * 目前只做身份回报，具体业务（清理系统残留 / Keychain / 防封）
+             * 仍然走各自原来的路径 —— 先把 root 通道打通、验证有效，
+             * 再逐个搬迁，避免一次改太多不好定位。
+             */
+            printf("（子命令 %s 尚未实现，本轮只验证 root 通道）\n", cmd);
+            fflush(stdout);
+            return 0;
+        }
+
         if (MFIsHUDLaunch(argc, argv)) {
             MFDumpArgv("HUD", argc, argv);
             NSLog(@"[MF] 以 HUD 角色启动");

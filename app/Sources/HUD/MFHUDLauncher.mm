@@ -225,4 +225,113 @@ static BOOL MFPidAlive(pid_t p) {
     return YES;
 }
 
+#pragma mark - [M5.26] root 助手
+
+/*
+ * 以 root 身份派生自己，跑完等退出，回收 stdout。
+ *
+ * 为什么这样做：
+ *   TrollStore 装的 App 本体在 mobile(501)，entitlements 只对【本进程】生效，
+ *   改不了自己的 uid。特权操作（清理系统残留 / Keychain / 防封 / 巨魔装卸）
+ *   要真 root，必须在 posix_spawn 时就指定 persona + uid/gid。
+ *
+ * 这是 TrollSpeed（Lessica，开源，ch.xxtou.hudapp）的做法，原样照搬。
+ */
+static BOOL gLastRootChildWasRoot = NO;
+
++ (BOOL)lastRootChildWasRoot {
+    return gLastRootChildWasRoot;
+}
+
++ (int)runAsRootWithArgs:(NSArray<NSString *> *)args
+                  output:(NSString *_Nullable *_Nullable)out {
+    gLastRootChildWasRoot = NO;
+
+    uint32_t sz = 0;
+    _NSGetExecutablePath(NULL, &sz);
+    char *exePath = (char *)calloc(1, sz + 1);
+    if (exePath == NULL) return -1;
+    _NSGetExecutablePath(exePath, &sz);
+
+    NSMutableArray<NSString *> *full = [NSMutableArray arrayWithObject:[NSString stringWithUTF8String:exePath]];
+    [full addObjectsFromArray:(args ?: @[])];
+
+    char **argv = (char **)calloc(full.count + 1, sizeof(char *));
+    if (argv == NULL) { free(exePath); return -1; }
+    for (NSUInteger i = 0; i < full.count; i++) argv[i] = strdup(full[i].UTF8String);
+    argv[full.count] = NULL;
+
+    int pipefd[2] = {-1, -1};
+    BOOL capture = (out != NULL);
+    if (capture && pipe(pipefd) != 0) capture = NO;
+
+    posix_spawn_file_actions_t fa;
+    if (capture) {
+        posix_spawn_file_actions_init(&fa);
+        posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+        posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    }
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    int pr1 = posix_spawnattr_set_persona_np(&attr, 99, MF_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    int pr2 = posix_spawnattr_set_persona_uid_np(&attr, 0);
+    int pr3 = posix_spawnattr_set_persona_gid_np(&attr, 0);
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+
+    MFHUDLogLine(@"[root 助手] 派生：args=%@ persona=%d uid=%d gid=%d（0=成功）",
+                 [full subarrayWithRange:NSMakeRange(1, full.count - 1)], pr1, pr2, pr3);
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, exePath, capture ? &fa : NULL, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (capture) posix_spawn_file_actions_destroy(&fa);
+
+    for (NSUInteger i = 0; i < full.count; i++) free(argv[i]);
+    free(argv);
+    free(exePath);
+
+    if (rc != 0) {
+        MFHUDLogLine(@"[root 助手] posix_spawn 失败 rc=%d (%s)", rc, strerror(rc));
+        if (capture) { close(pipefd[0]); close(pipefd[1]); }
+        return -1;
+    }
+
+    MFHUDLogLine(@"[root 助手] 子进程 pid=%d", pid);
+
+    NSMutableData *buf = capture ? [NSMutableData data] : nil;
+    if (capture) close(pipefd[1]);
+
+    while (YES) {
+        if (capture) {
+            char tmp[4096];
+            ssize_t n = read(pipefd[0], tmp, sizeof(tmp));
+            if (n > 0) [buf appendBytes:tmp length:(NSUInteger)n];
+        }
+        int status = 0;
+        pid_t w = waitpid(pid, &status, capture ? WNOHANG : 0);
+        if (w == pid) {
+            if (capture) {
+                char tmp[4096];
+                ssize_t n;
+                while ((n = read(pipefd[0], tmp, sizeof(tmp))) > 0)
+                    [buf appendBytes:tmp length:(NSUInteger)n];
+                close(pipefd[0]);
+                NSString *s = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
+                if (out) *out = s;
+                if ([s containsString:@"uid=0"] || [s containsString:@"UID=0"]) {
+                    gLastRootChildWasRoot = YES;
+                }
+                MFHUDLogLine(@"[root 助手] 输出：%@", (s.length < 1500 ? s : [s substringToIndex:1500]));
+            }
+            int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            MFHUDLogLine(@"[root 助手] 退出码=%d  真拿到 root=%d", code, gLastRootChildWasRoot);
+            return code;
+        }
+        if (!capture) usleep(50 * 1000);
+    }
+}
+
 @end
