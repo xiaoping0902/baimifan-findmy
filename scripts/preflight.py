@@ -1012,6 +1012,63 @@ def check_offsets_constants_reachable():
     ok(f"Offsets.h 常量可达性检查完成，扫描 {checked} 个引用文件")
 
 
+# ------------------------- 7.16 失败路径不能调用全量释放 kfd_free
+def check_kfd_free_not_in_failure_path():
+    """
+    2026-10-15 真机 SIGSEGV 实锤（两次，栈完全一致）：
+
+        kopen → krkw_helper_free → kwrite_sem_open_free
+              → kwrite_sem_open_deallocate → assert 失败
+              → mf_kfd_fail_hook → mf_kfd_cleanup_active → kfd_free → 💥
+
+    原因：KFD 失败时初始化链是【断的】：
+        1. kfd_init   ✅
+        2. puaf_run   ✅
+        3. krkw_run   ❌ ← 失败点
+        4. info_run   （没到）
+        5. perf_run   （没到）
+    kfd_free 会依次调 perf_free / krkw_free / puaf_free / info_free，
+    对没建好的 3/4/5 调 free = 断言或野指针 → 直接崩。
+
+    规则：kfd_free 只允许出现在【kclose】里（那是正常关闭路径，
+    前提是 kopen 成功返回过）。其他地方一律用 mf_kfd_safe_cleanup。
+    """
+    TARGETS = [
+        os.path.join(APP, "Sources", "Kernel", "kfd", "libkfd.h"),
+        os.path.join(APP, "Sources", "Kernel", "MFKernelBridge.m"),
+        os.path.join(APP, "Sources", "Kernel", "MFKernel.mm"),
+    ]
+    allowed_ctx = ("kclose",)     # 只有这个函数里能调
+    for p in TARGETS:
+        if not os.path.exists(p):
+            continue
+        rel = os.path.relpath(p, ROOT)
+        with open(p, encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+        # ★ 必须先去掉注释和字符串 ——
+        #   否则「说明里提到 kfd_free 有多危险」的那些注释会被当成调用，
+        #   规则自己把自己绊倒（第一次写就发生了）。
+        clean = strip_code(raw)
+        lines = clean.split("\n")
+        ctx = ""
+        for i, line in enumerate(lines, 1):
+            # 粗略跟踪当前函数（行首的函数定义）
+            m = re.match(r'^[A-Za-z_][\w \*]*\b(\w+)\s*\([^;]*\)\s*$', line.rstrip())
+            if m:
+                ctx = m.group(1)
+            if not re.search(r'\bkfd_free\s*\(', line):
+                continue
+            # 函数定义自身那行不算调用
+            if re.match(r'^\s*(void|int)\s+\**\s*kfd_free\s*\(', line):
+                continue
+            if any(a in ctx for a in allowed_ctx):
+                continue
+            err(f"{rel}:{i}: 在【{ctx or '?'}】里调用了 kfd_free —— "
+                f"半初始化状态下全量释放会 SIGSEGV（真机踩过，两次）。"
+                f"改用 mf_kfd_safe_cleanup()")
+    ok("kfd_free 调用位置检查完成")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -1064,6 +1121,7 @@ def main():
     check_objcpp_void_casts()
     check_linux_only_headers()
     check_offsets_constants_reachable()
+    check_kfd_free_not_in_failure_path()
     check_project_paths()
     check_identity()
 

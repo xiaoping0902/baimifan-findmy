@@ -174,6 +174,47 @@ void kfd_free(struct kfd* kfd)
     bzero_free(kfd, sizeof(struct kfd));
 }
 
+/*
+ * [MF PATCH 08b] ★ 安全回收 —— 只释放【已经确定初始化成功过】的部分。
+ *
+ * ── 为什么不能直接用 kfd_free ──
+ *
+ * kfd_free 是全量释放，前提是【整条初始化链都成功过】：
+ *     perf_free → krkw_free → puaf_free → info_free
+ *
+ * 但 KFD 失败时，链是断的。以 kopen 的执行顺序为例：
+ *     1. kfd_init    ✅
+ *     2. puaf_run    ✅
+ *     3. krkw_run    ❌ ← 最常见的失败点
+ *     4. info_run    （没到）
+ *     5. perf_run    （没到）
+ *
+ * 此时对 3/4/5 调 free，等于去释放一个没建好的东西 —— 当场断言或野指针。
+ *
+ * ★ 真机崩溃报告实锤（FindMy-2026-10-15-204828.ips / 204938.ips）：
+ *     krkw_helper_free → kwrite_sem_open_free → kwrite_sem_open_deallocate
+ *       → assert 失败 → mf_kfd_fail_hook → kfd_free → SIGSEGV
+ *   两次崩溃栈完全一致。根因就是「在半初始化状态上用了全量释放」。
+ *
+ * ── 这里只做两件确定安全的事 ──
+ *
+ *   · puaf_free —— puaf_run 在本分支【成功过】，且上游重试路径也这么调
+ *   · info_free —— info_init 在 kfd_init 里做过
+ *
+ * ── fd 泄漏怎么办 ──
+ *
+ * 不做处理。理由：
+ *   · 失败后 gMFKernelPoisoned 会锁死不让重试 → 泄漏不会叠加
+ *   · 用户退出 App 时进程结束，所有 fd 由内核自动关闭 → 资源全还回去
+ * 这比「冒着崩溃风险去主动关」安全得多。
+ */
+void mf_kfd_safe_cleanup(struct kfd* kfd)
+{
+    if (kfd == NULL) return;
+    puaf_free(kfd);
+    info_free(kfd);
+}
+
 u64 kopen(u64 puaf_pages, u64 puaf_method, u64 kread_method, u64 kwrite_method)
 {
     int fail = -1;
@@ -218,20 +259,32 @@ retry:
     if(fail && (puaf_method == puaf_landa)) {
         if (++mf_retry_count >= mf_retry_max) {
             print_failure("landa retry limit reached (%d attempts), giving up", mf_retry_count);
-            /* [MF PATCH 08] 先解登记，避免钩子里重复回收；再由钩子统一处理 */
+            /* [MF PATCH 08b] 放弃时只做【安全】回收，见 mf_kfd_safe_cleanup 说明 */
+            mf_kfd_safe_cleanup(kfd);
             mf_kfd_register_active(NULL);
-            kfd_free(kfd);     /* ★ 尽力回收：至少把 fd 关掉、把 PUAF 页还回去 */
             mf_kfd_fail_hook("landa retry limit reached", __FILE__, __LINE__);
             return 0;      /* 0 = 失败，mf_kopen 会转成 -1 */
         }
         /*
-         * [MF PATCH 09] ★ 上游这里只 puaf_free + info_free，然后 bzero 整个结构 ——
-         *   把 krkw 那部分（含 ~10000 个 fd 的号码）一起清零了，
-         *   那些 fd 从此再也关不掉。
-         *   补上 krkw_free：它会走 method 的 free 把 fd 逐个 close。
+         * [MF PATCH 09 —— 已回退]
+         *
+         * 我一度在这里补了 krkw_free(kfd)，理由是「上游漏了，fd 关不掉会泄漏」。
+         * 真机崩溃报告证明这是错的（FindMy-2026-10-15-204828.ips / 204938.ips）：
+         *
+         *     kopen → krkw_helper_free → kwrite_sem_open_free
+         *           → kwrite_sem_open_deallocate → assert 失败
+         *           → mf_kfd_fail_hook → kfd_free → SIGSEGV
+         *
+         * 原因：走到这个分支意味着 krkw_run 【失败】了，
+         *       kwrite 那半边状态不完整 —— krkw_free 会去 deallocate
+         *       一个没建好的东西，当场断言。
+         *
+         * 上游不 free 它，不是漏了，是知道此时不能 free。
+         *
+         * fd 泄漏的兜底：失败后 gMFKernelPoisoned 会锁死不让重试，
+         * 所以泄漏不会叠加；用户退出 App 时所有 fd 自动关闭，内核资源全还回去。
          */
         puaf_free(kfd);
-        krkw_free(kfd);        /* ★ [MF PATCH 09] 上游缺失，补上 */
         info_free(kfd);
         bzero(kfd, sizeof(struct kfd));
         info_init(kfd);

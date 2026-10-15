@@ -148,6 +148,7 @@ extern void mf_kfd_fail_hook(const char* what, const char* file, int line);
  * 传 NULL 表示解登记。
  */
 extern void mf_kfd_register_active(void* kfd);
+extern void mf_kfd_safe_cleanup(void* kfd);
 
 #define assert(condition)                                                   \
     do {                                                                    \

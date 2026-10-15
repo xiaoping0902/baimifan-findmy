@@ -121,24 +121,29 @@ void mf_kfd_register_active(void *kfd)
 }
 
 /*
- * 尽力回收当前 kfd 实例。
+ * ★★ 为什么只能做「安全回收」（[MF PATCH 08b]，真机崩溃报告实锤）★★
  *
- * ★★ 为什么需要它（2026-10-15 真机紫屏的根因）★★
+ * 第一版我在这里调的是 kfd_free()，想法是「把四样全还回去」。
+ * 真机直接 SIGSEGV，两次，栈完全一致：
  *
- *   失败的路径是：assert -> mf_kfd_fail_hook -> longjmp 回 mf_kopen。
- *   longjmp 会【跳过 kopen 后半段所有代码】——包括正常返回前的清理：
- *       info_run / perf_run / puaf_cleanup
- *   于是留在内核里的东西有两样，谁都不要了：
- *       · puaf_run 制造的 2048 个悬空页（PUAF = 悬空页）
- *       · krkw_run 开的约 10000 个 fd（以及靠这些 fd 保活的内核对象）
+ *     kopen → krkw_helper_free → kwrite_sem_open_free
+ *           → kwrite_sem_open_deallocate → assert 失败
+ *           → mf_kfd_fail_hook → mf_kfd_cleanup_active → kfd_free → 💥
  *
- *   用户一重试就再叠一份；累积几轮后物理页分配器把【仍被引用】的页
- *   发给别的进程 -> use-after-free -> kernel panic。
- *   设备上的 panic-full-2026-10-15-120617 / 120947 就是这条链的终点。
+ * 原因：KFD 失败时初始化链是【断的】。以 kopen 的顺序为例 ——
+ *     1. kfd_init   ✅
+ *     2. puaf_run   ✅
+ *     3. krkw_run   ❌ ← 失败点
+ *     4. info_run   （没到）
+ *     5. perf_run   （没到）
+ * 对 3/4/5 调 free = 释放没建好的东西 → 断言 / 野指针。
  *
- *   kfd_free() 内部正好是 perf_free / krkw_free / puaf_free / info_free，
- *   四样全还。它自己也可能断言，所以用嵌套 setjmp 兜住 ——
- *   回收失败也必须让进程继续走完 longjmp，不能挂在里面。
+ * 所以改成只释放【确定成功过】的两样：
+ *     · puaf_free —— 本分支成功过，上游重试路径也是这么调的
+ *     · info_free —— info_init 在 kfd_init 里做过
+ *
+ * fd 泄漏不主动处理：失败后闸门会锁死不让重试（不叠加），
+ * 用户退出 App 时所有 fd 由内核自动关闭 —— 比冒着崩溃风险去关安全得多。
  */
 static void mf_kfd_cleanup_active(void)
 {
@@ -149,9 +154,9 @@ static void mf_kfd_cleanup_active(void)
 
     if (setjmp(g_cleanup_jmp) == 0) {
         g_cleanup_armed = 1;
-        kfd_free((struct kfd *)k);
+        mf_kfd_safe_cleanup(k);
         g_cleanup_armed = 0;
-        fprintf(stderr, "[mf] 🔧 失败后回收完成（fd + 悬空页已归还内核）\n");
+        fprintf(stderr, "[mf] 🔧 安全回收完成（悬空页已归还；fd 由退出 App 兜底）\n");
     } else {
         g_cleanup_armed = 0;
         fprintf(stderr, "[mf] ⚠️ 回收过程中又踩断言 —— 已尽力，请重启 App\n");
