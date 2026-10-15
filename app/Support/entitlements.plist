@@ -14,6 +14,10 @@
 	     这些权限会让主程序在 main() 前启动失败，不能加入。
 	     参考：https://github.com/opa334/TrollStore#banned-entitlements
 
+	     本应用使用 no-sandbox，不指定 com.apple.private.sandbox.profile。
+	     iPadOS 16.6.1 实测：强制 com.apple.uikit.viewservice 会在 execve 时
+	     因 failed to assign builtin profile (err=22) 被内核终止。
+
 	     三个来源都对齐了：
 	       · 白米饭原版 7 项（逐条从 Mach-O 里扣出来核对过，我们原本一字不差）
 	       · TrollSpeed 23 项（Lessica 开源，ch.xxtou.hudapp）
@@ -177,8 +181,6 @@
 	<true/>
 
 	<!-- ── 其它常见的高权限位 ── -->
-	<key>com.apple.private.sandbox.profile</key>
-	<string>com.apple.uikit.viewservice</string>
 	<key>com.apple.private.network.socket-delegate</key>
 	<true/>
 	<key>com.apple.private.network.socket-info</key>

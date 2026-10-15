@@ -305,9 +305,9 @@ def check_identity():
         e = plistlib.load(f)
     banned = incompatible_entitlements(e)
     if banned:
-        err(f"entitlements 含 A12+ / iOS 15+ 启动禁止项: {', '.join(banned)}")
+        err(f"entitlements 含本应用不兼容的启动配置: {', '.join(banned)}")
     else:
-        ok("entitlements 无 TrollStore 在 A12+ / iOS 15+ 的启动禁止项")
+        ok("entitlements 无已知的不兼容启动配置")
     need = [
         "platform-application",
         "com.apple.private.security.no-sandbox",

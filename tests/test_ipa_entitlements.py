@@ -62,6 +62,14 @@ class IPAEntitlementsTests(unittest.TestCase):
         result, output = self.verify({"com.apple.QuartzCore.displayable-context": True})
         self.assertEqual(result, 0, output)
 
+    def test_rejects_forced_builtin_profile_for_unsandboxed_app(self):
+        # iPadOS 16.6.1 killed M5.60 in execve: failed to assign builtin profile.
+        result, output = self.verify({
+            "com.apple.private.sandbox.profile": "com.apple.uikit.viewservice",
+        })
+        self.assertEqual(result, 1, output)
+        self.assertIn("com.apple.private.sandbox.profile", output)
+
 
 if __name__ == "__main__":
     unittest.main()

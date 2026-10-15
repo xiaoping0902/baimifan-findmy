@@ -156,9 +156,11 @@ def main(ipa):
     ent = plistlib.loads(ent_xml)
     banned = incompatible_entitlements(ent)
     if banned:
-        print("   ✗ 含 TrollStore 在 iOS 15+ / A12+ 禁止的权限，会导致启动失败：")
+        print("   ✗ 本应用含不兼容的启动权限配置：")
         for key in banned:
-            print(f"     {key}")
+            print(f"     {key} = {ent[key]}")
+        if "com.apple.private.sandbox.profile" in banned:
+            print("     本应用使用 no-sandbox，不能同时强制分配 builtin sandbox profile。")
         return 1
     for k, v in sorted(ent.items()):
         print(f"   ✓ {k} = {v}")
