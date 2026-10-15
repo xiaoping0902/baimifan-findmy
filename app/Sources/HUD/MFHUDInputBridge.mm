@@ -117,9 +117,9 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
             (long)identity, NSStringFromCGPoint(global), NSStringFromCGPoint(inWindow),
             NSStringFromCGPoint(local), NSStringFromCGRect(overlay.captureRect));
 
-    CGRect dragRect = CGRectMake(0, 0, MAX(0, overlay.bounds.size.width - 76), 44);
+    CGRect dragRect = overlay.headerDragRect;
     if (phase == MFHUDTouchBegan && !_dragIdentity && !_router.hasActiveTouch &&
-        CGRectContainsPoint(dragRect, local)) {
+        !CGRectIsNull(dragRect) && CGRectContainsPoint(dragRect, local)) {
         _dragIdentity = @(identity); _dragStart = global; _windowStart = window.center;
     }
     if (_dragIdentity) {

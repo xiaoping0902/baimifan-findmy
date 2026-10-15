@@ -28,6 +28,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 触摸捕获区（视图坐标）。只有落在这个矩形里的触摸才会被本视图接住
 @property (nonatomic, assign) CGRect captureRect;
+/// Published by the actual header layout; excludes buttons and the tab bar.
+@property (nonatomic, assign) CGRect headerDragRect;
 @property (nonatomic, copy, nullable) void (^captureRectDidChange)(CGRect rect);
 /// The HUD uses a BKS/AX input bridge, so UIKit must not enqueue duplicate touches.
 @property (nonatomic, assign) BOOL usesExternalTouchInput;

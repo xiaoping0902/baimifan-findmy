@@ -31,6 +31,7 @@
         _preferredFPS = 60;
         _automaticallyStartsRendering = YES;
         _captureRect = CGRectNull;
+        _headerDragRect = CGRectNull;
 
         self.backgroundColor = [UIColor clearColor];
         self.opaque = NO;

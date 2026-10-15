@@ -74,6 +74,7 @@ static BOOL gVisible = YES;
     // 关掉总开关或手动隐藏 → 什么都不画，捕获区清空（全屏穿透）
     if (!gVisible || !s.masterEnabled) {
         overlay.captureRect = CGRectNull;
+        overlay.headerDragRect = CGRectNull;
         return;
     }
 
@@ -91,6 +92,7 @@ static BOOL gVisible = YES;
     if (!ImGui::Begin("##mfmenu", nullptr, flags)) {
         ImGui::End();
         overlay.captureRect = CGRectNull;
+        overlay.headerDragRect = CGRectNull;
         return;
     }
 
@@ -105,6 +107,8 @@ static BOOL gVisible = YES;
     ImGui::TextDisabled("| 悬浮菜单");
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 56);
     if (ImGui::SmallButton("隐藏")) gVisible = NO;
+    ImVec2 hideMin = ImGui::GetItemRectMin(), hideMax = ImGui::GetItemRectMax();
+    overlay.headerDragRect = CGRectMake(0, 0, MAX(0.0f, hideMin.x - 4), hideMax.y + 4);
     ImGui::Separator();
 
     // ── 页签 ──
