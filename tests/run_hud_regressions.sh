@@ -16,3 +16,10 @@ clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -framework Foundation -lproc \
     tests/hud_launcher_regressions.mm app/Sources/HUD/MFHUDLauncher.mm \
     app/Sources/HUD/MFHUDStartupStatus.mm -o "$(dirname "$binary")/hud-launcher-regressions"
 "$(dirname "$binary")/hud-launcher-regressions"
+touch_sources=(tests/hud_touch_regressions.mm)
+if [[ -f app/Sources/HUD/MFHUDTouchRouter.mm ]]; then
+    touch_sources+=(app/Sources/HUD/MFHUDTouchRouter.mm)
+fi
+clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -framework Foundation -framework CoreGraphics \
+    "${touch_sources[@]}" -o "$(dirname "$binary")/hud-touch-regressions"
+"$(dirname "$binary")/hud-touch-regressions"
