@@ -8,6 +8,7 @@
 #import "../Game/MFGameReader.h"
 #import "../Read/MFReadBackend.h"
 #import "../Game/Offsets.h"
+#import <mach/mach.h>          // mach_task_self / mach_port_deallocate
 
 @interface MFProcessViewController () <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 

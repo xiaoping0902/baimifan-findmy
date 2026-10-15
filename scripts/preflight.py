@@ -808,6 +808,53 @@ def check_source_encoding():
         ok("源文件编码检查通过（UTF-8 合法、无乱码字）")
 
 
+# ------------------------------------------ 7.12 mach_* 符号必须有 mach/mach.h
+def check_mach_headers():
+    """
+    2026-10-15 构建 #24 实际踩过：
+        MFProcessViewController.mm:289: use of undeclared identifier 'mach_task_self'
+    原因是用到了 mach 符号却没 #import <mach/mach.h>，而 UIKit/Foundation
+    都不会顺手把 mach_task_self / mach_port_deallocate 带进来。
+
+    规则：文件中出现 mach_task_self / mach_port_deallocate / mach_port_t /
+          mach_port_array_t / mach_vm_* / task_for_pid 等符号时，
+          必须直接或经由本工程头文件拿到 mach/mach.h。
+          本工程头文件（MFKernel.h / MFReadBackend.h 等）里已包含 mach 的，算通过。
+    """
+    SYMS = ("mach_task_self", "mach_port_deallocate", "mach_port_array_t",
+            "mach_port_t", "mach_vm_", "task_for_pid", "pid_for_task",
+            "mach_host_self", "processor_set_t")
+    # 这些本工程头文件里已经 import 了 mach，间接包含即可
+    PROVIDES_MACH = ("MFKernel.h", "MFKernelBridge.h", "MFReadBackend.h",
+                     "MFKernel.mm", "MFKernelBridge.m")
+
+    checked = 0
+    for dirpath, dirnames, filenames in os.walk(os.path.join(APP, "Sources")):
+        if any(s in dirpath.split(os.sep) for s in ("imgui", "vendor", "kfd")):
+            continue
+        for fn in filenames:
+            if not fn.endswith((".m", ".mm")):
+                continue
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, ROOT)
+            with open(p, encoding="utf-8", errors="replace") as f:
+                body = strip_code(f.read())
+            checked += 1
+
+            if not any(s in body for s in SYMS):
+                continue
+
+            head = body[:4000]
+            has_direct = bool(re.search(r'#\s*(?:import|include)\s*[<"]mach/mach\.h[>"]', head))
+            has_indirect = any(('"%s"' % h) in head or ('<%s>' % h) in head
+                               for h in PROVIDES_MACH)
+            if not (has_direct or has_indirect):
+                err(f"{rel}: 用了 mach_* 符号但没有 mach/mach.h "
+                    f"—— 会报 undeclared identifier（构建 #24 踩过）。"
+                    f"加 #import <mach/mach.h>")
+    ok(f"mach 头文件检查完成，扫描 {checked} 个文件")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -856,6 +903,7 @@ def main():
     check_language_boundaries()
     check_krw_size_granularity()
     check_source_encoding()
+    check_mach_headers()
     check_project_paths()
     check_identity()
 
