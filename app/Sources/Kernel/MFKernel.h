@@ -24,7 +24,9 @@ typedef NS_ENUM(NSInteger, MFKernelState) {
 
 typedef NS_ENUM(NSInteger, MFEnumRoute) {
     MFEnumRouteNone = 0,
-    MFEnumRoutePrivileged = 1,  // 路 A：host_processor_set_priv
+    MFEnumRouteTaskForPid = 3,  // 路 C：task_for_pid + sysctl(KERN_PROC_ALL)
+                                //       靠 task_for_pid-allow entitlement，最优先
+    MFEnumRoutePrivileged = 1,  // 路 A：host_processor_set_priv（要 host_priv）
     MFEnumRouteDefault = 2,     // 路 B：processor_set_default（免特权）
 };
 

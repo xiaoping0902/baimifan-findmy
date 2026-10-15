@@ -12,6 +12,7 @@
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
 #import "../HUD/MFHUDLauncher.h"
+#import "../HUD/MFHUDLog.h"
 #import "../HUD/MFDrawingLayer.h"
 #import "../Kernel/MFKernel.h"
 #import "../Game/MFGameReader.h"
@@ -132,6 +133,7 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"启动内核" detail:@"M3" action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];
+    [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
     [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
     [secs addObject:s1];
 
@@ -299,6 +301,49 @@ extern char **environ;
         [self alert:@"结束失败" message:err ?: @"未知错误"];
     }
     [self refreshStatus];
+}
+
+#pragma mark HUD 日志
+
+/// HUD 子进程走一步记一步，落在 Documents/mf_hud.log。
+/// 两个进程同沙盒，主进程直接读回来显示。
+- (void)actShowHUDLog {
+    char *raw = MFHUDLogRead();
+    NSString *log = nil;
+    if (raw != NULL) {
+        log = [NSString stringWithUTF8String:raw];
+        free(raw);
+    }
+    if (log.length == 0) {
+        log = @"（还没有 HUD 日志 —— 先点一次「启动悬浮窗」）";
+    }
+
+    NSString *pidInfo = [MFHUDLauncher isHUDRunning]
+        ? [NSString stringWithFormat:@"HUD 当前 PID = %d", [MFHUDLauncher hudPID]]
+        : @"HUD 当前未运行";
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"HUD 日志"
+                         message:[NSString stringWithFormat:
+                                  @"%@\n\n%@\n\n"
+                                  @"排查要点：\n"
+                                  @"· 只有「main() 进入，角色判定并启动 HUD」→ 子进程没到 didFinish\n"
+                                  @"· 有 didFinish 但没有「托管前诊断」→ 卡在建窗\n"
+                                  @"· windowScene=nil / _contextId=nil → 窗口没进合成器\n"
+                                  @"· applicationState=2 → 子进程被当成后台，拿不到场景",
+                                  pidInfo, log]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"复制全文" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *_) {
+        [UIPasteboard generalPasteboard].string = log;
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive
+                                       handler:^(UIAlertAction *_) {
+        MFHUDLogClear();
+        [self alert:@"已清空" message:@"下次「启动悬浮窗」会重新记录"];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 #pragma mark 游戏数据自检

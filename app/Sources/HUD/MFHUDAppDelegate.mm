@@ -2,6 +2,7 @@
 //  MFHUDAppDelegate.mm — HUD 角色（实现）
 //
 #import "MFHUDAppDelegate.h"
+#import "MFHUDLog.h"
 #import "MFMenuUI.h"
 #import "MFDrawingLayer.h"
 #import "../Render/MFOverlayView.h"
@@ -70,6 +71,7 @@ static BOOL gIsHUD = NO;
 didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)opts {
     gIsHUD = YES;
     NSLog(@"[MF][HUD] didFinish，开始建立双窗口");
+    MFHUDLogLine(@"==== HUD didFinishLaunching 进来了 ====");
 
     // ── ① 绘制窗（透明，完全穿透）──────────────────────
     // 分析已证：level = UIWindowLevelStatusBar + 20；opaque=NO；userInteractionEnabled=NO
@@ -133,11 +135,42 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     // ── ④ 交给系统托管（跨 App 悬浮）─────────────────
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        // ★ 托管前先把四个关键量落盘 —— 这是判断「窗口建了但没进合成器」的唯一证据
+        MFHUDLogLine(@"---- 托管前诊断 ----");
+        MFHUDLogLine(@"UIApplication.applicationState = %ld (0=Active 1=Inactive 2=Background)",
+                     (long)UIApplication.sharedApplication.applicationState);
+        MFHUDLogLine(@"UIScreen.bounds = %@", NSStringFromCGRect(UIScreen.mainScreen.bounds));
+        for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
+                               self.drawingWindow ?: (id)[NSNull null] ]) {
+            if (![w isKindOfClass:[UIWindow class]]) continue;
+            id ctx = [w valueForKey:@"_contextId"];
+            MFHUDLogLine(@"窗口 %@: level=%.0f hidden=%d windowScene=%@ _contextId=%@",
+                         (w == self.hudMenuWindow) ? @"菜单" : @"绘制",
+                         w.windowLevel, w.isHidden,
+                         w.windowScene ? @"有" : @"nil",
+                         ctx ? [NSString stringWithFormat:@"0x%x", [ctx unsignedIntValue]] : @"nil");
+        }
+
         BOOL a = MFHostWindow(self.hudMenuWindow);
         BOOL b = MFHostWindow(self.drawingWindow);
         NSLog(@"[MF][HUD] 托管结果：菜单窗=%d 绘制窗=%d", a, b);
+        MFHUDLogLine(@"托管结果：菜单窗=%d 绘制窗=%d", a, b);
+
+        // 托管后再看一次 _contextId，能判断托管到底有没有生效
+        id ctxMenu = [self.hudMenuWindow valueForKey:@"_contextId"];
+        id ctxDraw = [self.drawingWindow valueForKey:@"_contextId"];
+        MFHUDLogLine(@"托管后 _contextId：菜单=%@ 绘制=%@",
+                     ctxMenu ? [NSString stringWithFormat:@"0x%x", [ctxMenu unsignedIntValue]] : @"nil",
+                     ctxDraw ? [NSString stringWithFormat:@"0x%x", [ctxDraw unsignedIntValue]] : @"nil");
+
         if (!a && !b) {
             NSLog(@"[MF][HUD] ⚠️ 两个窗口都托管失败 —— 检查 accessibility-window-hosting 权限是否生效");
+            MFHUDLogLine(@"⚠️ 两个窗口都托管失败");
+            MFHUDLogLine(@"最可能的原因（HUD 审查报告 §1 结论 1，概率 ~70%）：");
+            MFHUDLogLine(@"  子进程没有被 FrontBoard 承认为前台 App → 拿不到 UIWindowScene/CAContext");
+            MFHUDLogLine(@"  → _contextId 为 0 → registerWindowWithContextID:0 静默无效");
+            MFHUDLogLine(@"  原版靠 NSPrincipalClass=HUDMainApplication + 一整套 hosting 机制解决，");
+            MFHUDLogLine(@"  复刻版没有这一层（已用二进制差分证实）。");
         }
     });
 

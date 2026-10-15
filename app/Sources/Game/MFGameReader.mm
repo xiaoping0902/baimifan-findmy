@@ -42,8 +42,8 @@
     MFReadBackend *rb = [MFReadBackend shared];
 
     // 相机对象基址（原实现存在全局 0x100FF6610，复刻版按档案里的偏移直接走对象链）
-    // 这里采用「实体列表头 + kMFCameraPtrOffset」的路径
-    uint64_t base = [rb followChain:self.entityListBase
+    // ★ 审查修正 F4：这里走的是【指针链根 rootObjectBase】，与实体数组起始是两个字段
+    uint64_t base = [rb followChain:self.rootObjectBase
                             offsets:off.current.rootChain];
     if (!base) return NO;
 
@@ -67,10 +67,10 @@
     return YES;
 }
 
-/// 实体列表基址。原实现从 0x100FF65D0 这类全局取，
-/// 复刻版走「真机校准回填」的路径（entityListBase 属性）。
+/// 实体数组起始地址
+/// ★ 审查修正 F4：原来共用 entityListBase，与相机路的语义冲突（同一值当两个东西用）
 - (uint64_t)resolveEntityListBase {
-    return self.entityListBase;
+    return self.entityArrayBase;
 }
 
 #pragma mark - ②③ 实体
@@ -127,7 +127,7 @@
     MFOffsets *off = [MFOffsets shared];
     MFReadBackend *rb = [MFReadBackend shared];
 
-    uint64_t base = self.lootListBase;
+    uint64_t base = self.lootArrayBase;
     if (!base) return out;
 
     int count = [rb readInt32:base + off.current.entityCountOffset];

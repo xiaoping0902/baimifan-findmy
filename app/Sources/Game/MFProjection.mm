@@ -12,7 +12,13 @@
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         s = [[MFProjection alloc] init];
-        s.convention = (MFSignConvention){ .negateSide = YES, .negateUp = NO, .applyRoll = YES };
+        /*
+         * ★ 审查修正：applyRoll 默认【关】。
+         *   原版分类 §3 明确「算法主体只用俯仰 + 偏航」，roll 参与度低。
+         *   第一版默认开启，等于引入了一个原版没有的变换 ——
+         *   真机校准时如果画面出现奇怪的旋转，第一个怀疑对象就是这里。
+         */
+        s.convention = (MFSignConvention){ .negateSide = YES, .negateUp = NO, .applyRoll = NO };
     });
     return s;
 }
@@ -60,8 +66,16 @@
     // 3) 深度 = 与相机前向的点积（已证式子）
     float depth = dx * cosP * cosY + dy * cosP * sinY + dz * sinP;
 
-    // 4) 背后剔除（已证阈值 0.1）
-    if (depth < kMF_MinDepth) {
+    /*
+     * 4) 背后剔除（已证阈值 0.1）
+     *
+     * ★ 审查修正：写成 `!(depth >= kMF_MinDepth)` 而不是 `depth < kMF_MinDepth`。
+     *   两者对 NaN 的行为相反 —— NaN 参与任何比较都是 false，
+     *   所以 `depth < 0.1` 对 NaN 也为 false → NaN 会被当成「有效点」
+     *   进 DrawList（NaN 坐标的矩形会污染整个绘制批次）。
+     *   取反写法能把 NaN 一起挡掉。
+     */
+    if (!(depth >= kMF_MinDepth)) {
         return out;                     // 哨兵 (-9999, -9999)
     }
 

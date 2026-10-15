@@ -33,9 +33,21 @@ static mf_mach_vm_deallocate_fn g_dealloc  = NULL;
 static uint64_t g_pagesize = 0;
 
 /// 解除映射：优先用 SPI 版 mach_vm_deallocate（支持 >4GB 地址），
-/// 拿不到就退回公开的 vm_deallocate
+/// 拿不到就退回公开的 vm_deallocate。
+///
+/// ★ 审查修正（报告 G1）：第一版无条件回退到 vm_deallocate，
+///   而 vm_address_t 是 32 位的 —— 映射地址 ≥ 4GB 时会被静默截断，
+///   解除映射作用到错误地址上，本页就【永远泄漏】。
+///   现在：地址放不进 32 位时明确失败，不再悄悄截断。
 static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, mach_vm_size_t size) {
     if (g_dealloc) return g_dealloc(task, addr, size);
+
+    if (addr > 0xFFFFFFFFULL || size > 0xFFFFFFFFULL) {
+        NSLog(@"[MF][Read] ⚠️ mach_vm_deallocate 不可用且地址/长度超出 32 位"
+              @"（addr=0x%llx size=0x%llx）—— 这一页会泄漏",
+              (unsigned long long)addr, (unsigned long long)size);
+        return KERN_INVALID_ADDRESS;
+    }
     return vm_deallocate(task, (vm_address_t)addr, (vm_size_t)size);
 }
 
@@ -112,6 +124,16 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
                                /* copy = */ TRUE,
                                &cur, &max, VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
+        _failCount++;
+        return NO;
+    }
+
+    /*
+     * ★ 审查修正（报告 G3）：原版在 memcpy 前检查过映射地址非 0，
+     *   第一版漏掉了。极端情况下（例如目标页是零页）remap 可能返回
+     *   成功但 local == 0 —— 那 memcpy 就会从 0 地址读，直接崩。
+     */
+    if (local == 0) {
         _failCount++;
         return NO;
     }

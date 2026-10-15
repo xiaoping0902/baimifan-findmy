@@ -38,11 +38,26 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前目标 task port（由 MFKernel 枚举后写入）
 @property (nonatomic, assign) uint32_t targetTaskPort;
 
-/// 实体列表基址（真机校准时回填；0 = 未校准）
-@property (nonatomic, assign) uint64_t entityListBase;
+/// ★ 审查修正（报告 F4）：原来只有一个 entityListBase，被当成两个语义用 ——
+///   · 当「指针链的根对象」传给 followChain（相机路走这条）
+///   · 又当「实体数组起始」直接加偏移（实体/物资路走这条）
+///   同一个值不可能同时成立，所以校准对了也只有一条路能通。拆成独立字段。
+///
+/// 校准顺序（真机调试面板里逐项填）：
+///   1) rootObjectBase  —— 从它按 rootChain 走一步，能读出合理的相机指针
+///   2) entityArrayBase —— 从它 + entityCountOffset 能读出合理的实体数量（1..500）
+///   3) lootArrayBase   —— 同上
+@property (nonatomic, assign) uint64_t rootObjectBase;   // 指针链根（相机路）
+@property (nonatomic, assign) uint64_t entityArrayBase;  // 实体数组起始（实体路）
+@property (nonatomic, assign) uint64_t lootArrayBase;    // 物资数组起始
 
-/// 物资列表基址（同上）
-@property (nonatomic, assign) uint64_t lootListBase;
+/// ★ 审查修正 F1：这三个基址原本全工程 0 个写点 —— 读取链永远不可达。
+/// 现在提供持久化：存 NSUserDefaults，启动时自动读回。
+/// 真机校准时在「进程列表 → 基址校准」里填十六进制值。
+- (void)loadBasesFromDefaults;
+- (void)saveBasesToDefaults;
+/// 校准状态摘要（给自检报告用）
+- (NSString *)calibrationSummary;
 
 /// 门条件：端口有效即可读
 @property (nonatomic, readonly) BOOL ready;

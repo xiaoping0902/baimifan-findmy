@@ -406,28 +406,37 @@ int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
     }
 
     /*
-     * 非 8 倍数：按 8 字节逐块读，最后一块只拷需要的字节。
-     * 这样不会像直接传 size 那样把尾巴丢掉。
+     * 非 8 倍数：按【8 字节对齐单元】逐块读。
+     *
+     * ★ 审查修正（报告 S3）：第一版是 kread(kaddr+done, 8)，
+     *   size=12 时会读到 kaddr+8..kaddr+16，比请求范围多读 4 字节，
+     *   贴着页尾时可能跨页。改成先把地址对齐到 8 字节再读，
+     *   然后按 shift 截取 —— 每次读都落在单个 8 字节单元内。
      */
     unsigned char *out = (unsigned char *)uaddr;
     uint64_t done = 0;
     while (done < size) {
+        uint64_t addr    = kaddr + done;
+        uint64_t aligned = addr & ~7ULL;
+        uint64_t shift   = addr - aligned;          // 0..7
+
         uint64_t chunk = 0;
         if (setjmp(g_fail_jmp) == 0) {
             g_fail_armed = 1;
-            kread((u64)(uintptr_t)g_kfd, kaddr + done, &chunk, sizeof(chunk));
+            kread((u64)(uintptr_t)g_kfd, aligned, &chunk, sizeof(chunk));
             g_fail_armed = 0;
         } else {
             g_fail_armed = 0;
             if (g_verbose) {
-                fprintf(stderr, "[mf] mf_kread: 非8倍数分块读失败 @ done=%llu/%llu\n",
+                fprintf(stderr, "[mf] mf_kread: 分块读失败 @ done=%llu/%llu\n",
                         (unsigned long long)done, (unsigned long long)size);
             }
             return -1;
         }
-        uint64_t take = size - done;
-        if (take > 8) take = 8;
-        memcpy(out + done, &chunk, (size_t)take);
+
+        uint64_t avail = 8 - shift;
+        uint64_t take  = (size - done < avail) ? (size - done) : avail;
+        memcpy(out + done, ((unsigned char *)&chunk) + shift, (size_t)take);
         done += take;
     }
     return 0;
@@ -447,6 +456,32 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
         return 0;
     }
 
+    /*
+     * ★ 审查修正（报告 S1）：上游 kwrite 后端有三条【静默 return】：
+     *       new_value == 0   → 什么都不做
+     *       old_value == 0   → 什么都不做（旧的为 0 也写不进去）
+     *       old_value == new → 跳过
+     *   而 kwrite() 返回 void —— 调用方根本看不出「其实没写」。
+     *   我们的封装以前恒返回 0（成功），等于骗调用者。
+     *
+     *   现在加两道：
+     *     ① 要写的数据全是 0 → 直接报错（这个上游铁定写不进去）
+     *     ② 写完读回校验，不一致就报错
+     */
+    {
+        const unsigned char *p = (const unsigned char *)uaddr;
+        int allzero = 1;
+        for (uint64_t i = 0; i < size; i++) {
+            if (p[i] != 0) { allzero = 0; break; }
+        }
+        if (allzero) {
+            mf_strlcpy(g_err, sizeof(g_err),
+                       "mf_kwrite: 上游 kwrite 无法写 0（值靠 fd 槽表达）"
+                       "—— 请改用非零哨兵、改指针，或改上层字段");
+            return -3;
+        }
+    }
+
     /* 整 8 字节：直接写 */
     if ((size & 7u) == 0) {
         if (setjmp(g_fail_jmp) == 0) {
@@ -456,6 +491,18 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
         } else {
             g_fail_armed = 0;
             return -1;
+        }
+
+        /* 读回校验（只对小尺寸做，避免大块写的额外开销） */
+        if (size <= 64) {
+            unsigned char back[64] = {0};
+            if (mf_kread(kaddr, back, size) == 0 &&
+                memcmp(back, uaddr, (size_t)size) != 0) {
+                mf_strlcpy(g_err, sizeof(g_err),
+                           "mf_kwrite: 写后校验不一致 —— 上游很可能静默跳过了"
+                           "（值不变 / 目标原为 0 / 值为 0）");
+                return -4;
+            }
         }
         return 0;
     }

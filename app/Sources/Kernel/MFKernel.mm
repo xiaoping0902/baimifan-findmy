@@ -249,21 +249,139 @@ extern "C" {
 
 #pragma mark - 枚举路由探测
 
+/// 试探某个 processor_set 能不能真的拿出 task 列表
+static kern_return_t MFTestProcessorSet(processor_set_t pset) {
+    if (pset == MACH_PORT_NULL) return KERN_INVALID_ARGUMENT;
+    mach_port_array_t tasks = NULL;
+    natural_t cnt = 0;
+    kern_return_t kr = processor_set_tasks(pset, &tasks, &cnt);
+    if (kr == KERN_SUCCESS && tasks != NULL && cnt > 0) {
+        vm_deallocate(mach_task_self(), (vm_address_t)tasks, cnt * sizeof(mach_port_t));
+    }
+    return kr;
+}
+
+/*
+ * ★ 审查修正（报告 S6）：
+ *   第一版的 detectRoute 只测 processor_set_default —— 那是免特权调用，
+ *   【必然成功】，于是永远返回「路 B」。而真机上 processor_set_tasks
+ *   紧接着就报 kr=0x4（KERN_INVALID_ARGUMENT）。
+ *   判断标准必须落在 processor_set_tasks 上，不是它的前置调用。
+ *
+ * ★ 另外新增路 C：task_for_pid。
+ *   我们的 entitlements 里本来就有 task_for_pid-allow（从设备读出来核对过），
+ *   这条路根本不需要 host_priv、也不需要 processor_set。
+ *   配合 sysctl(KERN_PROC_ALL) 拿 pid 列表，是当前最可能走通的一条。
+ */
 - (MFEnumRoute)detectRoute {
-    // 路 B 优先探测（免特权，纯巨魔也能走）
-    processor_set_t pset = MACH_PORT_NULL;
-    if (processor_set_default(mach_host_self(), &pset) == KERN_SUCCESS && pset != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self(), pset);
-        self.cachedRoute = MFEnumRouteDefault;
-        return MFEnumRouteDefault;
+    if (self.cachedRoute != MFEnumRouteNone) return self.cachedRoute;
+
+    // 路 C：task_for_pid（靠 entitlement，最优先）
+    if ([self taskForPidAvailable]) {
+        self.cachedRoute = MFEnumRouteTaskForPid;
+        NSLog(@"[MF][Kernel] 路由探测 → 路 C task_for_pid 可用");
+        return MFEnumRouteTaskForPid;
     }
-    // 路 A
+
+    // 路 A：host_priv
     if (self.hostPrivPort != MACH_PORT_NULL) {
-        self.cachedRoute = MFEnumRoutePrivileged;
-        return MFEnumRoutePrivileged;
+        processor_set_name_array_t sets = NULL;
+        natural_t setCnt = 0;
+        if (host_processor_sets(mach_host_self(), &sets, &setCnt) == KERN_SUCCESS && sets) {
+            processor_set_t pset = MACH_PORT_NULL;
+            kern_return_t kr = host_processor_set_priv(self.hostPrivPort, sets[0], &pset);
+            vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
+            if (kr == KERN_SUCCESS) {
+                kr = MFTestProcessorSet(pset);
+                mach_port_deallocate(mach_task_self(), pset);
+                if (kr == KERN_SUCCESS) {
+                    self.cachedRoute = MFEnumRoutePrivileged;
+                    NSLog(@"[MF][Kernel] 路由探测 → 路 A host_priv 可用");
+                    return MFEnumRoutePrivileged;
+                }
+            }
+            NSLog(@"[MF][Kernel] 路 A 试探失败 kr=0x%x", kr);
+        }
     }
-    self.cachedRoute = MFEnumRouteNone;
+
+    // 路 B：processor_set_default（免特权）—— 必须真的测 processor_set_tasks
+    processor_set_t pset = MACH_PORT_NULL;
+    if (processor_set_default(mach_host_self(), &pset) == KERN_SUCCESS) {
+        kern_return_t kr = MFTestProcessorSet(pset);
+        mach_port_deallocate(mach_task_self(), pset);
+        if (kr == KERN_SUCCESS) {
+            self.cachedRoute = MFEnumRouteDefault;
+            NSLog(@"[MF][Kernel] 路由探测 → 路 B 免特权可用");
+            return MFEnumRouteDefault;
+        }
+        NSLog(@"[MF][Kernel] 路 B processor_set_tasks 失败 kr=0x%x —— 这条路其实不通", kr);
+    }
+
+    NSLog(@"[MF][Kernel] 三条枚举路全不通");
     return MFEnumRouteNone;
+}
+
+/// 路 C 可用性：能不能对一个真实 pid 拿到 task port
+- (BOOL)taskForPidAvailable {
+    mach_port_t t = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), getpid(), &t);
+    if (kr == KERN_SUCCESS && t != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), t);
+        return YES;
+    }
+    NSLog(@"[MF][Kernel] task_for_pid(self) kr=0x%x（task_for_pid-allow 未生效？）", kr);
+    return NO;
+}
+
+/// 路 C：sysctl 拿 pid 列表 → task_for_pid 逐个换 task port
+- (NSArray<MFProcessInfo *> *)enumerateViaTaskForPid:(NSString **)err {
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) {
+        if (err) *err = [NSString stringWithFormat:@"sysctl(KERN_PROC_ALL) 取长度失败 errno=%d", errno];
+        return @[];
+    }
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(len);
+    if (procs == NULL) {
+        if (err) *err = @"malloc 失败";
+        return @[];
+    }
+    if (sysctl(mib, 4, procs, &len, NULL, 0) != 0) {
+        free(procs);
+        if (err) *err = [NSString stringWithFormat:@"sysctl(KERN_PROC_ALL) 取值失败 errno=%d", errno];
+        return @[];
+    }
+
+    size_t n = len / sizeof(struct kinfo_proc);
+    NSMutableArray<MFProcessInfo *> *out = [NSMutableArray arrayWithCapacity:n];
+
+    for (size_t i = 0; i < n; i++) {
+        int pid = procs[i].kp_proc.p_pid;
+        if (pid <= 0) continue;
+
+        mach_port_t task = MACH_PORT_NULL;
+        if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS || task == MACH_PORT_NULL) {
+            continue;
+        }
+
+        char path[0x400] = {0};
+        proc_pidpath(pid, path, sizeof(path));
+        char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+
+        MFProcessInfo *pi = [[MFProcessInfo alloc] init];
+        pi.pid = pid;
+        pi.name = (base[0] != '\0') ? ([NSString stringWithUTF8String:base] ?: @"?")
+                                    : [NSString stringWithFormat:@"pid%d", pid];
+        pi.path = (path[0] != '\0') ? ([NSString stringWithUTF8String:path] ?: @"?") : @"?";
+        pi.taskPort = task;
+        [out addObject:pi];
+    }
+    free(procs);
+
+    NSLog(@"[MF][Kernel] 路 C：%zu 个 proc，成功拿到 %lu 个 task port",
+          n, (unsigned long)out.count);
+    return out;
 }
 
 - (void)probeCapabilitiesWithCompletion:(void (^)(NSString *))completion {
@@ -323,6 +441,17 @@ extern "C" {
     if (route == MFEnumRouteNone) {
         route = [self detectRoute];
     }
+
+    // ── 路 C：task_for_pid（不碰 processor_set，靠 entitlement）──
+    if (route == MFEnumRouteTaskForPid) {
+        NSArray<MFProcessInfo *> *list = [self enumerateViaTaskForPid:err];
+        if (list.count == 0) {
+            if (err && *err == nil) *err = @"路 C 未拿到任何 task port";
+            return @[];
+        }
+        return list;
+    }
+
     processor_set_t pset = MACH_PORT_NULL;
     kern_return_t kr;
 
@@ -377,8 +506,21 @@ extern "C" {
     char path[0x400];
     for (natural_t i = 0; i < taskCnt; i++) {
         memset(path, 0, sizeof(path));
+
+        /*
+         * ★ 审查修正（报告 S4）：proc_pidpath 的第一个参数要的是 **pid**，
+         *   不是 task port。第一版直接把 tasks[i]（task port）传进去，
+         *   等于拿一个 Mach 端口号当 pid 用 —— 永远匹配不上真实进程。
+         *   先 pid_for_task 换成 pid，再 proc_pidpath。
+         */
+        int pid = 0;
+        if (pid_for_task(tasks[i], &pid) != KERN_SUCCESS || pid <= 0) {
+            mach_port_deallocate(mach_task_self(), tasks[i]);
+            continue;
+        }
+
         // 对标原实现：proc_pidpath + strrchr('/') + strncmp
-        if (proc_pidpath(tasks[i], path, sizeof(path)) <= 0) {
+        if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
             mach_port_deallocate(mach_task_self(), tasks[i]);
             continue;
         }
@@ -388,8 +530,6 @@ extern "C" {
             mach_port_deallocate(mach_task_self(), tasks[i]);
             continue;
         }
-        int pid = 0;
-        pid_for_task(tasks[i], &pid);
 
         MFProcessInfo *pi = [[MFProcessInfo alloc] init];
         pi.pid = pid;
