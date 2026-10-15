@@ -21,7 +21,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-source", type=Path,
                         default=ROOT / "app/Sources/HUD/MFHUDWindow.mm")
-    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay"], default="windows")
+    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay", "game-reader"], default="windows")
     args = parser.parse_args()
     sdk = run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path", capture=True).stdout.strip()
     devices = json.loads(run("xcrun", "simctl", "list", "devices", "available", "-j", capture=True).stdout)
@@ -70,6 +70,11 @@ def main():
                 sources = [ROOT / "tests/hud_input_bridge_regressions.mm",
                            ROOT / "app/Sources/HUD/MFHUDInputBridge.mm",
                            ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"]
+            elif args.suite == "game-reader":
+                sources = [ROOT / "tests/game_reader_base_regressions.mm"]
+                sources += [ROOT / f"app/Sources/Game/{name}.mm"
+                            for name in ("MFGameReader", "MFProjection", "Offsets", "MFSettings")]
+                sources.append(ROOT / "app/Sources/Read/MFReadBackend.mm")
             else:
                 sources = [ROOT / f"tests/hud_{args.suite}_regressions.mm",
                            ROOT / "app/Sources/Render/MFOverlayView.mm",
@@ -85,6 +90,7 @@ def main():
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-x", "objective-c++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
+                "-I" + str(ROOT / "app/Sources/Game"),
                 "-I" + str(ROOT / "app/Sources/Render/imgui"),
                 "-framework", "UIKit", "-framework", "QuartzCore", "-framework", "Foundation",
                 "-framework", "CoreGraphics", "-framework", "Metal", "-framework", "MetalKit",
@@ -107,7 +113,8 @@ def main():
             print(result.stdout, end="", flush=True)
             print(result.stderr, end="", flush=True)
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
-                      "menu": "PASS: production menu", "overlay": "PASS: production overlay"}[args.suite]
+                      "menu": "PASS: production menu", "overlay": "PASS: production overlay",
+                      "game-reader": "PASS: production game reader"}[args.suite]
             report = ""
             deadline = time.monotonic() + 120
             while result.returncode == 0 and time.monotonic() < deadline:
