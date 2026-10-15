@@ -15,7 +15,6 @@ static BOOL gDrawEnabled = YES;
 
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
-- (void)readHumanFields:(MFEntity *)e reader:(MFReadBackend *)rb profile:(MFGameProfile *)p;
 - (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
