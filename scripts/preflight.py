@@ -1167,6 +1167,68 @@ def check_system_symbol_headers():
     ok(f"系统符号头文件检查完成（{checked} 处疑似缺失）")
 
 
+# ------------------ 7.19 PUAF 页数上限必须三处一致
+def check_puaf_limit_consistency():
+    """
+    2026-10-15 实际踩过（构建 #41 之后第一次真机测试）：
+
+        kopen 失败: bad puaf_pages: 3072 (valid range 16..2048)
+
+    原因：MFKernelBridge.h 的 MF_PUAF_PAGES_MAX 还是 2048，
+    而 UI 已经按 Dopamine 的表选了 3072 —— 前置自检直接把 3072 拒了，
+    根本没进到 kfd。
+
+    ★ 对照三个来源（都是 const u64）：
+        上游 felix-pb/kfd : puaf_pages_max = 2048
+        Dopamine          : puaf_pages_max = 3072   ← 它自己要 3072，所以改大了
+        我们              : 必须也是 3072
+
+    不变量：
+        MFKernelBridge.h 的 MF_PUAF_PAGES_MAX
+        == libkfd.h 里 kopen 的 puaf_pages_max
+        并且 >= Dopamine 会给 6GB 设备的 3072
+
+    不一致会出现两种难查的失败：
+        · 自检上限 < kfd 上限 → 合法值被自检拦下（我们踩的就是这个）
+        · 自检上限 > kfd 上限 → 过了自检但被内部断言弹回
+    """
+    bridge = os.path.join(APP, "Sources", "Kernel", "MFKernelBridge.h")
+    libkfd = os.path.join(APP, "Sources", "Kernel", "kfd", "libkfd.h")
+    if not (os.path.exists(bridge) and os.path.exists(libkfd)):
+        return
+
+    with open(bridge, encoding="utf-8", errors="replace") as f:
+        b = strip_code(f.read())
+    mb = re.search(r'#define\s+MF_PUAF_PAGES_MAX\s+(\d+)', b)
+    if not mb:
+        return
+    bridge_max = int(mb.group(1))
+
+    with open(libkfd, encoding="utf-8", errors="replace") as f:
+        l = strip_code(f.read())
+    # kopen 里的 const u64 puaf_pages_max = NNNN;
+    ml = re.search(r'const\s+u64\s+puaf_pages_max\s*=\s*(\d+)', l)
+    kfd_max = int(ml.group(1)) if ml else None
+
+    if kfd_max is None:
+        err("libkfd.h: 找不到 kopen 里的 `const u64 puaf_pages_max = N;`"
+            " —— 预检无法核对上限一致性")
+        return
+
+    if bridge_max != kfd_max:
+        err(f"PUAF 上限不一致：MFKernelBridge.h 是 {bridge_max}，"
+            f"libkfd.h 的 kopen 是 {kfd_max} —— "
+            f"会出现「自检拦下合法值」或「过了自检被断言弹回」（构建 #41 后踩过）")
+
+    # Dopamine 对 ≥5GB 设备给 3072，上限至少要够
+    if kfd_max < 3072:
+        err(f"libkfd.h 的 puaf_pages_max = {kfd_max} < 3072 —— "
+            f"Dopamine 对 6GB 设备要用 3072（原话 remarkably more reliable），"
+            f"上游的 2048 不允许，Dopamine 自己改成了 3072")
+
+    ok(f"PUAF 上限一致性检查完成（bridge={bridge_max}, kfd={kfd_max}）")
+
+
 # ------------------------------------------------------------ 8. 结构完整性
 def check_layout():
     must = [
@@ -1222,6 +1284,7 @@ def main():
     check_kfd_free_not_in_failure_path()
     check_libkfd_hook_signatures()
     check_system_symbol_headers()
+    check_puaf_limit_consistency()
     check_project_paths()
     check_identity()
 

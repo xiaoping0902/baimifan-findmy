@@ -147,69 +147,35 @@
 
 - (void)startKernel {
     /*
-     * ★ PUAF 页数可调（[M5.9]）
+     * ★ [M5.14] 一点就走 —— 不再弹选择框。
      *
-     * 为什么做成可调：真机日志里 kopen 失败在
-     *     assertion failed: (landa retry limit reached)
-     * 而 krkw_run 只有一处能返回 -1 —— krkw_helper_grab_free_pages：
+     * 用户的原话：「为什么要我选择呢 不能直接我点击启动就直接自己选择启动呀」
      *
-     *     goal = number_of_puaf_pages / 4;          // 2048 → 512
-     *     数「2048 个 PUAF 悬空页里还剩多少个没被系统回收」，
-     *     凑不够 512 就 print_warning("failed to grab free pages goal") 并返回 -1。
+     * 参数全部自动决定，依据是三个独立来源的交集：
      *
-     * 也就是说：这是【内存压力】问题，而且【目标 = 页数/4，页数越小越容易达成】。
-     * 所以把页数做成可选，失败时用户可以降档重试。
+     *   PUAF 方法 = landa
+     *       白米饭自己的版本判定表（三重复核）：
+     *         physpuppet 修复于 iOS 16.4
+     *         smith      修复于 iOS 16.5.1
+     *         landa      修复于 iOS 17.0
+     *       → 16.6.1 上只剩 landa 可用。
+     *
+     *   PUAF 页数 = 按 hw.memsize 查 Dopamine 的表
+     *       Dopamine 对 ≥5GB 设备原话：
+     *         "These devices are remarkably more reliable with 3072"
+     *       → 6GB 设备用 3072。
+     *
+     *   kread/kwrite = sem_open / sem_open
+     *       16.3+ 上 kqueue_workloop_ctl 已废（krkw.h 有 assert 拦截）。
+     *
+     * 想手动改参数的话在「环境检测」下面的调试入口里，普通流程不需要。
      */
-    NSInteger pages = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafPages"];
-    if (pages < 16) pages = (NSInteger)[MFKernel recommendedPuafPages];   // ★ 自动（Dopamine 的表）
-    NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
-    if (pm < 0 || pm > 2) pm = 2;      // 默认 landa （16.6.1 上唯一可用，见分析报告）
+    NSInteger pm = 2;                                        // landa
+    uint64_t pages = [MFKernel recommendedPuafPages];        // 3072（6GB 设备）
+    [[NSUserDefaults standardUserDefaults] setInteger:pm forKey:@"mf.kfd.puafMethod"];
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)pages forKey:@"mf.kfd.puafPages"];
 
-    uint64_t mem = 0; size_t ms = sizeof(mem);
-    sysctlbyname("hw.memsize", &mem, &ms, NULL, 0);
-    size_t avail = [MFKernel availableMemory];
-
-    UIAlertController *a = [UIAlertController
-        alertControllerWithTitle:@"启动内核"
-                         message:[NSString stringWithFormat:
-                                 @"RAM %.1f GB · 可用内存 %.0f MB\n"
-                                 @"本次：%ld 页 · %@\n"
-                                 @"目标悬空页门槛 = %ld/4 = %ld\n\n"
-                                 @"★ 页数按 Dopamine 的表自动选（6GB+ → 3072，\n"
-                                 @"  原话「remarkably more reliable with 3072」）\n\n"
-                                 @"⚠️ 16.6.1 上只有 landa 可用：\n"
-                                 @"   physpuppet 修复于 16.4 · smith 修复于 16.5.1\n\n"
-                                 @"失败后本次运行会禁止再试。",
-                                 mem / 1073741824.0, avail / 1048576.0,
-                                 (long)pages,
-                                 pm == 2 ? @"landa" : (pm == 1 ? @"smith" : @"physpuppet"),
-                                 (long)pages, (long)(pages / 4)]
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
-    /*
-     * ⚠️ 枚举值必须与 libkfd.h 一致：
-     *     enum puaf_method { puaf_physpuppet = 0, puaf_smith = 1, puaf_landa = 2 };
-     * ⚠️ 16.6.1 上 landa 是【唯一】可用的（physpuppet 修复于 16.4，smith 修复于 16.5.1）
-     */
-    NSArray *tiers = @[
-        @[@"landa · 3072（★ Dopamine 推荐）", @2, @3072, @"6GB 设备首选"],
-        @[@"landa · 2048（我们一直用的）",     @2, @2048, @"之前失败的配置"],
-        @[@"landa · 4096（更激进）",           @2, @4096, @"若 3072 仍不行可试"],
-        @[@"landa · 1024",                     @2, @1024, @"小页数对照"],
-        @[@"smith · 1024（应无效）",           @1, @1024, @"16.5.1 已修复"],
-        @[@"physpuppet · 2048（应无效）",      @0, @2048, @"16.4 已修复"],
-    ];
-    for (NSArray *t in tiers) {
-        NSString *title = [NSString stringWithFormat:@"%@ — %@", t[0], t[3]];
-        [a addAction:[UIAlertAction actionWithTitle:title
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *_) {
-            [[NSUserDefaults standardUserDefaults] setInteger:[t[1] integerValue] forKey:@"mf.kfd.puafMethod"];
-            [self reallyStartKernelWithPages:(uint64_t)[t[2] unsignedIntegerValue]];
-        }]];
-    }
-    [self presentViewController:a animated:YES completion:nil];
+    [self reallyStartKernelWithPages:pages];
 }
 
 - (void)reallyStartKernelWithPages:(uint64_t)pages {

@@ -48,18 +48,44 @@ extern "C" {
 #define MF_KWRITE_SEM_OPEN             1
 
 /*
- * 目标机 iPad Pro M2 (T8112) / iPadOS 16.6.1 的推荐参数：
- *   puaf_landa + kread_sem_open + kwrite_sem_open
- * 依据：physpuppet 在 16.4 修复、smith 在 16.5.1 修复，16.6.1 只剩 landa；
- *       kread_sem_open 必须与 kwrite_sem_open 成对（krkw.h 里有 assert 拦截）。
+ * 目标机默认参数：
+ *   landa + kread_sem_open + kwrite_sem_open，3072 页
+ *
+ * 依据：
+ *   · physpuppet 修复于 iOS 16.4、smith 修复于 iOS 16.5.1
+ *     → 16.6.1 上只剩 landa（CVE-2023-41974，修复于 17.0）
+ *   · kread_sem_open 必须与 kwrite_sem_open 成对（krkw.h 里有 assert 拦截）
+ *   · 3072 页来自 Dopamine：它对 ≥5GB 设备的原话是
+ *     "remarkably more reliable with 3072"
  */
-#define MF_DEFAULT_PUAF_PAGES          2048
+#define MF_DEFAULT_PUAF_PAGES          3072
 #define MF_DEFAULT_PUAF_METHOD         MF_PUAF_LANDA
 #define MF_DEFAULT_KREAD_METHOD        MF_KREAD_SEM_OPEN
 #define MF_DEFAULT_KWRITE_METHOD       MF_KWRITE_SEM_OPEN
 
+/*
+ * ★ [M5.14] 上下限 —— 上限从 2048 改成 3072，原因是 Dopamine。
+ *
+ * 三个来源的 kopen 边界对照（都是 const u64）：
+ *     上游 felix-pb/kfd : min = 16, max = 2048
+ *     Dopamine          : min = 16, max = 3072   ← ★ 它自己改大了
+ *     我们（改前）       : min = 16, max = 2048
+ *
+ * Dopamine 的 exploit_init 原文：
+ *     if (device_memory >= 5GB) {
+ *         // These devices are remarkably more reliable with 3072
+ *         puaf_pages = 3072;
+ *     }
+ * 它要用 3072，所以【把 kfd 自己的上限也抬到 3072】。
+ * 上游的 2048 不允许 3072 —— 这就是上次
+ *     "bad puaf_pages: 3072 (valid range 16..2048)"
+ * 的来源。
+ *
+ * ⚠️ 本文件的上限必须与 libkfd.h 里 kopen 的 puaf_pages_max 一致。
+ *    预检规则 check_puaf_limit_consistency() 会盯着这条不变量。
+ */
 #define MF_PUAF_PAGES_MIN              16
-#define MF_PUAF_PAGES_MAX              2048
+#define MF_PUAF_PAGES_MAX              3072
 
 /* ------------------------------------------------------------------ */
 /* 生命周期                                                            */

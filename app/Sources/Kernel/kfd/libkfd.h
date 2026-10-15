@@ -229,8 +229,21 @@ u64 kopen(u64 puaf_pages, u64 puaf_method, u64 kread_method, u64 kwrite_method)
     
     timer_start();
 
+    /*
+     * [MF PATCH 12] 上限 2048 → 3072
+     *
+     * 三处对照（都是 const u64）：
+     *     上游 felix-pb/kfd : puaf_pages_max = 2048
+     *     Dopamine          : puaf_pages_max = 3072   ← ★ 它自己改大了
+     *     我们（改前）       : puaf_pages_max = 2048
+     *
+     * Dopamine 对 6GB 设备明确要 3072（原话 "remarkably more reliable with 3072"），
+     * 所以它必须把上限抬高。本机 iPad8,11 = 6GB，走的正是这条。
+     *
+     * 必须与 MFKernelBridge.h 的 MF_PUAF_PAGES_MAX 一致。
+     */
     const u64 puaf_pages_min = 16;
-    const u64 puaf_pages_max = 2048;
+    const u64 puaf_pages_max = 3072;
     assert(puaf_pages >= puaf_pages_min);
     assert(puaf_pages <= puaf_pages_max);
     assert(puaf_method <= puaf_landa);
