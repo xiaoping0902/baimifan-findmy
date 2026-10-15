@@ -1134,6 +1134,16 @@ def check_system_symbol_headers():
         "vm_region_64":        "mach/vm_region.h",
         "arc4random_uniform":  "stdlib.h",
         "uname":               "sys/utsname.h",
+        # 构建 #54 实际踩过：_NSGetExecutablePath 缺 <mach-o/dyld.h>
+        "_NSGetExecutablePath": "mach-o/dyld.h",
+        "NSGetExecutablePath":  "mach-o/dyld.h",
+        "_dyld_get_image_header": "mach-o/dyld.h",
+        "dladdr":               "dlfcn.h",
+        "pipe":                 "unistd.h",
+        "fork":                 "unistd.h",
+        "calloc":               "stdlib.h",
+        "strdup":               "string.h",
+        "strstr":               "string.h",
     }
     # 这些头通常会被一并引入，出现即认为满足
     COMMON = ("UIKit/UIKit.h", "Foundation/Foundation.h", "mach/mach.h")

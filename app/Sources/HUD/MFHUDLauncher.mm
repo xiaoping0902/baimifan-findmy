@@ -9,8 +9,10 @@
 #import <sys/types.h>     // uid_t / gid_t（persona 私有 API 的参数类型）
 #import <sys/wait.h>
 #import <unistd.h>
+#import <mach-o/dyld.h>    // _NSGetExecutablePath（root 助手取自己的路径）
 #include <errno.h>
 #include <string.h>
+#include <stdlib.h>      // calloc / free（root 助手拼 argv）
 
 /*
  * libproc.h 在 iOS 公开 SDK 里不存在（构建 #12 踩过），自己声明。
