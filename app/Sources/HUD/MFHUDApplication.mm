@@ -4,8 +4,10 @@
 
 #import <objc/message.h>
 #import <objc/runtime.h>
-#import <dlfcn.h>
 #import <objc/objc.h>
+#import <string.h>       // strstr（勘探那块用）
+#import <stdlib.h>       // malloc / free
+#import <dlfcn.h>        // dlsym
 
 /*
  * ══════════════════════════════════════════════════════════════════
@@ -78,6 +80,105 @@ void MFMarkWindowSystemSecure(UIWindow *w) {
     }
     MFHUDLogLine(@"  窗口标记：应用了 %d 个私有标记（共试 %lu 个）",
                  applied, (unsigned long)(sizeof(marks)/sizeof(marks[0])));
+}
+
+#pragma mark - 运行时 API 勘探
+
+/*
+ * ★★★ [M5.20] 直接从设备 dump UIWindow / CAContext 的真实私有 API ★★★
+ *
+ * 为什么需要这个：
+ *   M5.19 的日志显示——
+ *       窗口标记：应用了 1 个私有标记（共试 8 个）
+ *       ⚠️ 没有可用的 _isWindowServerHostingManaged setter（试过 2 个名字）
+ *   也就是说：我猜的 setter 名字 8 个里只有 1 个存在。
+ *   继续猜下去没意义 —— 让运行时把真实名字报出来。
+ *
+ * 这里把三类东西的完整方法列表写进日志：
+ *   ① UIWindow 上所有含 context / system / secure / hosting / scene 的方法
+ *   ② 所有类名含 CAContext 的类，以及它的全部方法
+ *   ③ 所有含 accessibility window hosting 的类（找托管接口）
+ *
+ * 拿到清单后就能精确调用，不用再猜。
+ */
+static void MFDumpMethodsOfClass(Class cls, NSString *label, NSArray<NSString *> *mustContainAny) {
+    if (cls == nil) {
+        MFHUDLogLine(@"  [%@] 类不存在", label);
+        return;
+    }
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(cls, &n);   // 含私有
+    NSMutableArray<NSString *> *hit = [NSMutableArray array];
+    for (unsigned int i = 0; i < n; i++) {
+        NSString *name = NSStringFromSelector(method_getName(ms[i]));
+        if (mustContainAny.count == 0) { [hit addObject:name]; continue; }
+        for (NSString *kw in mustContainAny) {
+            if ([name rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [hit addObject:name];
+                break;
+            }
+        }
+    }
+    if (ms) free(ms);
+
+    MFHUDLogLine(@"  [%@] 共 %u 个方法，命中 %lu 个：",
+                 label, n, (unsigned long)hit.count);
+    for (NSString *s in [hit sortedArrayUsingSelector:@selector(compare:)]) {
+        MFHUDLogLine(@"      - %@", s);
+    }
+}
+
+void MFDumpWindowAPI(void) {
+    MFHUDLogLine(@"======== 运行时 API 勘探 ========");
+
+    // ① UIWindow 的关键方法
+    MFDumpMethodsOfClass([UIWindow class], @"UIWindow",
+        @[@"context", @"system", @"secure", @"hosting", @"scene", @"sceneSession",
+          @"display", @"server", @"portal"]);
+
+    // ② UIApplication 的 scene 相关
+    MFDumpMethodsOfClass([UIApplication class], @"UIApplication",
+        @[@"scene", @"window", @"context", @"idle", @"run"]);
+
+    // ③ 找 CAContext 及其方法
+    int ncls = objc_getClassList(NULL, 0);
+    if (ncls > 0) {
+        Class *all = (Class *)malloc(sizeof(Class) * ncls);
+        if (all) {
+            objc_getClassList(all, ncls);
+            for (int i = 0; i < ncls; i++) {
+                const char *nm = class_getName(all[i]);
+                if (nm == NULL) continue;
+                if (strstr(nm, "CAContext") != NULL) {
+                    MFDumpMethodsOfClass(all[i],
+                        [NSString stringWithFormat:@"%s", nm], @[]);
+                }
+            }
+            free(all);
+        }
+    }
+
+    // ④ 找托管相关类（accessibility window hosting）
+    ncls = objc_getClassList(NULL, 0);
+    if (ncls > 0) {
+        Class *all = (Class *)malloc(sizeof(Class) * ncls);
+        if (all) {
+            objc_getClassList(all, ncls);
+            for (int i = 0; i < ncls; i++) {
+                const char *nm = class_getName(all[i]);
+                if (nm == NULL) continue;
+                if (strstr(nm, "AccessibilityWindowHosting") != NULL ||
+                    strstr(nm, "WindowHosting") != NULL) {
+                    MFDumpMethodsOfClass(all[i],
+                        [NSString stringWithFormat:@"%s", nm],
+                        @[@"register", @"host", @"window", @"context", @"enable"]);
+                }
+            }
+            free(all);
+        }
+    }
+
+    MFHUDLogLine(@"======== 勘探结束 ========");
 }
 
 #pragma mark - HUD 引导

@@ -41,6 +41,14 @@ NS_ASSUME_NONNULL_BEGIN
 int MFLaunchHUDRole(int argc, char *argv[]);
 
 /*
+ * [M5.20] 把 UIWindow / CAContext / 托管类的真实私有方法名 dump 进日志。
+ *
+ * 起因：M5.19 日志显示我猜的 8 个 setter 里只有 1 个存在，
+ * 说明名字猜错了。继续猜没意义，让运行时自己报出来。
+ */
+void MFDumpWindowAPI(void);
+
+/*
  * 给窗口打上「系统窗口 / 安全窗口」标记。
  *
  * 白米饭的 Info.plist 里有这两个键：

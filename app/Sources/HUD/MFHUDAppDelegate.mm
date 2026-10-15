@@ -278,6 +278,9 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
                      (unsigned long)UIApplication.sharedApplication.windows.count);
         MFHUDLogLine(@"keyWindow = %@", UIApplication.sharedApplication.keyWindow ? @"有" : @"nil");
 
+        // ★ [M5.20] 把私有 API 的真实名字 dump 出来（不再靠猜）
+        MFDumpWindowAPI();
+
         for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
                                self.drawingWindow ?: (id)[NSNull null] ]) {
             if (![w isKindOfClass:[UIWindow class]]) continue;
