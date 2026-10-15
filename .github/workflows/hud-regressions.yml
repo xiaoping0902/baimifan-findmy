@@ -40,7 +40,7 @@ jobs:
         if: ${{ always() && matrix.suite == 'menu' }}
         with:
           name: hud-menu-preview
-          path: test-results/menu.png
+          path: test-results/menu*
           if-no-files-found: ignore
   overlay-baseline:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_renderer }}

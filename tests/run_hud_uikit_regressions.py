@@ -113,8 +113,11 @@ def main():
             output = container / "Documents" / "hud-regression-result.txt"
             output.parent.mkdir(parents=True, exist_ok=True)
             output.unlink(missing_ok=True)
+            screenshot_ack = output.with_name("hud-regression-screenshot-done")
+            screenshot_ack.unlink(missing_ok=True)
             environment = os.environ.copy()
             environment["SIMCTL_CHILD_MF_REGRESSION_OUTPUT"] = str(output)
+            environment["SIMCTL_CHILD_MF_REGRESSION_SCREENSHOT_ACK"] = str(screenshot_ack)
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
                       "game-reader": "PASS: production game reader"}[args.suite]
@@ -135,7 +138,13 @@ def main():
                         if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
                             destination = ROOT / "test-results/menu.png"
                             destination.parent.mkdir(exist_ok=True)
+                            destination.unlink(missing_ok=True)
                             run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=30)
+                            png = destination.read_bytes()
+                            if not (png.startswith(b"\x89PNG\r\n\x1a\n") and
+                                    png.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")):
+                                raise RuntimeError("The menu screenshot is not a complete PNG")
+                            screenshot_ack.touch()
                             menu_captured = True
                         terminal_failure = "FAIL:" in report
                         if args.suite == "overlay":
@@ -147,6 +156,14 @@ def main():
                             break
                         time.sleep(0.25)
                 finally:
+                    # Preserve fixture output even when a simulator utility
+                    # fails; otherwise a screenshot timeout hides its results.
+                    report = output.read_text(errors="replace") if output.exists() else report
+                    print(report or "No test result was written; test execution is unconfirmed.", flush=True)
+                    if args.suite == "menu":
+                        result_dir = ROOT / "test-results"
+                        result_dir.mkdir(exist_ok=True)
+                        (result_dir / "menu-result.txt").write_text(report)
                     if launcher.poll() is None:
                         launcher.terminate()
                         try:
@@ -155,7 +172,6 @@ def main():
                             launcher.kill()
                             launcher.wait(timeout=5)
             print(launch_log.read_text(errors="replace"), end="", flush=True)
-            print(report or "No test result was written; test execution is unconfirmed.", flush=True)
             if marker not in report or "FAIL:" in report:
                 raise SystemExit("UIKit window regression failed")
     finally:

@@ -59,6 +59,7 @@ static void TestProductionMenuLayout(void) {
 static UIWindow *sPreviewWindow;
 static MFOverlayView *sPreviewOverlay;
 static MFMenuUI *sPreviewMenu;
+static BOOL sPreviewFinished;
 static void PreviewProductionMenu(void) {
     sPreviewWindow = [[UIWindow alloc] initWithFrame:CGRectMake(16, 90, 348, 520)];
     sPreviewWindow.rootViewController = [UIViewController new];
@@ -73,11 +74,21 @@ static void PreviewProductionMenu(void) {
     [sPreviewWindow layoutIfNeeded]; [sPreviewOverlay layoutIfNeeded];
     sPreviewOverlay.firstFrameCompletion = ^(NSString *error) {
         CHECK(error == nil, "the production menu must complete a real GPU frame");
+        const char *ackPath = getenv("MF_REGRESSION_SCREENSHOT_ACK");
+        CHECK(ackPath && *ackPath, "the menu preview requires a screenshot acknowledgement path");
+        NSString *acknowledgement = [NSString stringWithUTF8String:ackPath];
         puts("READY: menu screenshot"); fflush(stdout);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        // Keep the Metal surface alive until simctl has actually saved its
+        // screenshot. A fixed eight-second lifetime raced slow CI captures.
+        [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
+            if (![[NSFileManager defaultManager] fileExistsAtPath:acknowledgement]) return;
+            [timer invalidate]; sPreviewFinished = YES;
             [sPreviewOverlay stopRendering]; sPreviewWindow.hidden = YES;
             puts("PASS: production menu layout, clipping, collapse and Metal preview"); fflush(stdout);
             exit(0);
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            CHECK(sPreviewFinished, "the menu screenshot must be acknowledged before its deadline");
         });
     };
     NSString *error = nil;
