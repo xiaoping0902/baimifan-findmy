@@ -11,6 +11,7 @@
 #import "../Features/MFCleanup.h"
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
+#import "../Features/MFEnvCheck.h"
 #import "../HUD/MFHUDLauncher.h"
 #import "../HUD/MFHUDLog.h"
 #import "MFDebugExport.h"
@@ -136,6 +137,7 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"启动悬浮窗" detail:@"M2" action:@"actStartHUD"]];
     [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
     [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media，电脑一条命令拉走" action:@"actExportDiagnostics"]];
+    [s1.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒/权限/fd/越狱/内核链 一次性体检" action:@"actEnvCheck"]];
     [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
     [secs addObject:s1];
 
@@ -346,6 +348,31 @@ extern char **environ;
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+#pragma mark 环境检测
+
+/// 对照原版「高级设置 → 环境检测」。
+/// 把「为什么某个功能不好使」的原因一次性列出来 —— 装机后第一件事就该跑它。
+- (void)actEnvCheck {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *rep = [[MFEnvCheck shared] report];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"环境检测"
+                                 message:rep
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制报告"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = rep;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 #pragma mark 导出诊断

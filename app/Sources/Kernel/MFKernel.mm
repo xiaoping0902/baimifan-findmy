@@ -606,6 +606,11 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
 
 #pragma mark - 诊断
 
++ (NSString *)kernelVersion {
+    const char *v = mf_kernel_version();
+    return (v != NULL && v[0] != '\0') ? [NSString stringWithUTF8String:v] : @"";
+}
+
 + (NSString *)kernelLog {
     char *raw = mf_read_klog();
     if (raw == NULL) {

@@ -15,6 +15,14 @@ static BOOL gDrawEnabled = YES;
 
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
+- (void)readHumanFields:(MFEntity *)e reader:(MFReadBackend *)rb profile:(MFGameProfile *)p;
+- (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
+               drawList:(ImDrawList *)dl
+               settings:(MFSettings *)st
+                 screen:(ImVec2)screen;
+- (void)drawSkeleton:(MFEntity *)e drawList:(ImDrawList *)dl
+            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt;
+- (ImVec2)smoothPoint:(ImVec2)raw address:(uint64_t)addr settings:(MFSettings *)st;
 @end
 
 /// UIKit 颜色 → ImU32（ImGui 的 ABGR 打包格式）
@@ -31,11 +39,39 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
     return IM_COL32((int)(r * 255), (int)(g * 255), (int)(b * 255), alpha);
 }
 
+/* ── 字号支持（[M5.2] 接线）─────────────────────────────────────
+ * DrawList 的 AddText 有一个带 (font, size) 的重载 —— 用它就能逐条文本设字号，
+ * 不用 PushFont/PopFont，也不会影响 ImGui 的窗口字体栈。
+ * CalcTextSize 不接受字号，所以按 GetFontSize() 等比缩放算宽度。
+ */
+static float MFTextK(float size) {
+    float base = ImGui::GetFontSize();
+    return (base > 0.5f) ? (size / base) : 1.0f;
+}
+static ImVec2 MFTextSize(const char *s, float size) {
+    ImVec2 t = ImGui::CalcTextSize(s);
+    float k = MFTextK(size);
+    return ImVec2(t.x * k, t.y * k);
+}
+static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char *s) {
+    dl->AddText(ImGui::GetFont(), MAX(8.0f, size), pos, col, s);
+}
+
 @implementation MFDrawingLayer {
     MFGameReader *_reader;
     NSUInteger _entCount;
     NSUInteger _lootCount;
     BOOL _camOK;
+
+    /* ── 平滑绘制缓存（[M5.2]）──
+     * key = 实体地址，value = 上一帧的屏幕坐标（CGPoint —— NSValue 原生支持）。
+     * 打开「平滑绘制」时，新坐标按 lerp 追上去，视觉上不会一格一格跳。
+     * 只在 smoothAim 打开时使用；关掉时直接清空，避免残留旧位置。
+     */
+    NSMutableDictionary<NSNumber *, NSValue *> *_smoothCache;
+
+    /* ── 背敌计数（[M5.2]）── 供底部状态条显示 */
+    NSUInteger _backEnemyCount;
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -44,8 +80,30 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
 - (instancetype)init {
     if ((self = [super init])) {
         _reader = [MFGameReader shared];
+        _smoothCache = [NSMutableDictionary dictionary];
     }
     return self;
+}
+
+#pragma mark - 平滑坐标（[M5.2]）
+
+/// 打开时：新坐标向旧坐标插值追上去；关闭时：直接用新坐标并清缓存
+- (ImVec2)smoothPoint:(ImVec2)raw address:(uint64_t)addr settings:(MFSettings *)st {
+    if (!st.smoothAim) {
+        if (_smoothCache.count) [_smoothCache removeAllObjects];
+        return raw;
+    }
+    NSNumber *key = @(addr);
+    NSValue *old = _smoothCache[key];
+    ImVec2 out = raw;
+    if (old) {
+        CGPoint o = old.CGPointValue;
+        const float k = 0.45f;              // 追赶系数：越大越跟手，越小越平滑
+        out.x = (float)o.x + (raw.x - (float)o.x) * k;
+        out.y = (float)o.y + (raw.y - (float)o.y) * k;
+    }
+    _smoothCache[key] = [NSValue valueWithCGPoint:CGPointMake(out.x, out.y)];
+    return out;
 }
 
 - (NSUInteger)lastEntityCount { return _entCount; }
@@ -104,6 +162,13 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
         [self drawEntity:e drawList:dl settings:st screen:screen camera:cam];
     }
 
+    /* ── [M5.2] 背敌提示 ──
+     * 放在实体循环【之后】画，确保它盖在框上面。
+     * 它用 bearingDeg（只由坐标 + 相机 yaw 算得）判定，不依赖游戏字段，
+     * 所以偏移未校准也能工作。
+     */
+    [self drawBackEnemies:ents drawList:dl settings:st screen:screen];
+
     // ── 物资 ──
     if (st.showLoot || st.showBox) {
         for (MFEntity *e in loot) {
@@ -120,62 +185,135 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
 
 - (void)drawEntity:(MFEntity *)e drawList:(ImDrawList *)dl
           settings:(MFSettings *)st screen:(ImVec2)screen camera:(MFCamera)cam {
-    // 盒子尺寸：按距离缩放。公式是常规做法，真机可调
-    float h = 2200.0f / MAX(e.distanceMeters, 1.0f);   // 世界单位（厘米）→ 屏幕
+    /* ── [M5.2] 人机过滤 ──
+     * isBot 来自实体字段；未校准时恒 NO —— 所以「人机显示」关掉【不会】把所有人都隐藏，
+     * 只会隐藏真的判定为人机的那些。这是「未校准不画错」的关键。
+     */
+    if (e.isBot && !st.showBot) return;
+
+    /* ── [M5.2] 平滑坐标 ── */
+    ImVec2 pt = [self smoothPoint:ImVec2(e.screen.x, e.screen.y)
+                          address:e.address settings:st];
+
+    // 盒子尺寸：按距离缩放
+    float h = 2200.0f / MAX(e.distanceMeters, 1.0f);
     h = MIN(MAX(h, 8.0f), screen.y * 0.6f);
     float w = h * 0.45f;
-    ImVec2 p1(e.screen.x - w * 0.5f, e.screen.y - h);
-    ImVec2 p2(e.screen.x + w * 0.5f, e.screen.y);
+    ImVec2 p1(pt.x - w * 0.5f, pt.y - h);
+    ImVec2 p2(pt.x + w * 0.5f, pt.y);
 
-    ImU32 boxCol = MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.85f);
+    /* ── 主色：人机用「队伍色」提示、真人用「人物信息色」──
+     * 队伍颜色槽 [M5.2] 接线：编队模式下用队员色，未校准时 teamId=0 → 走人物信息色。
+     */
+    BOOL useTeamColor = st.showTeam && e.teamId != 0;
+    ImU32 boxCol = useTeamColor
+        ? MFU32([st colorForSlot:MFColorSlotTeam], 0.9f)
+        : MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.85f);
 
     // 框
-    if (st.showHealth || st.showName || st.showArmor) {
-        dl->AddRect(p1, p2, boxCol, 0.0f, 0, 1.5f);
-    }
+    dl->AddRect(p1, p2, boxCol, 0.0f, 0, 1.5f);
 
-    // 血条（左侧竖条）
+    /* ── 血条（[M5.2] 接线：三种样式 + 真实血量）──
+     * health < 0 = 未校准 → 按满格画（保持原占位行为，不显示假数据）
+     */
     if (st.showHealth) {
-        float bw = MAX(2.0f, w * 0.12f);
-        ImVec2 b1(p1.x - bw - 2.0f, p1.y);
-        ImVec2 b2(p1.x - 2.0f, p2.y);
-        dl->AddRectFilled(b1, b2, IM_COL32(0, 0, 0, 140), 1.0f);
-        // 血量数值未恢复来源 → 先画满格占位（真机校准后接实体字段）
-        dl->AddRectFilled(b1, b2, MFU32([UIColor systemGreenColor], 0.9f), 1.0f);
+        float ratio = (e.health >= kMFHealthMin && e.health <= kMFHealthMax)
+                    ? (e.health / 100.0f) : 1.0f;
+        ImU32 hpCol = MFU32(ratio > 0.5f ? [UIColor systemGreenColor]
+                                         : [UIColor systemRedColor], 0.92f);
+
+        switch (st.healthBarStyle) {
+            case 0: {   /* 细线：贴在框底的一根 2px 线 */
+                ImVec2 b1(p1.x, p2.y + 1.0f), b2(p2.x, p2.y + 3.0f);
+                dl->AddRectFilled(b1, b2, IM_COL32(0, 0, 0, 150));
+                dl->AddRectFilled(b1, ImVec2(b1.x + (b2.x - b1.x) * ratio, b2.y), hpCol);
+                break;
+            }
+            case 1: {   /* 圆头：左侧竖条 + 圆角 */
+                float bw = MAX(3.0f, w * 0.13f);
+                ImVec2 b1(p1.x - bw - 3.0f, p1.y), b2(p1.x - 3.0f, p2.y);
+                dl->AddRectFilled(b1, b2, IM_COL32(0, 0, 0, 150), bw * 0.5f);
+                ImVec2 f2(b2.x, b1.y + (b2.y - b1.y) * ratio);
+                dl->AddRectFilled(ImVec2(b1.x, f2.y), f2, hpCol, bw * 0.5f);
+                break;
+            }
+            default: {  /* 分段：6 格，一格一格的 */
+                const int segs = 6;
+                float bw = MAX(3.0f, w * 0.13f);
+                float gap = 1.5f;
+                float totalH = p2.y - p1.y;
+                float segH = (totalH - gap * (segs - 1)) / segs;
+                float x1 = p1.x - bw - 3.0f, x2 = p1.x - 3.0f;
+                dl->AddRectFilled(ImVec2(x1, p1.y), ImVec2(x2, p2.y),
+                                  IM_COL32(0, 0, 0, 150), 1.0f);
+                for (int i = 0; i < segs; i++) {
+                    // 从下往上填：血量越低，顶部格越少
+                    float segTop = p2.y - (i + 1) * segH - i * gap;
+                    float fillTop = segTop + segH * (1.0f - MIN(1.0f, MAX(0.0f, ratio * segs - i)));
+                    if (ratio * segs <= i) continue;
+                    dl->AddRectFilled(ImVec2(x1 + 1, fillTop), ImVec2(x2 - 1, segTop + segH),
+                                      hpCol, 1.0f);
+                }
+                break;
+            }
+        }
     }
 
-    // 名字
+    /* ── 名字（[M5.2] 用 fontPerson 字号）── */
     if (st.showName) {
-        const char *name = e.name.length ? e.name.UTF8String : "敌人";
-        ImVec2 ts = ImGui::CalcTextSize(name);
-        dl->AddText(ImVec2(e.screen.x - ts.x * 0.5f, p1.y - ts.y - 2.0f), boxCol, name);
+        const char *name = e.name.length ? e.name.UTF8String
+                          : (e.isBot ? "人机" : "敌人");
+        ImVec2 ts = MFTextSize(name, st.fontPerson);
+        MFText(dl, st.fontPerson,
+               ImVec2(pt.x - ts.x * 0.5f, p1.y - ts.y - 2.0f), boxCol, name);
     }
 
-    // 距离
+    /* ── 距离（[M5.2] 用 fontInfo 字号）── */
     if (st.showDistance) {
         char buf[32];
         snprintf(buf, sizeof(buf), "[%.0fm]", e.distanceMeters);
-        ImVec2 ts = ImGui::CalcTextSize(buf);
-        dl->AddText(ImVec2(e.screen.x - ts.x * 0.5f, p2.y + 1.0f), boxCol, buf);
+        ImVec2 ts = MFTextSize(buf, st.fontInfo);
+        MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, p2.y + 2.0f), boxCol, buf);
     }
 
-    // 头甲
+    /* ── 头甲（[M5.2] 用 fontArmor 字号 + Armor 颜色 + 真实等级）── */
     if (st.showArmor) {
-        ImVec2 ts = ImGui::CalcTextSize("头甲");
-        dl->AddText(ImVec2(p2.x + 3.0f, p1.y), MFU32([st colorForSlot:MFColorSlotArmor]), "头甲");
-        (void)ts;
+        char buf[24];
+        if (e.armorKnown) {
+            snprintf(buf, sizeof(buf), "%d", e.armorLevel);
+        } else {
+            snprintf(buf, sizeof(buf), "甲");
+        }
+        MFText(dl, st.fontArmor, ImVec2(p2.x + 4.0f, p1.y),
+               MFU32([st colorForSlot:MFColorSlotArmor]), buf);
     }
 
-    // 射线：从屏幕底部中点到目标
+    /* ── 队伍（[M5.2] 接线：显示队伍编号）── */
+    if (st.showTeam && e.teamId != 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "T%d", e.teamId);
+        MFText(dl, st.fontInfo, ImVec2(p1.x - 26.0f, p1.y),
+               MFU32([st colorForSlot:MFColorSlotTeam]), buf);
+    }
+
+    /* ── 手持（[M5.2] 接线：显示武器编号）── */
+    if (st.showHeld) {
+        char buf[24];
+        if (e.weaponId != 0) snprintf(buf, sizeof(buf), "W%d", e.weaponId);
+        else                 snprintf(buf, sizeof(buf), "持");
+        MFText(dl, st.fontInfo, ImVec2(p2.x + 4.0f, p2.y - st.fontInfo),
+               MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.85f), buf);
+    }
+
+    /* ── 射线 ── */
     if (st.showTracer) {
-        dl->AddLine(ImVec2(screen.x * 0.5f, screen.y),
-                    ImVec2(e.screen.x, e.screen.y),
+        dl->AddLine(ImVec2(screen.x * 0.5f, screen.y), ImVec2(pt.x, pt.y),
                     MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.6f), 1.5f);
     }
 
-    // 骨骼（无拓扑数据时用简化骨架：头-肩-胯）
-    if (st.showSkeleton) {
-        [self drawSkeleton:e drawList:dl settings:st camera:cam];
+    /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
+    if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
+        [self drawSkeleton:e drawList:dl settings:st camera:cam at:pt];
     }
 }
 
@@ -183,18 +321,18 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
 /// ⚠️ 分析明确标注「骨骼连线拓扑 + 骨骼矩阵来源」是【未证】项，
 ///    这里用「头-肩-胯」三点近似，真机拿到真实骨骼数组后替换本函数即可。
 - (void)drawSkeleton:(MFEntity *)e drawList:(ImDrawList *)dl
-            settings:(MFSettings *)st camera:(MFCamera)cam {
+            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt {
     float scale = 2200.0f / MAX(e.distanceMeters, 1.0f);
     ImU32 col = MFU32([st colorForSlot:MFColorSlotSkeleton], 0.9f);
     float th = MAX(1.0f, st.skeletonThickness);
 
-    ImVec2 head(e.screen.x, e.screen.y - scale);
-    ImVec2 neck(e.screen.x, e.screen.y - scale * 0.82f);
-    ImVec2 hip (e.screen.x, e.screen.y - scale * 0.45f);
-    ImVec2 lShoulder(e.screen.x - scale * 0.22f, e.screen.y - scale * 0.75f);
-    ImVec2 rShoulder(e.screen.x + scale * 0.22f, e.screen.y - scale * 0.75f);
-    ImVec2 lFoot(e.screen.x - scale * 0.14f, e.screen.y);
-    ImVec2 rFoot(e.screen.x + scale * 0.14f, e.screen.y);
+    ImVec2 head(pt.x, pt.y - scale);
+    ImVec2 neck(pt.x, pt.y - scale * 0.82f);
+    ImVec2 hip (pt.x, pt.y - scale * 0.45f);
+    ImVec2 lShoulder(pt.x - scale * 0.22f, pt.y - scale * 0.75f);
+    ImVec2 rShoulder(pt.x + scale * 0.22f, pt.y - scale * 0.75f);
+    ImVec2 lFoot(pt.x - scale * 0.14f, pt.y);
+    ImVec2 rFoot(pt.x + scale * 0.14f, pt.y);
 
     dl->AddLine(head, neck, col, th);
     dl->AddLine(lShoulder, rShoulder, col, th);
@@ -203,6 +341,75 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
     dl->AddLine(hip, rFoot, col, th);
     dl->AddLine(lShoulder, lFoot, col, th * 0.6f);
     dl->AddLine(rShoulder, rFoot, col, th * 0.6f);
+}
+
+#pragma mark - 背敌提示（[M5.2] 新增，原版有我们之前没实现）
+
+/*
+ * 画法：在屏幕中心画一个半径 = backEnemyRadius(px) 的环，
+ *       背后有敌人时，在对应方位角上打一个标记。
+ *
+ * 为什么用「屏幕中心 + 方位角」而不是直接画在敌人位置：
+ *   背后的敌人在屏幕上是【投影不出来的】（在相机后面），
+ *   所以必须用方位角映射到屏幕边缘的位置来表示方向 —— 这正是原版「背敌提示」的用途。
+ *
+ * 方位角来自 MFGameReader 的 bearingDeg，只由坐标 + 相机 yaw 算得，
+ * 【不依赖任何游戏字段】—— 所以校准之前就能工作。
+ */
+- (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
+               drawList:(ImDrawList *)dl
+               settings:(MFSettings *)st
+                 screen:(ImVec2)screen {
+    if (!st.backEnemyEnabled) return;
+
+    ImU32 col = MFU32([st colorForSlot:MFColorSlotBackEnemy], 0.95f);
+    ImVec2 c(screen.x * 0.5f, screen.y * 0.5f);
+    float R = MAX(40.0f, st.backEnemyRadius);     // 单位 px（对齐原版）
+
+    int n = 0;
+    for (MFEntity *e in ents) {
+        if (!e.isBehind) continue;
+        if (e.isBot && !st.showBot) continue;
+        n++;
+
+        /* bearingDeg: 0=前 负=左 正=右 ±180=后
+         * 映射到屏幕角度：-90°(左) → 左半屏；+90°(右) → 右半屏；180 → 正下
+         * 用「从上方开始顺时针」的屏坐标约定：
+         *   screenAngle = bearing - 90   （bearing=-90 → -180 左；+90 → 0 右；180 → 90 下）
+         */
+        float rad = (e.bearingDeg - 90.0f) * kMF_Deg2Rad;
+        ImVec2 p(c.x + cosf(rad) * R, c.y + sinf(rad) * R);
+
+        switch (st.backEnemyStyle) {
+            case MFBackEnemyStyleCircle:      /* 圆形：实心点 + 距离 */
+                dl->AddCircleFilled(p, 5.0f, col, 12);
+                break;
+            case MFBackEnemyStyleArrow: {     /* 箭头：从环上指向外侧 */
+                ImVec2 dir(cosf(rad), sinf(rad));
+                ImVec2 tip(p.x + dir.x * 11.0f, p.y + dir.y * 11.0f);
+                ImVec2 l(p.x - dir.y * 6.0f, p.y + dir.x * 6.0f);
+                ImVec2 r(p.x + dir.y * 6.0f, p.y - dir.x * 6.0f);
+                dl->AddTriangleFilled(tip, l, r, col);
+                break;
+            }
+            default:                          /* 圆环：空心圈 */
+                dl->AddCircle(p, 7.0f, col, 16, 2.0f);
+                break;
+        }
+
+        // 距离数字（背敌也要知道多远）
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%.0fm", e.distanceMeters);
+        ImVec2 ts = MFTextSize(buf, st.fontInfo * 0.85f);
+        MFText(dl, st.fontInfo * 0.85f,
+               ImVec2(p.x - ts.x * 0.5f, p.y + 9.0f), col, buf);
+    }
+
+    /* 有背敌时把环也画出来（没背敌就不画，免得挡视野）*/
+    if (n > 0 && st.backEnemyStyle != MFBackEnemyStyleCircle) {
+        dl->AddCircle(c, R, MFU32([st colorForSlot:MFColorSlotBackEnemy], 0.30f), 48, 1.0f);
+    }
+    _backEnemyCount = n;
 }
 
 #pragma mark - 物资
@@ -230,14 +437,15 @@ static ImU32 MFU32A(UIColor *c, int alpha) {
     ImU32 c = MFU32(col, 0.95f);
 
     // ③ 标签（已证格式串：%s\n等级[%d]\n价值[%d]\n[%.1fm]）
+    //    [M5.2] 接线：用「盒子字号」fontBox
     if (st.showLootName) {
         NSString *name = e.name.length ? e.name : @"物资";
         NSString *label = [NSString stringWithFormat:@"%@\n等级[%d]\n价值[%d]\n[%.1fm]",
                            name, e.level, e.value, e.distanceMeters];
-        // 首行居中、后续左对齐 —— 用多行文本一次性画
-        ImVec2 ts = ImGui::CalcTextSize(label.UTF8String);
-        dl->AddText(ImVec2(e.screen.x - ts.x * 0.5f, e.screen.y - ts.y),
-                    c, label.UTF8String);
+        const char *txt = label.UTF8String;
+        ImVec2 ts = MFTextSize(txt, st.fontBox);
+        MFText(dl, st.fontBox,
+               ImVec2(e.screen.x - ts.x * 0.5f, e.screen.y - ts.y), c, txt);
     } else if (st.showLoot) {
         dl->AddCircle(ImVec2(e.screen.x, e.screen.y), 4.0f, c, 12, 1.5f);
     }

@@ -51,6 +51,9 @@ typedef NS_ENUM(NSInteger, MFEnumRoute) {
 @property (nonatomic, readonly) uint64_t puafPages;
 @property (nonatomic, readonly) MFEnumRoute availableRoute;
 
+/// 内核编译串（kern.version）。环境检测用 —— 机型判定 / 越狱可用性都看它。
++ (NSString *)kernelVersion;
+
 #pragma mark 生命周期
 
 /// 启动内核链（在后台线程跑，completion 回主线程）

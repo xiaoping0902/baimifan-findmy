@@ -112,10 +112,63 @@
             e.screen = [[MFProjection shared] projectTarget:pos camera:camera screen:screen];
             e.isVisible = e.screen.valid;
 
+            /* ── [M5.2] 方位角 + 前后判定 ──
+             * 这一项【不依赖任何游戏字段】：只用坐标差 + 相机 yaw 就能算。
+             * 所以背敌提示在真机校准之前就能工作。
+             *   带符号：负 = 左 / 正 = 右 / 0 = 正前 / ±180 = 正后
+             */
+            {
+                float dx = pos[0] - camera.x;
+                float dy = pos[1] - camera.y;
+                float targetYaw = atan2f(dy, dx) / kMF_Deg2Rad;   // 度
+                float d = targetYaw - camera.yaw;
+                while (d >  180.0f) d -= 360.0f;
+                while (d < -180.0f) d += 360.0f;
+                e.bearingDeg = d;                                  // 保留符号
+                e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
+            }
+
+            /* ── [M5.2] 人物属性（偏移全为 0 时自动跳过，不会画错）── */
+            [self readHumanFields:e reader:rb profile:off.current];
+
             [out addObject:e];
         }
     }
     return out;
+}
+
+/// 读人物属性。所有偏移为 0 时直接返回 —— 保持「未校准不画错」的约束。
+- (void)readHumanFields:(MFEntity *)e reader:(MFReadBackend *)rb
+                profile:(MFGameProfile *)p {
+    e.isBot      = NO;
+    e.teamId     = 0;
+    e.weaponId   = 0;
+    e.health     = -1;          // -1 = 未知 → 绘制层按满格处理
+    e.armorLevel = 0;
+    e.armorKnown = NO;
+
+    if (!p) return;
+
+    if (p.entityIsBotOffset) {
+        int v = [rb readInt32:e.address + p.entityIsBotOffset];
+        e.isBot = (v != 0);
+    }
+    if (p.entityTeamOffset) {
+        int v = [rb readInt32:e.address + p.entityTeamOffset];
+        if (v >= 0 && v < 64) e.teamId = v;      // 明显越界就当中断读失败
+    }
+    if (p.entityWeaponOffset) {
+        int v = [rb readInt32:e.address + p.entityWeaponOffset];
+        if (v >= 0 && v < 4096) e.weaponId = v;
+    }
+    if (p.entityHealthOffset) {
+        int v = [rb readInt32:e.address + p.entityHealthOffset];
+        if (v >= kMFHealthMin && v <= kMFHealthMax) e.health = v;
+    }
+    if (p.entityArmorOffset) {
+        int v = [rb readInt32:e.address + p.entityArmorOffset];
+        if (v >= 0 && v <= 10) { e.armorLevel = v; e.armorKnown = YES; }
+    }
 }
 
 #pragma mark - ④ 物资

@@ -79,6 +79,31 @@ static const int kMFLootLevelMax = 6;
 static const uint32_t kMFLoot_Level  = 0x0;   // TODO: 真机校准
 static const uint32_t kMFLoot_Value  = 0x0;   // TODO: 真机校准
 
+#pragma mark - 人物属性字段（【未证】全部待真机校准）
+//
+//  [M5.2] 为了把菜单里那些「有开关没效果」的项接上，先定义位置。
+//  全部为 0 = 未校准，此时读取路径走「已知失败」分支：
+//    · isBot 恒 NO      → 「人机显示」不误判（所有人照常显示）
+//    · teamId 恒 0      → 所有目标同队，队伍颜色不影响
+//    · weaponId 恒 0    → 「手持」显示为未知
+//    · health = -1      → 血条按满格画（与原占位行为一致）
+//    · armorKnown = NO  → 头甲显示占位
+//  也就是说：未校准不会画错，只是开关暂时没效果；校准后自动生效。
+//  这条约束保证「接线」不会因为偏移是 0 而画出垃圾。
+
+static const uint32_t kMFEntityIsBot   = 0x0;   // TODO: 真机校准（人机标志）
+static const uint32_t kMFEntityTeam    = 0x0;   // TODO: 真机校准（队伍 ID）
+static const uint32_t kMFEntityWeapon  = 0x0;   // TODO: 真机校准（手持武器 ID）
+static const uint32_t kMFEntityHealth  = 0x0;   // TODO: 真机校准（血量 0..100）
+static const uint32_t kMFEntityArmor   = 0x0;   // TODO: 真机校准（头甲等级）
+
+/// 血量合法范围（超出即视为未校准/读错，不显示）
+static const int kMFHealthMin = 0;
+static const int kMFHealthMax = 100;
+
+/// 背敌判定阈值（度）：方位角超过它算「在背后」
+static const float kMFBehindAngleDeg = 90.0f;
+
 #pragma mark - 全局变量（已证地址，未加 ASLR slide 的静态地址）
 
 // 这些是白米饭主程序里的全局变量地址。复刻版没有同样的地址，
@@ -117,6 +142,14 @@ static const MFOriginalGlobals kMFOriginalGlobals = {
 @property (nonatomic, assign) uint32_t cameraPtrOffset;
 @property (nonatomic, assign) uint32_t lootLevelOffset;
 @property (nonatomic, assign) uint32_t lootValueOffset;
+
+/// 人物属性偏移（[M5.2] 接线用）—— 0 = 未校准。
+/// 未校准时读取路径走「已知失败」分支，不会画错东西（见上方 kMFEntity* 注释）
+@property (nonatomic, assign) uint32_t entityIsBotOffset;
+@property (nonatomic, assign) uint32_t entityTeamOffset;
+@property (nonatomic, assign) uint32_t entityWeaponOffset;
+@property (nonatomic, assign) uint32_t entityHealthOffset;
+@property (nonatomic, assign) uint32_t entityArmorOffset;
 /// 根指针链（已证：+0x98 → +0x30 → +0x408 → +0x3A0 → [dynBase]+0x10C0 → +0x108 → +0xF8）
 @property (nonatomic, strong) NSArray<NSNumber *> *rootChain;
 @end

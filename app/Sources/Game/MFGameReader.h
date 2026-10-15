@@ -29,6 +29,27 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL isLoot;
 @property (nonatomic, assign) BOOL isBox;
 @property (nonatomic, assign) BOOL isVisible;   // 投影成功
+
+#pragma mark 人物属性（[M5.2] 为「开关接线」新增）
+/// 人机标志。偏移未校准时恒为 NO —— 此时「人机显示」不会误判
+@property (nonatomic, assign) BOOL isBot;
+/// 队伍编号。0 = 未知（未校准）—— 此时所有目标同队，队伍颜色不影响显示
+@property (nonatomic, assign) int teamId;
+/// 手持武器编号。0 = 未知
+@property (nonatomic, assign) int weaponId;
+/// 血量 0..100。-1 = 未知（未校准）—— 此时按满格画，与原占位行为一致
+@property (nonatomic, assign) int health;
+/// 头甲等级 0=无甲
+@property (nonatomic, assign) int armorLevel;
+@property (nonatomic, assign) BOOL armorKnown;
+
+/// 相对相机朝向的方位角（度），**带符号**：
+///   0 = 正前 · 负 = 左 · 正 = 右 · ±180 = 正后
+/// ★ 由坐标 + 相机 yaw 算得，【不依赖任何游戏字段】——
+///   所以背敌提示在校准之前就能工作。
+@property (nonatomic, assign) float bearingDeg;
+/// 是否在背后（|bearingDeg| > 90）
+@property (nonatomic, assign) BOOL isBehind;
 @end
 
 @interface MFGameReader : NSObject

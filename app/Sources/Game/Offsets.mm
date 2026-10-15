@@ -13,6 +13,14 @@ static NSString *const kCalibrationFile = @"mf_offsets_calibrated.plist";
         _cameraPtrOffset      = kMFCameraPtrOffset;
         _lootLevelOffset      = kMFLoot_Level;
         _lootValueOffset      = kMFLoot_Value;
+        /* [M5.2] 人物属性字段 —— 全部为 0（未校准）。
+         * 为 0 时 MFGameReader 会走「已知失败」分支，不会画错东西；
+         * 真机校准时在这里或 UI 上填值。 */
+        _entityIsBotOffset    = kMFEntityIsBot;
+        _entityTeamOffset     = kMFEntityTeam;
+        _entityWeaponOffset   = kMFEntityWeapon;
+        _entityHealthOffset   = kMFEntityHealth;
+        _entityArmorOffset    = kMFEntityArmor;
         _rootChain = @[ @0x98, @0x30, @0x408, @0x3A0, @(0x10C0), @0x108, @0xF8 ];
     }
     return self;
@@ -96,6 +104,12 @@ static NSString *const kCalibrationFile = @"mf_offsets_calibrated.plist";
             @"cameraPtrOffset":      @(p.cameraPtrOffset),
             @"lootLevelOffset":      @(p.lootLevelOffset),
             @"lootValueOffset":      @(p.lootValueOffset),
+            /* [M5.2] 人物属性偏移也要落盘，否则校准完重启就丢 */
+            @"entityIsBotOffset":    @(p.entityIsBotOffset),
+            @"entityTeamOffset":     @(p.entityTeamOffset),
+            @"entityWeaponOffset":   @(p.entityWeaponOffset),
+            @"entityHealthOffset":   @(p.entityHealthOffset),
+            @"entityArmorOffset":    @(p.entityArmorOffset),
         };
     }
     return [d writeToFile:[self calibrationPath] atomically:YES];
@@ -118,6 +132,12 @@ static NSString *const kCalibrationFile = @"mf_offsets_calibrated.plist";
         if (e[@"cameraPtrOffset"])      p.cameraPtrOffset      = [e[@"cameraPtrOffset"] unsignedIntValue];
         if (e[@"lootLevelOffset"])      p.lootLevelOffset      = [e[@"lootLevelOffset"] unsignedIntValue];
         if (e[@"lootValueOffset"])      p.lootValueOffset      = [e[@"lootValueOffset"] unsignedIntValue];
+        /* [M5.2] */
+        if (e[@"entityIsBotOffset"])    p.entityIsBotOffset    = [e[@"entityIsBotOffset"] unsignedIntValue];
+        if (e[@"entityTeamOffset"])     p.entityTeamOffset     = [e[@"entityTeamOffset"] unsignedIntValue];
+        if (e[@"entityWeaponOffset"])   p.entityWeaponOffset   = [e[@"entityWeaponOffset"] unsignedIntValue];
+        if (e[@"entityHealthOffset"])   p.entityHealthOffset   = [e[@"entityHealthOffset"] unsignedIntValue];
+        if (e[@"entityArmorOffset"])    p.entityArmorOffset    = [e[@"entityArmorOffset"] unsignedIntValue];
     }
     NSLog(@"[MF][Offsets] 已加载真机校准");
     return YES;
