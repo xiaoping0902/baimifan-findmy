@@ -140,7 +140,7 @@ static void Send(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
 }
 static MFHUDInputBridge *NewBridge(UIWindow **windowOut, InputPanel **panelOut) {
     // Keep room for the title's 20pt drag on narrow iPhone simulators. Starting
-    // at x=50 already overflows their screen and correctly triggers clamping.
+    // at x=50 leaves too little room and correctly triggers clamping.
     CHECK(UIScreen.mainScreen.fixedCoordinateSpace.bounds.size.width >= 368,
           "the drag fixture needs at least 20pt of horizontal screen clearance");
     UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];

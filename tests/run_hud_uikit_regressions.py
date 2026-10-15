@@ -112,40 +112,61 @@ def main():
                                  bundle_id, "data", capture=True).stdout.strip())
             output = container / "Documents" / "hud-regression-result.txt"
             output.parent.mkdir(parents=True, exist_ok=True)
+            output.unlink(missing_ok=True)
             environment = os.environ.copy()
             environment["SIMCTL_CHILD_MF_REGRESSION_OUTPUT"] = str(output)
-            result = subprocess.run(["xcrun", "simctl", "launch",
-                                     "--terminate-running-process", device_id, bundle_id],
-                                    text=True, capture_output=True, timeout=60, env=environment)
-            print(result.stdout, end="", flush=True)
-            print(result.stderr, end="", flush=True)
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
                       "game-reader": "PASS: production game reader"}[args.suite]
             report = ""
             menu_captured = False
-            deadline = time.monotonic() + 120
-            while result.returncode == 0 and time.monotonic() < deadline:
-                report = output.read_text(errors="replace") if output.exists() else ""
-                if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
-                    destination = ROOT / "test-results/menu.png"
-                    destination.parent.mkdir(exist_ok=True)
-                    run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=30)
-                    menu_captured = True
-                terminal_failure = "FAIL:" in report
-                if args.suite == "overlay":
-                    terminal_failure = ("FAIL: production overlay" in report or
-                                        "FAIL: main queue must" in report)
-                if marker in report or terminal_failure:
-                    break
-                time.sleep(0.25)
+            launch_log = Path(directory) / "simctl-launch.log"
+            with launch_log.open("w") as launch_output:
+                # A short-lived UIKit fixture can finish before simctl's launch
+                # acknowledgement. Poll its fresh result file independently of
+                # that CLI; neither a launch return code nor a timeout is PASS.
+                launcher = subprocess.Popen(["xcrun", "simctl", "launch",
+                                              "--terminate-running-process", device_id, bundle_id],
+                                             stdout=launch_output, stderr=subprocess.STDOUT, env=environment)
+                try:
+                    deadline = time.monotonic() + 180
+                    while time.monotonic() < deadline:
+                        report = output.read_text(errors="replace") if output.exists() else ""
+                        if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
+                            destination = ROOT / "test-results/menu.png"
+                            destination.parent.mkdir(exist_ok=True)
+                            run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=30)
+                            menu_captured = True
+                        terminal_failure = "FAIL:" in report
+                        if args.suite == "overlay":
+                            terminal_failure = ("FAIL: production overlay" in report or
+                                                "FAIL: main queue must" in report)
+                        if marker in report or terminal_failure:
+                            break
+                        if launcher.poll() not in (None, 0) and not report:
+                            break
+                        time.sleep(0.25)
+                finally:
+                    if launcher.poll() is None:
+                        launcher.terminate()
+                        try:
+                            launcher.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            launcher.kill()
+                            launcher.wait(timeout=5)
+            print(launch_log.read_text(errors="replace"), end="", flush=True)
             print(report or "No test result was written; test execution is unconfirmed.", flush=True)
-            if result.returncode or marker not in report or "FAIL:" in report:
+            if marker not in report or "FAIL:" in report:
                 raise SystemExit("UIKit window regression failed")
     finally:
-        subprocess.run(["xcrun", "simctl", "uninstall", device_id, bundle_id], capture_output=True)
+        cleanup = [["xcrun", "simctl", "uninstall", device_id, bundle_id]]
         if booted_here:
-            subprocess.run(["xcrun", "simctl", "shutdown", device_id], capture_output=True)
+            cleanup.append(["xcrun", "simctl", "shutdown", device_id])
+        for command in cleanup:
+            try:
+                subprocess.run(command, capture_output=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                print("Simulator cleanup timed out: " + " ".join(command), flush=True)
 
 
 if __name__ == "__main__":
