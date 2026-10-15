@@ -19,6 +19,9 @@
 - (void)tick:(CADisplayLink *)link;
 // A category declaration keeps the RED suite linkable against the old API.
 - (BOOL)acceptsInteractionAtPoint:(CGPoint)point;
+- (void)invalidateRenderingGeneration;
+- (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
+                 size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits;
 @end
 
 static unsigned sFailures;
@@ -86,9 +89,24 @@ static void Expect(BOOL condition, const char *message) {
 @end
 
 @interface WaitingOverlay : MFOverlayView
+@property unsigned generationChanges;
+@property CFTimeInterval lastGenerationChange;
+@property CFTimeInterval firstRenderEntered, firstRenderReturned;
 @end
 @implementation WaitingOverlay
 + (Class)layerClass { return WaitingMetalLayer.class; }
+- (void)invalidateRenderingGeneration {
+    self.generationChanges++;
+    self.lastGenerationChange = CACurrentMediaTime();
+    [super invalidateRenderingGeneration];
+}
+- (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
+                 size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits {
+    BOOL first = self.firstRenderEntered == 0;
+    if (first) self.firstRenderEntered = CACurrentMediaTime();
+    [super renderDrawable:drawable generation:generation size:size scale:scale credits:credits];
+    if (first) self.firstRenderReturned = CACurrentMediaTime();
+}
 @end
 
 @interface FrameCounter : NSObject <MFOverlayViewDelegate>
@@ -270,9 +288,11 @@ static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t comple
     dispatch_semaphore_t firstFrame = dispatch_semaphore_create(0);
     __block unsigned firstFrameCallbacks = 0;
     __block NSString *firstFrameError;
+    __block CFTimeInterval firstFrameCallbackTime = 0;
     fixture.overlay.firstFrameCompletion = ^(NSString *error) {
         firstFrameCallbacks++;
         firstFrameError = error;
+        firstFrameCallbackTime = CACurrentMediaTime();
         dispatch_semaphore_signal(firstFrame);
     };
     [fixture start];
@@ -309,15 +329,33 @@ static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t comple
             Expect(!fixture.overlay.hasCompletedFrame,
                    "a discarded old drawable must not report first-frame readiness");
             Expect(firstFrameCallbacks == 0, "the first-frame observer must ignore a stopped generation");
+            unsigned generationsAtRelease = fixture.overlay.generationChanges;
+            CFTimeInterval released = CACurrentMediaTime();
             [layer releaseAll];
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 BOOL completed = dispatch_semaphore_wait(firstFrame,
                     dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
+                CFTimeInterval waitReturned = CACurrentMediaTime();
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    std::fprintf(stderr,
+                        "TRACE: restarted frame wait=%d callbacks=%u error=%s ready=%d builds=%u "
+                        "acquisitions=%u missing=%u generations=%u->%u "
+                        "wait_ms=%.0f main_ms=%.0f render_enter_ms=%.0f render_return_ms=%.0f "
+                        "callback_ms=%.0f last_generation_ms=%.0f\n",
+                        completed, firstFrameCallbacks, firstFrameError.UTF8String ?: "nil",
+                        fixture.overlay.hasCompletedFrame, fixture.counter.builds, layer.calls,
+                        layer.missingDrawables, generationsAtRelease, fixture.overlay.generationChanges,
+                        (waitReturned - released) * 1000, (CACurrentMediaTime() - released) * 1000,
+                        fixture.overlay.firstRenderEntered ? (fixture.overlay.firstRenderEntered - released) * 1000 : -1,
+                        fixture.overlay.firstRenderReturned ? (fixture.overlay.firstRenderReturned - released) * 1000 : -1,
+                        firstFrameCallbackTime ? (firstFrameCallbackTime - released) * 1000 : -1,
+                        (fixture.overlay.lastGenerationChange - released) * 1000);
+                    std::fflush(stderr);
                     Expect(fixture.counter.builds > 0, "the restarted renderer must resume with a fresh drawable");
-                    Expect(completed && firstFrameCallbacks == 1 && firstFrameError == nil &&
-                           fixture.overlay.hasCompletedFrame,
-                           "only the restarted generation's GPU completion may notify first-frame readiness");
+                    Expect(completed, "the restarted generation must notify first-frame readiness before its deadline");
+                    Expect(firstFrameCallbacks == 1, "the restarted generation must notify first-frame readiness exactly once");
+                    Expect(firstFrameError == nil, "the restarted generation's first GPU completion must succeed");
+                    Expect(fixture.overlay.hasCompletedFrame, "the restarted generation must retain first-frame readiness");
                     Expect(fixture.counter.offMainBuilds == 0, "restarted ImGui frames must remain on main");
                     [fixture dispose]; completion();
                 });
