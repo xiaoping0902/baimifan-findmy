@@ -2,7 +2,10 @@
 //  MFHUDAppDelegate.mm — HUD 角色（实现）
 //
 #import "MFHUDAppDelegate.h"
-#import "MFHUDApplication.h"   // [M5.18] MFMarkWindowSystemSecure
+#import "MFHUDApplication.h"
+#import "MFHUDWindowHost.h"
+#import "MFHUDStartupStatus.h"
+#include <unistd.h>
 #import "MFHUDLog.h"
 #import "MFMenuUI.h"
 #import "MFDrawingLayer.h"
@@ -56,145 +59,14 @@
 
 @end
 
-#pragma mark - 辅助窗口托管
-
-/*
- * ★★ [M5.17] 跨进程窗口托管的两条路 ★★
- *
- * 原版白米饭用的私有成员（已从二进制差分确认）：
- *     HUDMainApplication / _drawingHostingController /
- *     _isWindowServerHostingManaged / ToggleDrawingWindow
- *
- * `_isWindowServerHostingManaged` 是 UIWindow 的私有属性 ——
- * 它告诉 UIKit「这个窗口由 WindowServer 托管」，正是跨进程显示需要的。
- * 我们之前完全没设它，只调了 SBSAccessibilityWindowHostingController。
- *
- * 这里两条都试：
- *   ① set_isWindowServerHostingManaged:YES  ← 原版的机制
- *   ② registerWindowWithContextID:atLevel:  ← SpringBoard 托管
- * 任何一条成功，窗口就能进合成器。
- */
-static void MFMarkWindowServerHostingManaged(UIWindow *w) {
-    if (w == nil) return;
-    // 私有 setter 的名字在几个 iOS 版本间变过，逐个试
-    NSArray<NSString *> *setters = @[
-        @"set_isWindowServerHostingManaged:",
-        @"_setWindowServerHostingManaged:",
-    ];
-    for (NSString *name in setters) {
-        SEL s = sel_registerName(name.UTF8String);
-        if ([w respondsToSelector:s]) {
-            ((void (*)(id, SEL, BOOL))objc_msgSend)(w, s, YES);
-            MFHUDLogLine(@"  ✓ 已设置 %@ = YES", name);
-            return;
-        }
-    }
-    MFHUDLogLine(@"  ⚠️ 没有可用的 _isWindowServerHostingManaged setter（试过 %lu 个名字）",
-                 (unsigned long)setters.count);
-}
-
-/// 通过 SBSAccessibilityWindowHostingController 把窗口托管给 SpringBoard
-/// （跨 App 悬浮的关键；对应 entitlement: com.apple.springboard.accessibility-window-hosting）
-///
-/// [M5.17] ★ 每一步都写 MFHUDLogLine，不再用 NSLog。
-///   原因：原来失败时只 NSLog，而 NSLog 进 syslog 不进我们的日志文件 ——
-///   结果「托管失败」时我在文件里什么都看不到，只能看到一句笼统的结论。
-///   真机配过一次（pid 307 活着但窗口不出来），现场全空。
-static BOOL MFHostWindow(UIWindow *window, NSString *tag) {
-    if (window == nil) {
-        MFHUDLogLine(@"  MFHostWindow[%@]: 窗口为 nil，跳过", tag);
-        return NO;
-    }
-
-    // ① 先试原版那条路：标记成 WindowServer 托管
-    MFMarkWindowServerHostingManaged(window);
-
-    Class cls = NSClassFromString(@"SBSAccessibilityWindowHostingController");
-    MFHUDLogLine(@"  MFHostWindow: SBSAccessibilityWindowHostingController = %@",
-                 cls ? @"存在" : @"★ 不存在");
-    if (!cls) return NO;
-
-    id controller = ((id (*)(id, SEL))objc_msgSend)([cls alloc], sel_registerName("init"));
-    MFHUDLogLine(@"  MFHostWindow: controller alloc/init = %@", controller ? @"成功" : @"★ 失败");
-    if (!controller) return NO;
-
-    SEL regSel = sel_registerName("registerWindowWithContextID:atLevel:");
-    BOOL responds = [controller respondsToSelector:regSel];
-    MFHUDLogLine(@"  MFHostWindow: respondsToSelector(registerWindowWithContextID:atLevel:) = %d", responds);
-    if (!responds) return NO;
-
-    SEL ctxSel = sel_registerName("_contextId");
-    BOOL hasCtx = [window respondsToSelector:ctxSel];
-    MFHUDLogLine(@"  MFHostWindow[%@]: UIWindow 有 _contextId = %d", tag, hasCtx);
-
-    /*
-     * ★★★ [M5.25] 优先用【我们自己造的】context ID ★★★
-     *
-     * 原来读 window._contextId —— 没有 scene 时它恒为 0，
-     * 于是 registerWindowWithContextID:0 静默无效，窗口永远不显示。
-     *
-     * 但我们自己造出了有效 context（真机实测 CAContext.contextId = 0xf4adfeba）。
-     * 那就直接拿它去登记 —— 这才是正解。
-     * window._contextId 只作为回退（万一哪天绑成功了）。
-     */
-    uint32_t ctxId = MFContextIdForTag(tag);
-    if (ctxId != 0) {
-        MFHUDLogLine(@"  MFHostWindow[%@]: 用自造 context ID 0x%x（登记表）", tag, ctxId);
-    } else if (hasCtx) {
-        ctxId = ((uint32_t (*)(id, SEL))objc_msgSend)(window, ctxSel);
-        MFHUDLogLine(@"  MFHostWindow[%@]: 回退用 window._contextId = 0x%x", tag, ctxId);
-    }
-    MFHUDLogLine(@"  MFHostWindow[%@]: 最终 _contextId = 0x%x  level = %.0f",
-                 tag, ctxId, (double)window.windowLevel);
-
-    if (ctxId == 0) {
-        MFHUDLogLine(@"  ★★ _contextId == 0 —— registerWindowWithContextID:0 会静默无效");
-        MFHUDLogLine(@"     这是「窗口建了但没进合成器」的直接原因");
-        MFHUDLogLine(@"     上游原因：本进程没有 UIWindowScene → 没拿到 CAContext");
-        MFHUDLogLine(@"     （但 _isWindowServerHostingManaged 已设，可能已足够）");
-        return NO;
-    }
-
-    /*
-     * ★★★ [M5.22] 用 NSInvocation 调用 —— 对齐 TrollSpeed ★★★
-     *
-     * TrollSpeed 的 HUDMainApplicationDelegate：
-     *     NSMethodSignature *signature =
-     *         [NSMethodSignature signatureWithObjCTypes:"v@:Id"];
-     *     NSInvocation *invocation =
-     *         [NSInvocation invocationWithMethodSignature:signature];
-     *     [invocation setTarget:_windowHostingController];
-     *     [invocation setSelector:@selector(registerWindowWithContextID:atLevel:)];
-     *     [invocation setArgument:&_contextId atIndex:2];
-     *     [invocation setArgument:&windowLevel atIndex:3];
-     *     [invocation invoke];
-     *
-     * 真实签名（来自 TrollSpeed 的
-     * headers/SBSAccessibilityWindowHostingController.h）：
-     *     - (void)registerWindowWithContextID:(unsigned)arg1 atLevel:(double)arg2;
-     *
-     * "v@:Id" 里 I = unsigned int，d = double。
-     * 我们原来直接强转 uint32_t 调 —— 参数类型不匹配，
-     * 在 arm64 上 unsigned int 走的是 32 位寄存器路径，
-     * ABI 上可能被错位解释。用 NSInvocation 最稳。
-     */
-    {
-        unsigned int cid = (unsigned int)ctxId;
-        double lvl = (double)window.windowLevel;
-
-        NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:"v@:Id"];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:controller];
-        [inv setSelector:regSel];
-        [inv setArgument:&cid atIndex:2];
-        [inv setArgument:&lvl atIndex:3];
-        [inv invoke];
-        MFHUDLogLine(@"  ✓ 已用 NSInvocation 托管 contextId=%u level=%.0f", cid, lvl);
-    }
-    return YES;
-}
-
 #pragma mark - HUD 应用代理
+
+@interface MFHUDAppDelegate ()
+@property (nonatomic, strong) MFOverlayView *menuOverlay;
+@property (nonatomic, strong) MFOverlayView *drawingOverlay;
+@property (nonatomic, strong) NSMutableDictionary *startupReport;
+@property (nonatomic, copy) NSString *startupToken;
+@end
 
 @implementation MFHUDAppDelegate
 
@@ -203,7 +75,12 @@ static BOOL gIsHUD = NO;
 
 - (BOOL)application:(UIApplication *)app
 didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)opts {
+    if (gIsHUD) return YES;
     gIsHUD = YES;
+    self.startupToken = [MFHUDStartupStatus currentToken];
+    self.startupReport = [@{ @"pid": @(getpid()), @"token": self.startupToken ?: @"",
+                             @"state": @"starting" } mutableCopy];
+    [self publishStartupState:@"starting" error:nil];
     NSLog(@"[MF][HUD] didFinish，开始建立双窗口");
     MFHUDLogLine(@"==== HUD didFinishLaunching 进来了 ====");
 
@@ -256,18 +133,14 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 
     MFOverlayView *drawView = [[MFOverlayView alloc] initWithFrame:drawVC.view.bounds
                                                        interactive:NO];
+    drawView.automaticallyStartsRendering = NO;
+    self.drawingOverlay = drawView;
     drawView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     MFDrawingLayer *drawLayer = [[MFDrawingLayer alloc] init];
     drawLayer.overlay = drawView;
     drawView.delegate = drawLayer;
     self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
     [drawVC.view addSubview:drawView];
-    /*
-     * [M5.18] 打系统窗口 / 安全窗口标记 —— 必须在 makeKeyAndVisible 之前。
-     * 对照白米饭已证的窗口特性：
-     *     _isSystemWindow / _isSecure / _shouldCreateContextAsSecure 均为 1
-     */
-    MFMarkWindowSystemSecure(drawWin);
     drawWin.hidden = NO;
     [drawWin makeKeyAndVisible];
     self.drawingWindow = drawWin;
@@ -285,13 +158,14 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 
     MFOverlayView *menuView = [[MFOverlayView alloc] initWithFrame:menuVC.view.bounds
                                                        interactive:YES];
+    menuView.automaticallyStartsRendering = NO;
+    self.menuOverlay = menuView;
     menuView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     MFMenuUI *menu = [[MFMenuUI alloc] init];
     menu.overlay = menuView;
     menuView.delegate = menu;
     self.menuController = menu;              // 强引用保活（delegate 是 weak）
     [menuVC.view addSubview:menuView];
-    MFMarkWindowSystemSecure(menuWin);       // [M5.18] 同上，必须在 visible 之前
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
@@ -336,122 +210,122 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
                      NSStringFromCGRect(f));
     }
 
-    // ── ③ 启动渲染 ───────────────────────────────────
-    NSString *err = nil;
-    if (![drawView startRenderingWithError:&err]) {
-        NSLog(@"[MF][HUD] 绘制窗渲染启动失败: %@", err);
-    }
-    err = nil;
-    if (![menuView startRenderingWithError:&err]) {
-        NSLog(@"[MF][HUD] 菜单窗渲染启动失败: %@", err);
-    }
+    // Let UIKit finish initial window layout before reading its native context.
+    // Keep rendering stopped until both layer trees have been registered.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            [self.hudMenuWindow layoutIfNeeded];
+            [self.drawingWindow layoutIfNeeded];
+            [CATransaction flush];
+            MFHUDLogLine(@"---- 准备单一窗口 context 与托管 ----");
+            MFHUDLogLine(@"connectedScenes=%lu，menu bounds=%@，drawing bounds=%@",
+                         (unsigned long)app.connectedScenes.count,
+                         NSStringFromCGRect(menuView.bounds), NSStringFromCGRect(drawView.bounds));
+            Class contextClass = NSClassFromString(@"CAContext");
+            Class hostingClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
+            uint32_t nativeMenu = [self nativeContextIDForWindow:self.hudMenuWindow];
+            uint32_t nativeDrawing = [self nativeContextIDForWindow:self.drawingWindow];
+            self.menuHost = [[MFHUDWindowHost alloc] initWithLayer:self.hudMenuWindow.layer
+                nativeContextID:nativeMenu level:self.hudMenuWindow.windowLevel
+                contextClass:contextClass hostingClass:hostingClass];
+            self.drawingHost = [[MFHUDWindowHost alloc] initWithLayer:self.drawingWindow.layer
+                nativeContextID:nativeDrawing level:self.drawingWindow.windowLevel
+                contextClass:contextClass hostingClass:hostingClass];
+            NSString *error = nil;
+            if (![self.menuHost registerWithError:&error]) {
+                [self failStartup:[@"菜单窗口：" stringByAppendingString:error ?: @"托管失败"]];
+                return;
+            }
+            self.startupReport[@"menuContextID"] = @(self.menuHost.contextID);
+            self.startupReport[@"menuRegistered"] = @YES;
+            MFHUDLogLine(@"菜单注册已调用：context=0x%x source=%@ controller=%p",
+                         self.menuHost.contextID, nativeMenu ? @"UIKit" : @"remote layer",
+                         self.menuHost.hostingController);
+            if (![self.drawingHost registerWithError:&error]) {
+                [self failStartup:[@"绘制窗口：" stringByAppendingString:error ?: @"托管失败"]];
+                return;
+            }
+            self.startupReport[@"drawingContextID"] = @(self.drawingHost.contextID);
+            self.startupReport[@"drawingRegistered"] = @YES;
+            MFHUDLogLine(@"绘制注册已调用：context=0x%x source=%@ controller=%p",
+                         self.drawingHost.contextID, nativeDrawing ? @"UIKit" : @"remote layer",
+                         self.drawingHost.hostingController);
+            [CATransaction flush];
+            [self publishStartupState:@"waiting-for-frames" error:nil];
 
-    // ── ④ 交给系统托管（跨 App 悬浮）─────────────────
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        // ★ 托管前先把关键量落盘 —— 这是判断「窗口建了但没进合成器」的唯一证据
-        MFHUDLogLine(@"---- 托管前诊断 ----");
-        MFHUDLogLine(@"UIApplication.applicationState = %ld (0=Active 1=Inactive 2=Background)",
-                     (long)UIApplication.sharedApplication.applicationState);
-        MFHUDLogLine(@"UIScreen.bounds = %@", NSStringFromCGRect(UIScreen.mainScreen.bounds));
-
-        /*
-         * ★★ [M5.17] scene 诊断 —— 这是整个 HUD 问题的核心 ★★
-         *
-         * UIWindow 要进合成器，必须有一个 UIWindowScene，
-         * 而 scene 由 FrontBoard 在「前台 App 启动」时创建。
-         * posix_spawn 出来的子进程【不走 FrontBoard】，所以大概率一个 scene 都没有
-         * → UIWindow 挂不上 CAContext → _contextId = 0
-         * → registerWindowWithContextID:0 静默无效 → 窗口永远不显示。
-         */
-        {
-            NSSet<UIScene *> *scenes = UIApplication.sharedApplication.connectedScenes;
-            MFHUDLogLine(@"connectedScenes 数量 = %lu", (unsigned long)scenes.count);
-            int idx = 0;
-            for (UIScene *sc in scenes) {
-                MFHUDLogLine(@"  scene[%d]: %@  activationState=%ld",
-                             idx++, NSStringFromClass(sc.class), (long)sc.activationState);
-                if ([sc isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)sc;
-                    MFHUDLogLine(@"    是 UIWindowScene，windows 数 = %lu",
-                                 (unsigned long)ws.windows.count);
-                    for (UIWindow *w in ws.windows) {
-                        MFHUDLogLine(@"      - %@ level=%.0f hidden=%d",
-                                     NSStringFromClass(w.class), w.windowLevel, w.isHidden);
-                    }
+            __weak MFHUDAppDelegate *weakSelf = self;
+            menuView.firstFrameCompletion = ^(NSString *frameError) {
+                [weakSelf handleFirstFrame:@"menuFrame" error:frameError];
+            };
+            drawView.firstFrameCompletion = ^(NSString *frameError) {
+                [weakSelf handleFirstFrame:@"drawingFrame" error:frameError];
+            };
+            if (![menuView startRenderingWithError:&error] ||
+                ![drawView startRenderingWithError:&error]) {
+                [self failStartup:error ?: @"Metal/ImGui 初始化失败"];
+                return;
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                if (![self.startupReport[@"state"] isEqual:@"ready"] &&
+                    ![self.startupReport[@"state"] isEqual:@"failed"]) {
+                    [self failStartup:[NSString stringWithFormat:
+                        @"首帧等待超时：菜单=%@，绘制=%@。请查看 HUD 日志中的 drawable/Metal 记录。",
+                        self.startupReport[@"menuFrame"] ?: @NO,
+                        self.startupReport[@"drawingFrame"] ?: @NO]];
                 }
-            }
-            if (scenes.count == 0) {
-                MFHUDLogLine(@"  ★★ 一个 scene 都没有 = 本进程不是 FrontBoard 启动的前台 App");
-                MFHUDLogLine(@"     这就是 _contextId=0 的根因");
-            }
-        }
-
-        MFHUDLogLine(@"UIApplication.windows 数量 = %lu（含未挂 scene 的）",
-                     (unsigned long)UIApplication.sharedApplication.windows.count);
-        MFHUDLogLine(@"keyWindow = %@", UIApplication.sharedApplication.keyWindow ? @"有" : @"nil");
-
-        // ★ [M5.20] 把私有 API 的真实名字 dump 出来（不再靠猜）
-        MFDumpWindowAPI();
-
-        /*
-         * ★★★ [M5.21] 核心修复：没有 scene 就自己造 CAContext ★★★
-         *
-         * 勘探已证设备上有：
-         *     CAContext     - initWithOptions:localContext: / contextId / setLayer:
-         *     UIWindow      - _setBoundContext: / setKeepContextInBackground:
-         * 先自己建 context 并绑上，再去托管 —— 否则 _contextId=0，托管必然无效。
-         */
-        MFHUDLogLine(@"---- 自造 CAContext（核心修复）----");        /*
-         * [M5.24] context 存进属性，生命周期覆盖整个悬浮窗显示期
-         * （采纳另一位分析者建议：原来只放局部变量，函数返回就没，存在隐患）
-         */
-        self.menuContext    = MFAttachContextToWindow(self.hudMenuWindow, @"菜单");
-        self.drawingContext = MFAttachContextToWindow(self.drawingWindow, @"绘制");
-
-        /*
-         * [M5.25] 走登记表 —— 拿到自造 context 的真实 ID 并强引用保住
-         */
-        MFHUDLogLine(@"---- 登记自造 context ----");
-        uint32_t menuCid = MFPrepareContextForWindow(self.hudMenuWindow, @"菜单");
-        uint32_t drawCid = MFPrepareContextForWindow(self.drawingWindow, @"绘制");
-        MFHUDLogLine(@"---- 登记完成：菜单=0x%x 绘制=0x%x ----", menuCid, drawCid);
-
-        for (UIWindow *w in @[ self.hudMenuWindow ?: (id)[NSNull null],
-                               self.drawingWindow ?: (id)[NSNull null] ]) {
-            if (![w isKindOfClass:[UIWindow class]]) continue;
-            id ctx = [w valueForKey:@"_contextId"];
-            MFHUDLogLine(@"窗口 %@: level=%.0f hidden=%d windowScene=%@ _contextId=%@",
-                         (w == self.hudMenuWindow) ? @"菜单" : @"绘制",
-                         w.windowLevel, w.isHidden,
-                         w.windowScene ? @"有" : @"nil",
-                         ctx ? [NSString stringWithFormat:@"0x%x", [ctx unsignedIntValue]] : @"nil");
-        }
-
-        BOOL a = MFHostWindow(self.hudMenuWindow, @"菜单");
-        BOOL b = MFHostWindow(self.drawingWindow, @"绘制");
-        NSLog(@"[MF][HUD] 托管结果：菜单窗=%d 绘制窗=%d", a, b);
-        MFHUDLogLine(@"托管结果：菜单窗=%d 绘制窗=%d", a, b);
-
-        // 托管后再看一次 _contextId，能判断托管到底有没有生效
-        id ctxMenu = [self.hudMenuWindow valueForKey:@"_contextId"];
-        id ctxDraw = [self.drawingWindow valueForKey:@"_contextId"];
-        MFHUDLogLine(@"托管后 _contextId：菜单=%@ 绘制=%@",
-                     ctxMenu ? [NSString stringWithFormat:@"0x%x", [ctxMenu unsignedIntValue]] : @"nil",
-                     ctxDraw ? [NSString stringWithFormat:@"0x%x", [ctxDraw unsignedIntValue]] : @"nil");
-
-        if (!a && !b) {
-            NSLog(@"[MF][HUD] ⚠️ 两个窗口都托管失败 —— 检查 accessibility-window-hosting 权限是否生效");
-            MFHUDLogLine(@"⚠️ 两个窗口都托管失败");
-            MFHUDLogLine(@"最可能的原因（HUD 审查报告 §1 结论 1，概率 ~70%）：");
-            MFHUDLogLine(@"  子进程没有被 FrontBoard 承认为前台 App → 拿不到 UIWindowScene/CAContext");
-            MFHUDLogLine(@"  → _contextId 为 0 → registerWindowWithContextID:0 静默无效");
-            MFHUDLogLine(@"  原版靠 NSPrincipalClass=HUDMainApplication + 一整套 hosting 机制解决，");
-            MFHUDLogLine(@"  复刻版没有这一层（已用二进制差分证实）。");
+            });
+        } @catch (NSException *exception) {
+            [self failStartup:[NSString stringWithFormat:@"HUD 建窗异常：%@ / %@",
+                              exception.name, exception.reason ?: @""]];
         }
     });
 
     return YES;
+}
+
+- (uint32_t)nativeContextIDForWindow:(UIWindow *)window {
+    SEL selector = NSSelectorFromString(@"_contextId");
+    uint32_t contextID = 0;
+    if ([window respondsToSelector:selector])
+        contextID = ((uint32_t (*)(id, SEL))objc_msgSend)(window, selector);
+    SEL keep = NSSelectorFromString(@"setKeepContextInBackground:");
+    if ([window respondsToSelector:keep])
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(window, keep, YES);
+    return contextID;
+}
+
+- (void)publishStartupState:(NSString *)state error:(NSString *)error {
+    if ([self.startupReport[@"state"] isEqual:@"failed"] && ![state isEqual:@"failed"]) return;
+    self.startupReport[@"state"] = state;
+    if (error) self.startupReport[@"error"] = error;
+    MFHUDLogLine(@"HUD 状态=%@ %@", state, error ?: @"");
+    NSError *writeError = nil;
+    if (self.startupToken && ![MFHUDStartupStatus writeReport:self.startupReport
+                            token:self.startupToken error:&writeError]) {
+        MFHUDLogLine(@"启动状态写入失败：%@", writeError);
+    }
+}
+
+- (void)failStartup:(NSString *)error {
+    [self.menuOverlay stopRendering];
+    [self.drawingOverlay stopRendering];
+    [self publishStartupState:@"failed" error:error];
+}
+
+- (void)handleFirstFrame:(NSString *)key error:(NSString *)error {
+    if ([self.startupReport[@"state"] isEqual:@"failed"]) return;
+    if (error) { [self failStartup:[NSString stringWithFormat:@"%@：%@", key, error]]; return; }
+    self.startupReport[key] = @YES;
+    MFHUDLogLine(@"%@：GPU 首帧已完成", key);
+    BOOL complete = [self.startupReport[@"menuFrame"] boolValue] &&
+                    [self.startupReport[@"drawingFrame"] boolValue];
+    [self publishStartupState:complete ? @"ready" : @"waiting-for-frames" error:nil];
+    if (complete) {
+        MFHUDLogLine(@"两窗注册调用和 GPU 首帧已完成；屏幕可见性仍需真机观察");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{ [self.testColorView removeFromSuperview]; });
+    }
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sources=(tests/hud_regressions.mm)
-for source in app/Sources/HUD/MFHUDWindowHost.mm app/Sources/HUD/MFHUDStartupStatus.m; do
+for source in app/Sources/HUD/MFHUDWindowHost.mm app/Sources/HUD/MFHUDStartupStatus.mm; do
     if [[ -f "$source" ]]; then sources+=("$source"); fi
 done
 binary="$(mktemp -d)/hud-regressions"

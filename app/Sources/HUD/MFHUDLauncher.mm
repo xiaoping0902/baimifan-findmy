@@ -3,6 +3,7 @@
 //
 #import "MFHUDLauncher.h"
 #import "MFHUDLog.h"
+#import "MFHUDStartupStatus.h"
 #import <spawn.h>
 #import <signal.h>
 #import <sys/stat.h>
@@ -111,7 +112,7 @@ static BOOL MFPidAlive(pid_t p) {
     return [self hudPID] != 0;
 }
 
-+ (BOOL)startHUDWithError:(NSString **)err {
++ (BOOL)spawnHUDWithToken:(NSString *)token pid:(pid_t *)spawnedPID error:(NSString **)err {
     // 先清一次可能的僵尸/陈旧 PID
     (void)[self hudPID];
 
@@ -130,10 +131,8 @@ static BOOL MFPidAlive(pid_t p) {
     MFHUDLogLine(@"exe = %@", exe);
 
     const char *path = exe.fileSystemRepresentation;
-    char *argv[3];
-    argv[0] = (char *)path;
-    argv[1] = (char *)"-hud";
-    argv[2] = NULL;
+    char *argv[] = { (char *)path, (char *)"-hud", (char *)"-mf-session",
+                     (char *)token.UTF8String, NULL };
 
     /*
      * ══════════════════════════════════════════════════════════════
@@ -190,25 +189,67 @@ static BOOL MFPidAlive(pid_t p) {
                                              withIntermediateDirectories:YES
                                                               attributes:nil
                                                                    error:NULL];
-    [[NSString stringWithFormat:@"%d", pid] writeToFile:kPIDFile
-                                            atomically:YES
-                                              encoding:NSUTF8StringEncoding
-                                                 error:NULL];
-
-    // 给子进程一点启动时间，回头确认存活
-    usleep(400 * 1000);
-    if (!MFPidAlive(pid)) {
-        if (err) {
-            *err = [NSString stringWithFormat:
-                    @"HUD 进程启动后立即退出 (pid=%d)\n\n"
-                    @"内存诊断：去看「其他 → HUD 日志」页。", pid];
-        }
-        MFHUDLogLine(@"⚠️ 子进程启动后 400ms 内就没了（posix_spawn 成功但进程立刻退出）");
-        [[NSFileManager defaultManager] removeItemAtPath:kPIDFile error:NULL];
+    NSError *writeError = nil;
+    if (![[NSString stringWithFormat:@"%d", pid] writeToFile:kPIDFile atomically:YES
+                encoding:NSUTF8StringEncoding error:&writeError]) {
+        kill(pid, SIGTERM);
+        if (err) *err = [NSString stringWithFormat:@"无法保存 HUD PID：%@", writeError.localizedDescription];
         return NO;
     }
-    MFHUDLogLine(@"子进程 400ms 后仍存活");
+    if (spawnedPID) *spawnedPID = pid;
     return YES;
+}
+
++ (void)startHUDWithCompletion:(void (^)(BOOL, NSString *))completion {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("com.mf.hud.launch", DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            NSString *token = NSUUID.UUID.UUIDString;
+            NSString *error = nil;
+            NSError *writeError = nil;
+            pid_t pid = 0;
+            BOOL ready = NO;
+            // The parent creates the directory as mobile before the root child
+            // writes its reports. A UUID also prevents old PID/report reuse.
+            BOOL prepared = [MFHUDStartupStatus writeReport:@{ @"token": token, @"pid": @0,
+                                 @"state": @"starting" } token:token error:&writeError];
+            if (!prepared) {
+                error = [NSString stringWithFormat:@"无法创建 HUD 启动状态文件：%@",
+                         writeError.localizedDescription ?: @"目录不可写"];
+            } else if ([self spawnHUDWithToken:token pid:&pid error:&error]) {
+                NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 12.0;
+                while (NSProcessInfo.processInfo.systemUptime < deadline) {
+                    NSDictionary *report = [MFHUDStartupStatus readReportForToken:token];
+                    BOOL alive = MFPidAlive(pid);
+                    MFHUDStartupState state = [MFHUDStartupStatus stateForReport:report
+                                                 pid:pid token:token processAlive:alive];
+                    if (state == MFHUDStartupReady) { ready = YES; break; }
+                    if (state == MFHUDStartupFailed) {
+                        error = [report[@"error"] isKindOfClass:NSString.class] ? report[@"error"] : @"HUD 初始化失败";
+                        break;
+                    }
+                    if (state == MFHUDStartupExited) {
+                        error = [NSString stringWithFormat:@"HUD 在窗口就绪前退出（PID %d），请查看 HUD 日志。", pid];
+                        // Do not erase a replacement process's PID file.
+                        NSString *stored = [NSString stringWithContentsOfFile:kPIDFile
+                            encoding:NSUTF8StringEncoding error:NULL];
+                        if (stored.intValue == pid)
+                            [NSFileManager.defaultManager removeItemAtPath:kPIDFile error:NULL];
+                        break;
+                    }
+                    usleep(100 * 1000); // Worker queue only; the console stays responsive.
+                }
+                if (!ready && !error)
+                    error = @"HUD 启动超时：未收到两窗注册与 GPU 首帧回报。请查看 HUD 日志，可结束后重试。";
+            }
+            MFHUDLogLine(@"启动等待结果：pid=%d ready=%d %@", pid, ready, error ?: @"");
+            NSString *reportPath = [MFHUDStartupStatus reportPathForToken:token];
+            if (reportPath) [NSFileManager.defaultManager removeItemAtPath:reportPath error:NULL];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(ready, error); });
+        }
+    });
 }
 
 + (BOOL)stopHUDWithError:(NSString **)err {

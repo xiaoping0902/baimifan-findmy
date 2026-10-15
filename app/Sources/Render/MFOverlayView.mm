@@ -2,6 +2,7 @@
 //  MFOverlayView.mm — 透明 Metal 覆盖层（实现）
 //
 #import "MFOverlayView.h"
+#import "../HUD/MFHUDLog.h"
 #import <QuartzCore/CAMetalLayer.h>
 
 @implementation MFOverlayView {
@@ -11,6 +12,9 @@
     CGPoint _lastTwoFingerCenter;
     BOOL _twoFingerActive;
     BOOL _ready;
+    BOOL _firstFrameReported;
+    BOOL _firstFramePending;
+    BOOL _loggedMissingDrawable;
 }
 
 + (Class)layerClass {
@@ -25,6 +29,7 @@
     if ((self = [super initWithFrame:frame])) {
         _interactive = interactive;
         _preferredFPS = 60;
+        _automaticallyStartsRendering = YES;
         _captureRect = CGRectNull;
 
         self.backgroundColor = [UIColor clearColor];
@@ -41,6 +46,7 @@
         ml.framebufferOnly = YES;
         ml.opaque = NO;
         ml.backgroundColor = [UIColor clearColor].CGColor;
+        ml.allowsNextDrawableTimeout = YES;
         if (@available(iOS 16.0, *)) { /* drawableSize 在 layoutSubviews 里同步 */ }
 
         _imgui = [[MFImGuiContext alloc] initWithDevice:dev];
@@ -60,9 +66,9 @@
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [self layoutSubviews];
-    if (self.window) {
+    if (self.window && self.automaticallyStartsRendering) {
         [self startRenderingWithError:NULL];
-    } else {
+    } else if (!self.window) {
         [self stopRendering];
     }
 }
@@ -70,16 +76,17 @@
 #pragma mark - 渲染循环
 
 - (BOOL)startRenderingWithError:(NSString **)err {
-    if (_ready) return YES;
-
-    NSString *e = nil;
-    if (![self.imgui setupWithError:&e]) {
-        if (err) *err = e;
-        NSLog(@"[MF][Overlay] ImGui 初始化失败: %@", e);
-        return NO;
+    if (!_ready) {
+        NSString *e = nil;
+        if (![self.imgui setupWithError:&e]) {
+            if (err) *err = e;
+            MFHUDLogLine(@"ImGui 初始化失败: %@", e);
+            return NO;
+        }
+        _ready = YES;
     }
-    _ready = YES;
-
+    // ImGui readiness and display-link liveness are separate. A view that has
+    // left and rejoined its window must recreate the invalidated display link.
     if (_link) return YES;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
     _link.preferredFramesPerSecond = _preferredFPS;
@@ -94,6 +101,15 @@
     _link = nil;
 }
 
+- (void)reportFirstFrameError:(NSString *)error {
+    if (_firstFrameReported) return;
+    _firstFrameReported = YES;
+    _hasCompletedFrame = (error == nil);
+    void (^completion)(NSString *) = self.firstFrameCompletion;
+    self.firstFrameCompletion = nil;
+    if (completion) completion(error);
+}
+
 - (void)tick:(CADisplayLink *)link {
     if (self.paused || !self.window) return;
     if (!_ready) return;
@@ -104,7 +120,14 @@
 
     @autoreleasepool {
         id<CAMetalDrawable> drawable = [ml nextDrawable];
-        if (!drawable) return;
+        if (!drawable) {
+            if (!_loggedMissingDrawable) {
+                _loggedMissingDrawable = YES;
+                MFHUDLogLine(@"%@：nextDrawable 为 nil，等待窗口合成器（drawableSize=%@）",
+                             self.interactive ? @"菜单" : @"绘制", NSStringFromCGSize(ml.drawableSize));
+            }
+            return;
+        }
 
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = drawable.texture;
@@ -113,6 +136,11 @@
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 
         id<MTLCommandBuffer> cb = [self.imgui.queue commandBuffer];
+        if (!cb) {
+            [self reportFirstFrameError:@"Metal commandBuffer 创建失败"];
+            [self stopRendering];
+            return;
+        }
 
         CGFloat scale = self.window.screen.scale ?: UIScreen.mainScreen.scale ?: 2.0;
         [self.imgui beginFrameWithSize:self.bounds.size scale:scale descriptor:rp];
@@ -121,9 +149,25 @@
         }];
 
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        if (!enc) {
+            [self reportFirstFrameError:@"Metal renderCommandEncoder 创建失败"];
+            [self stopRendering];
+            return;
+        }
         [self.imgui endFrameWithCommandBuffer:cb encoder:enc];
         [enc endEncoding];
         [cb presentDrawable:drawable];
+        if (!_firstFrameReported && !_firstFramePending) {
+            _firstFramePending = YES;
+            __weak MFOverlayView *weakSelf = self;
+            [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+                NSString *error = completed.status == MTLCommandBufferStatusCompleted ? nil :
+                    (completed.error.localizedDescription ?: @"Metal 首帧执行失败");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf reportFirstFrameError:error];
+                });
+            }];
+        }
         [cb commit];
     }
 }

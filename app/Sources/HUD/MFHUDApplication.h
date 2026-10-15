@@ -48,49 +48,4 @@ int MFLaunchHUDRole(int argc, char *argv[]);
  */
 void MFDumpWindowAPI(void);
 
-/*
- * [M5.21] 给窗口自造并绑定一个 CAContext。返回绑好的 context；失败返回 nil。
- *
- * 真机勘探结论：posix_spawn 的子进程 connectedScenes = 0，
- * 没有 UIWindowScene 就拿不到 CAContext，_contextId 恒为 0，
- * registerWindowWithContextID:0 静默无效 —— 窗口永远不显示。
- *
- * 于是手动建一个 CAContext（设备上已证存在
- * initRemoteWithOptions: / initWithOptions:localContext: /
- * contextId / setLayer: / setSecure:），再用窗口的 _setBoundContext: 绑上去。
- *
- * [M5.24] 改为返回 id 并严格校验 contextId != 0：
- *   拿不到非 0 的 id 就返回 nil，调用方据此报错，不再继续往下走。
- */
-id MFAttachContextToWindow(UIWindow *window, NSString *tag);
-
-/*
- * [M5.25] 造 context + 绑窗口 + 登记，返回 contextId（0 = 失败）。
- *
- * 为什么要有登记表：
- *   MFHostWindow 原来读 window._contextId —— 没 scene 时恒为 0，
- *   托管永远拿 0 去登记，静默无效。
- *   但我们自己造出了有效 context（真机实测 0xf4adfeba），
- *   所以要把它记下来给托管步骤直接用。
- *
- * 同时解决 context 生命周期：登记表持有强引用，不会函数一返回就释放。
- */
-uint32_t MFPrepareContextForWindow(UIWindow *window, NSString *tag);
-id       MFContextForTag(NSString *tag);
-uint32_t MFContextIdForTag(NSString *tag);
-
-/*
- * 给窗口打上「系统窗口 / 安全窗口」标记。
- *
- * 白米饭的 Info.plist 里有这两个键：
- *     UIApplicationShowsViewsWhileLocked   = true
- *     UIApplicationSystemWindowsSecureKey  = true
- * 而分析报告已证它的两个窗口：
- *     DrawingWindow 的 _isSystemWindow / _isSecure / _shouldCreateContextAsSecure /
- *     _ignoresHitTest 均直接返回 1
- *
- * 对应到 UIWindow 上就是这几个私有 setter。跨 App 悬浮需要它们。
- */
-void MFMarkWindowSystemSecure(UIWindow *w);
-
 NS_ASSUME_NONNULL_END

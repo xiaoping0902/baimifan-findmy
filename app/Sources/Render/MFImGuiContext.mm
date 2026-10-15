@@ -25,6 +25,11 @@
 - (BOOL)setupWithError:(NSString **)err {
     if (_initialized) return YES;
 
+    if (!_device || !_queue) {
+        if (err) *err = @"Metal device 或 command queue 不可用";
+        return NO;
+    }
+
     // 1) 建上下文
     _ctx = ImGui::CreateContext();
     if (!_ctx) {
@@ -41,6 +46,8 @@
     // 2) Metal 后端
     if (!ImGui_ImplMetal_Init(_device)) {
         if (err) *err = @"ImGui_ImplMetal_Init 失败";
+        ImGui::DestroyContext(_ctx);
+        _ctx = NULL;
         return NO;
     }
 

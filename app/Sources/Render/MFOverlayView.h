@@ -35,6 +35,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 目标帧率（默认 60）
 @property (nonatomic, assign) NSInteger preferredFPS;
 
+/// HUD delays rendering until window hosting has been submitted.
+@property (nonatomic, assign) BOOL automaticallyStartsRendering;
+/// Main-thread callback after the first GPU completion, or an explicit error.
+@property (nonatomic, copy, nullable) void (^firstFrameCompletion)(NSString *_Nullable error);
+@property (nonatomic, assign, readonly) BOOL hasCompletedFrame;
+
 - (instancetype)initWithFrame:(CGRect)frame interactive:(BOOL)interactive;
 
 - (BOOL)startRenderingWithError:(NSString *_Nullable *_Nullable)err;

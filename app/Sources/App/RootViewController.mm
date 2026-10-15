@@ -62,6 +62,7 @@ extern char **environ;
 
 @interface RootViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, assign) BOOL hudStarting;
 @property (nonatomic, strong) NSMutableArray<MFSection *> *sections;
 @end
 
@@ -287,6 +288,7 @@ extern char **environ;
     [self alert:@"内核设置" message:msg];
 }
 - (void)actStartHUD {
+    if (self.hudStarting) return;
     if ([MFHUDLauncher isHUDRunning]) {
         UIAlertController *a = [UIAlertController
             alertControllerWithTitle:@"悬浮窗正在运行"
@@ -300,21 +302,22 @@ extern char **environ;
         return;
     }
 
-    NSString *err = nil;
-    if (![MFHUDLauncher startHUDWithError:&err]) {
-        [self alert:@"启动失败" message:[NSString stringWithFormat:
-            @"%@\n\n排查建议：\n"
-            @"1) 自检页里 /var/mobile 是否可读\n"
-            @"2) 控制台日志里找 [MF][HUDLaunch]", err ?: @"未知错误"]];
-        return;
-    }
-    [self alert:@"悬浮窗已启动"
-        message:[NSString stringWithFormat:
-                 @"HUD 进程 PID = %d\n\n"
-                 @"它会在 0.35 秒后把两个窗口托管给 SpringBoard。\n"
-                 @"若没看到悬浮菜单，去看设备日志里的 [MF][HUD] 行。",
-                 [MFHUDLauncher hudPID]]];
-    [self refreshStatus];
+    self.hudStarting = YES;
+    self.navigationItem.prompt = @"正在等待悬浮窗初始化与首帧…";
+    [MFHUDLauncher startHUDWithCompletion:^(BOOL ready, NSString *error) {
+        self.hudStarting = NO;
+        self.navigationItem.prompt = nil;
+        if (ready) {
+            [self alert:@"悬浮窗初始化完成" message:[NSString stringWithFormat:
+                @"PID = %d\n\n窗口注册和首帧渲染已完成。\n"
+                @"屏幕右上方会短暂显示粉红色测试方块。\n"
+                @"如果仍看不到菜单或方块，请打开「其他 → HUD 日志」。",
+                [MFHUDLauncher hudPID]]];
+        } else {
+            [self alert:@"悬浮窗启动未完成" message:error ?: @"未知错误，请查看 HUD 日志。"];
+        }
+        [self refreshStatus];
+    }];
 }
 
 - (void)stopHUDNow {
@@ -349,10 +352,10 @@ extern char **environ;
                          message:[NSString stringWithFormat:
                                   @"%@\n\n%@\n\n"
                                   @"排查要点：\n"
-                                  @"· 只有「main() 进入，角色判定并启动 HUD」→ 子进程没到 didFinish\n"
-                                  @"· 有 didFinish 但没有「托管前诊断」→ 卡在建窗\n"
-                                  @"· windowScene=nil / _contextId=nil → 窗口没进合成器\n"
-                                  @"· applicationState=2 → 子进程被当成后台，拿不到场景",
+                                  @"· starting → 建窗或引导尚未完成\n"
+                                  @"· 窗口错误 → context/托管接口未就绪\n"
+                                  @"· waiting-for-frames → 等待 Metal 首帧\n"
+                                  @"· ready → 注册调用及 GPU 首帧完成，仍需观察屏幕",
                                   pidInfo, log]
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"复制全文" style:UIAlertActionStyleDefault

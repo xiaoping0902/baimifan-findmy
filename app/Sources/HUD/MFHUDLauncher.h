@@ -14,8 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)isHUDRunning;
 + (pid_t)hudPID;
 
-/// 拉起 HUD 进程
-+ (BOOL)startHUDWithError:(NSString *_Nullable *_Nullable)err;
+/// Asynchronously wait for both registration calls and completed GPU frames.
+/// Completion runs on the main queue; readiness does not prove screen visibility.
++ (void)startHUDWithCompletion:(void (^)(BOOL ready, NSString *_Nullable error))completion;
 
 /// 结束 HUD 进程
 + (BOOL)stopHUDWithError:(NSString *_Nullable *_Nullable)err;
