@@ -60,6 +60,19 @@ static UIView *MFFindSecureCanvas(UIView *view) {
     return self;
 }
 
+- (void)setBounds:(CGRect)bounds {
+    BOOL changed = !CGRectEqualToRect(self.bounds, bounds);
+    [super setBounds:bounds];
+    if (changed && _contentView) {
+        // Callers set the Metal child's frame immediately after changing this
+        // wrapper's bounds. Finish the field/canvas/content resize first;
+        // deferred flexible autoresizing would otherwise resize that child a
+        // second time after its explicit panel/ball frame has been assigned.
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    }
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     _secureField.frame = self.bounds;
