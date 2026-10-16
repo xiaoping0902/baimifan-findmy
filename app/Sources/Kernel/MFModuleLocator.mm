@@ -384,7 +384,7 @@ static NSString *MFRemoteString(mach_port_t task, uint64_t addr, size_t max) {
     /* 判定顺序：
      *   ① 名字里含已知 UE4 特征 —— UE4 的 iOS 包通常叫 UE4Game / libUE4 / 或就是主可执行名
      *   ② 体积最大的那个 —— UE4 模块 300~600 MB，其余模块都是几十 KB~几 MB
-     *      （mingyun 的 GWorld 偏移 0x178AA5E0 ≈ 377 MB，说明 sLibBase 指向的就是那个大模块）
+     *      （mingyun 的 GWorld 偏移 0x178B44E0 ≈ 377 MB，说明 sLibBase 指向的就是那个大模块）
      */
     MFModuleInfo *picked = nil;
     NSString *why = nil;

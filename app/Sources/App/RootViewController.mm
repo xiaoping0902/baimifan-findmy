@@ -532,7 +532,7 @@ extern char **environ;
     done:
         [rep appendString:@"\n─────────────────────────────────\n"];
         [rep appendString:@"此诊断不调用 KFD；游戏数据链仍需逐级验证。\n"];
-        [rep appendString:@"如果 ④ 报「GWorld 不是合法指针」，说明 0x178AA5E0\n"];
+        [rep appendString:@"如果 ④ 报「GWorld 不是合法指针」，说明 0x178B44E0\n"];
         [rep appendString:@"这个静态偏移已经随游戏版本失效，需要用扫描重新定位。\n"];
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -596,7 +596,7 @@ extern char **environ;
 /// 从「进程名」一路拿到「模块加载基址」—— UE4 对象图的起点。
 ///
 /// 为什么必须有它：UE4 的一切都是「模块基址 + 固定偏移」，例如
-///     GWorld = Read<u64>(sLibBase + 0x178AA5E0);
+///     GWorld = Read<u64>(sLibBase + 0x178B44E0);
 /// 白米饭用一个全局变量存这个基址（原地址 0x100FF65D0），
 /// 那个全局的写入点在静态分析里没查到 —— 现在清楚了：它存的就是模块基址。
 - (void)actLocateModule {
@@ -617,7 +617,7 @@ extern char **environ;
                     @"★ 模块基址 = 0x%llx\n\n"
                     @"这个值就是 UE4 链的起点 sLibBase。\n"
                     @"下一步该做的是「UE4 对象图读取」——\n"
-                    @"    GWorld = Read(sLibBase + 0x178AA5E0)\n",
+                    @"    GWorld = Read(sLibBase + 0x178B44E0)\n",
                     m.base];
                 // 存下来，供后续 UE4 读取用
                 [[NSUserDefaults standardUserDefaults] setObject:@(m.base) forKey:@"mf.game.libbase"];

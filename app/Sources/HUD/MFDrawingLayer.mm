@@ -42,6 +42,15 @@ typedef NS_ENUM(NSInteger, MFDrawSource) {
     MFDrawSourceCalibrated,   // 需要手工校准的三个绝对基址
 };
 
+/// Actor 的用途分类 —— 由类 ID 解析出的 UE 类名判定。
+/// 没有这层分类的话，ULevel::Actors 里整关卡的静态物件都会被画成人物框。
+typedef NS_ENUM(NSInteger, MFActorKind) {
+    MFActorKindUnknown = 0,
+    MFActorKindPerson,
+    MFActorKindLoot,
+    MFActorKindBox,
+};
+
 /// UE4 那条链的 Actor 世界坐标缓存。
 ///
 /// ULevel::Actors 是**整个关卡**的 Actor 列表（静态物件也算在内），数量可能上千。
@@ -51,6 +60,9 @@ typedef NS_ENUM(NSInteger, MFDrawSource) {
 @interface MFUECachedActor : NSObject
 @property (nonatomic, assign) uint64_t address;
 @property (nonatomic, assign) float x, y, z;
+@property (nonatomic, assign) int32_t classID;
+@property (nonatomic, assign) MFActorKind kind;
+@property (nonatomic, copy, nullable) NSString *className;
 @property (nonatomic, assign) CFTimeInterval seenAt;
 @end
 @implementation MFUECachedActor
@@ -60,6 +72,7 @@ static const NSUInteger kMFUEActorBudgetPerFrame = 320;   // 每帧最多读多�
 static const NSTimeInterval kMFUEActorTTL = 1.0;          // 多久没更新就丢弃
 static const NSTimeInterval kMFUEResolveTTL = 1.0;        // 链结构最快多久重解一次
 static const NSTimeInterval kMFUEAddressTTL = 1.0;        // Actor 指针数组多久重读一次
+static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多久打一次日志
 
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
@@ -80,6 +93,14 @@ static const NSTimeInterval kMFUEAddressTTL = 1.0;        // Actor 指针数组�
 - (void)noteUE4Issue:(NSString *)reason;
 /// 本帧数据来自哪条链（诊断文本）
 - (NSString *)dataSourceText;
+/// 类 ID → UE 类名（GNames 解析，带缓存与可打印性校验）
+- (NSString *_Nullable)classNameForID:(int32_t)classID;
+/// 类名 → 人物 / 物资 / 盒子 / 未识别
+- (MFActorKind)kindForClassName:(NSString *)name;
+/// 解析成功率够不够用来过滤（不够就退回全画）
+- (BOOL)classificationUsable;
+- (void)recordKind:(MFActorKind)kind className:(NSString *_Nullable)name;
+- (void)logClassHistogramIfDue;
 - (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
@@ -145,6 +166,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     MFUEResolveResult *_ueResolve;                          // 缓存的链解析结果
     CFTimeInterval _ueResolveAt, _ueAddrsAt, _ueIssueAt;
     NSString *_ueLastIssue;
+
+    /* ── 类名解析与分类（[M5.75]）────────────────────── */
+    NSMutableDictionary<NSNumber *, id> *_classNameByID;    // 类 ID → 类名 / NSNull（解析失败）
+    NSUInteger _classResolved, _classFailed;                // 解析成功率决定分类是否可用
+    NSMutableDictionary<NSString *, NSNumber *> *_kindHistogram;  // 类名 → 出现次数
+    CFTimeInterval _histogramAt;
+    NSUInteger _kindPerson, _kindLoot, _kindBox, _kindUnknown;
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -156,8 +184,114 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         _smoothCache = [NSMutableDictionary dictionary];
         _ueActors = [NSMutableDictionary dictionary];
         _ueActorAddrs = [NSMutableArray array];
+        _classNameByID = [NSMutableDictionary dictionary];
+        _kindHistogram = [NSMutableDictionary dictionary];
     }
     return self;
+}
+
+#pragma mark - 类名解析与分类（[M5.75]）
+
+/*
+ * ★ 把 UE 的 FName 索引解成类名 ★
+ *
+ * 公式来自 mingyun 反编译的 GName 分支（GetEnemyThread）：
+ *     entry = Read<u64>(sGName + ((id >> 15) & 0xFFF8) + 200)
+ *     chars = entry + 2 * (id & 0x3FFFF)          ← UTF-16
+ * 其中 sGName = libBase + 389510848 = libBase + 0x173776C0。
+ *
+ * 这个公式是**照搬**的，没有独立验证过语义。所以这里做两层保护：
+ *   · 解不出可打印字符串就判失败，绝不把垃圾当类名
+ *   · 失败率过高时上层会退回「不分类、全画」的保守模式
+ */
+- (NSString *)classNameForID:(int32_t)classID {
+    if (classID <= 0) return nil;
+    NSNumber *key = @(classID);
+    id cached = _classNameByID[key];
+    if (cached) return (cached == [NSNull null]) ? nil : cached;
+
+    MFUEReader *ue = [MFUEReader shared];
+    MFUEProfile *p = ue.profile;
+    uint64_t gnames = ue.libBase + p.gnamesStaticOffset;
+    if (!MFUEIsValidPtr(gnames)) { _classFailed++; return nil; }
+
+    MFReadBackend *rb = [MFReadBackend shared];
+    uint64_t entry = [rb readU64:gnames +
+                          (((uint64_t)classID >> 15) & kMFUE_GNamesChunkMask) +
+                          kMFUE_GNamesEntryBias];
+    if (!MFUEIsValidPtr(entry)) {
+        _classFailed++;
+        _classNameByID[key] = [NSNull null];
+        return nil;
+    }
+    uint64_t chars = entry + 2 * ((uint64_t)classID & 0x3FFFF);
+
+    uint16_t buf[80] = {0};
+    if (![rb readRemote:chars into:buf size:sizeof(buf)]) {
+        _classFailed++;
+        _classNameByID[key] = [NSNull null];
+        return nil;
+    }
+    NSUInteger len = 0;
+    while (len < 80 && buf[len] != 0) len++;
+    if (len == 0) {
+        _classFailed++;
+        _classNameByID[key] = [NSNull null];
+        return nil;
+    }
+    NSString *name = [NSString stringWithCharacters:buf length:len];
+    // 类名必须是纯标识符 —— 读到垃圾内存时这一关会把它拦下来
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
+    if (name.length > 64 || [name rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) {
+        _classFailed++;
+        _classNameByID[key] = [NSNull null];
+        return nil;
+    }
+    _classResolved++;
+    _classNameByID[key] = name;
+    return name;
+}
+
+/// 类名 → 用途。规则保守：只认明确的关键词，其余留给日志去统计。
+- (MFActorKind)kindForClassName:(NSString *)name {
+    if (name.length == 0) return MFActorKindUnknown;
+
+    static NSArray<NSString *> *personKeys = nil;
+    static NSArray<NSString *> *lootKeys = nil;
+    static NSArray<NSString *> *boxKeys = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        personKeys = @[@"Character", @"Pawn", @"Player", @"Bot", @"Soldier"];
+        lootKeys   = @[@"Item", @"Pickup", @"Loot", @"Prop", @"Weapon", @"Ammo",
+                       @"Aid", @"Medicine", @"Attachment", @"Backpack"];
+        boxKeys    = @[@"Box", @"Crate", @"Container", @"DeadBody", @"Corpse",
+                       @"Bag", @"Supply", @"Cache"];
+    });
+
+    for (NSString *k in boxKeys)    if ([name rangeOfString:k].location != NSNotFound) return MFActorKindBox;
+    for (NSString *k in lootKeys)   if ([name rangeOfString:k].location != NSNotFound) return MFActorKindLoot;
+    for (NSString *k in personKeys) if ([name rangeOfString:k].location != NSNotFound) return MFActorKindPerson;
+    return MFActorKindUnknown;
+}
+
+/// 分类是否已经可信到可以用来过滤。
+/// 判据：解析成功过、且成功率不低于一半。不满足就退回「不分类、全画」。
+- (BOOL)classificationUsable {
+    if (_classResolved == 0) return NO;
+    return _classResolved * 2 >= (_classResolved + _classFailed);
+}
+
+- (void)recordKind:(MFActorKind)kind className:(NSString *)name {
+    switch (kind) {
+        case MFActorKindPerson: _kindPerson++; break;
+        case MFActorKindLoot:   _kindLoot++;   break;
+        case MFActorKindBox:    _kindBox++;    break;
+        default:                _kindUnknown++; break;
+    }
+    if (name.length) {
+        _kindHistogram[name] = @([_kindHistogram[name] unsignedIntegerValue] + 1);
+    }
 }
 
 #pragma mark - 平滑坐标（[M5.2]）
@@ -286,6 +420,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     MFReadBackend *rb = [MFReadBackend shared];
     const uint32_t posOffset = ue.profile.actor_worldPos;
+    const uint32_t classIDOffset = ue.profile.actor_classID;
 
     // ── Actor 指针数组：定期重读（一次批量读，几十 KB）──
     if (_ueActorAddrs.count == 0 || now - _ueAddrsAt > kMFUEAddressTTL) {
@@ -324,6 +459,12 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             }
             cached.x = pos[0]; cached.y = pos[1]; cached.z = pos[2];
             cached.seenAt = now;
+            // 类 ID 只读一次：这是「这是人是物」的唯一依据
+            if (cached.classID == 0) {
+                cached.classID = [rb readInt32:addr + classIDOffset];
+                cached.className = [self classNameForID:cached.classID];
+                cached.kind = [self kindForClassName:cached.className];
+            }
         }
         _ueCursor = (_ueCursor + budget) % total;
     }
@@ -336,7 +477,9 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
      * 全画出来会把 GPU 拉满。用菜单里的「盒子距离」当上限，保底 100 米。
      */
     const float maxDrawDistance = MAX([MFSettings shared].boxDrawDistance, 100.0f);
+    const BOOL classify = [self classificationUsable];
     NSMutableArray<MFEntity *> *ents = [NSMutableArray arrayWithCapacity:_ueActors.count];
+    NSMutableArray<MFEntity *> *lootOut = [NSMutableArray array];
     NSMutableArray<NSNumber *> *stale = nil;
     for (NSNumber *key in _ueActors) {
         MFUECachedActor *a = _ueActors[key];
@@ -345,6 +488,15 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             [stale addObject:key];
             continue;
         }
+        [self recordKind:a.kind className:a.className];
+
+        /*
+         * 分类可用时丢掉"认不出来"的 Actor —— ULevel::Actors 里有大量
+         * 地图静态物件，全画出来就是满屏框。分类不可用时（GNames 公式没对上）
+         * 退回全画，宁可糊也不能空。
+         */
+        if (classify && a.kind == MFActorKindUnknown) continue;
+
         const float world[3] = {a.x, a.y, a.z};
         MFEntity *e = [[MFEntity alloc] init];
         e.address = a.address;
@@ -362,14 +514,45 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             e.bearingDeg = d;
             e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
         }
-        [ents addObject:e];
+        // 物资走独立的绘制路径（等级配色 + 价值强调 + 名字），盒子跟人物一起画框
+        if (a.kind == MFActorKindLoot) {
+            e.isLoot = YES;
+            e.name = a.className;
+            e.level = [rb readInt32:a.address + ue.profile.loot_level];
+            e.value = [rb readInt32:a.address + ue.profile.loot_value];
+            [lootOut addObject:e];
+        } else {
+            [ents addObject:e];
+        }
     }
     for (NSNumber *key in stale) [_ueActors removeObjectForKey:key];
+    [self logClassHistogramIfDue];
 
     if (outEntities) *outEntities = ents;
-    if (outLoot) *outLoot = @[];     // UE4 链还没做物资分类：长度/价值字段都未校准
+    if (outLoot) *outLoot = lootOut;
     if (outSource) *outSource = MFDrawSourceUE4;
     return YES;
+}
+
+/// 定期把「这一关卡里都有哪些类、各自命中什么分类」打到日志 ——
+/// 这是调整分类关键词的唯一依据（没有真机就没法猜游戏用了哪些类名）。
+- (void)logClassHistogramIfDue {
+    const CFTimeInterval now = CACurrentMediaTime();
+    if (now - _histogramAt < kMFUEHistogramInterval) return;
+    _histogramAt = now;
+
+    NSArray<NSString *> *top = [_kindHistogram keysSortedByValueUsingComparator:
+        ^NSComparisonResult(NSNumber *a, NSNumber *b) { return [b compare:a]; }];
+    NSMutableString *sample = [NSMutableString string];
+    for (NSUInteger i = 0; i < MIN((NSUInteger)12, top.count); i++) {
+        [sample appendFormat:@"%@×%@ ", top[i], _kindHistogram[top[i]]];
+    }
+    MFHUDLogLine(@"[绘制] UE4 分类：人=%lu 物资=%lu 盒子=%lu 未识别=%lu · GNames 解析 ok=%lu fail=%lu(%@) · 类名 Top: %@",
+                 (unsigned long)_kindPerson, (unsigned long)_kindLoot,
+                 (unsigned long)_kindBox, (unsigned long)_kindUnknown,
+                 (unsigned long)_classResolved, (unsigned long)_classFailed,
+                 [self classificationUsable] ? @"分类生效" : @"退回全画",
+                 sample.length ? sample : @"（一个类名都没解出来）");
 }
 
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {

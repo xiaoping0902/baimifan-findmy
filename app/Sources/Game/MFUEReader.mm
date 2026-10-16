@@ -334,7 +334,7 @@ static NSString *gUEReport = nil;
         [s appendString:
             @"排查方向：\n"
             @"· 「模块基址为 0」→ 先做「模块定位」\n"
-            @"· 「GWorld 不是合法指针」→ 静态偏移 0x178AA5E0 随版本失效，需重取\n"
+            @"· 「GWorld 不是合法指针」→ 静态偏移 0x178B44E0 随版本失效，需重取\n"
             @"· 「ULevel 非法」→ PersistentLevel 偏移失效\n"
             @"· 「Actors 数量异常」→ 可能读到的是别的结构\n"];
     } else {

@@ -45,8 +45,40 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// GWorld 的静态偏移：GWorld = Read<u64>(libUE4 基址 + 本值)
 /// 反编译原文：v8 = Read<unsigned long>(sLibBase + 395003104);
-/// 395003104 = 0x178AA5E0
-static const uint64_t kMFUE_DefaultGWorld   = 0x178AA5E0ULL;
+///
+/// ★★★ [M5.75] 这个值曾经被写成 0x178AA5E0 —— 那是**把十进制转十六进制时算错的**：
+///     395003104 = 0x178B44E0
+///     0x178AA5E0 = 394962400   ← 差了 40704 字节（0x9F00）
+///   偏移体量约 377 MB，两个值看起来都"合理"，所以任何量级检查都发现不了，
+///   但 GWorld = Read(libBase + 0x178AA5E0) 永远读到别的数据 → 整条链第一步就断。
+///   现在按反编译原文的十进制常量重算，别名一份十进制值，方便对照复核。
+static const uint64_t kMFUE_GWorldDecLiteral = 395003104ULL;   // 反编译原文
+static const uint64_t kMFUE_DefaultGWorld   = 0x178B44E0ULL;   // = 395003104
+
+/// GNames（FName 池）的静态偏移：sGName = libBase + 本值
+/// 反编译原文：sGName = sLibBase + 389510848;
+/// ★ 389510848 = 0x173776C0（旧文档里写的 0x1739D0C0 = 389664960，同样是转错的）
+static const uint64_t kMFUE_GNamesDecLiteral = 389510848ULL;
+static const uint64_t kMFUE_DefaultGNames   = 0x173776C0ULL;   // = 389510848
+
+/// AActor → 类 ID（int）。反编译原文：v85 = Read<int>(v21 + 28);
+/// 这个 ID 就是 UClass 的名字索引，用它把 Actor 分成人物/物资/盒子。
+static const uint32_t kMFUE_Actor_ClassID = 28;               // 0x1C
+
+/// 物资对象的两个属性 —— 从白米饭 sub_1001F74CC 的原始指令逐条钉出来的：
+///     0x1001f7d78  add x1, x23, #0xDC   → 读 4 字节 → w21（价值）
+///     0x1001f7e00  add x1, x23, #0x68   → 读 4 字节 → w22（等级）
+/// 注意：白米饭的物资对象来自它自己的容器（数量在 +0xE68），
+/// 与 UE4 的 ULevel::Actors 不是同一个数组；这两个偏移能不能直接用在
+/// Actor 上需要真机对照，所以默认按"候选"处理，读到什么都会打日志。
+static const uint32_t kMFUE_Loot_LevelOffset = 0x68;
+static const uint32_t kMFUE_Loot_ValueOffset = 0xDC;
+
+/// GNames 解引用用的常量（来自 mingyun GetEnemyThread 的 GName 分支）
+///     entry = Read<u64>(gnamesBase + ((id >> 15) & 0xFFF8) + 200)
+///     chars = entry + 2 * (id & 0x3FFFF)
+static const uint32_t kMFUE_GNamesEntryBias = 200;            // +0xC8
+static const uint64_t kMFUE_GNamesChunkMask = 0xFFF8ULL;
 
 /// UWorld → GameInstance（UE4: UWorld::OwningGameInstance）
 /// 原文：Read<u64>(GWorld + 400)
@@ -129,6 +161,8 @@ static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 @interface MFUEProfile : NSObject
 
 @property (nonatomic, assign) uint64_t gworldStaticOffset;   // 模块基址 + 本值 = GWorld
+/// GNames 池：模块基址 + 本值（类名解析用）
+@property (nonatomic, assign) uint64_t gnamesStaticOffset;
 
 @property (nonatomic, assign) uint32_t world_gameInstance;
 @property (nonatomic, assign) uint32_t gameInstance_localPlayers;
@@ -141,6 +175,12 @@ static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 @property (nonatomic, assign) uint32_t level_actorsData;
 @property (nonatomic, assign) uint32_t level_actorsNum;
 @property (nonatomic, assign) uint32_t actor_worldPos;
+
+/// Actor → 类 ID（区分人物 / 物资 / 盒子）
+@property (nonatomic, assign) uint32_t actor_classID;
+/// 物资对象上的等级 / 价值字段（白米饭钉出来的候选值）
+@property (nonatomic, assign) uint32_t loot_level;
+@property (nonatomic, assign) uint32_t loot_value;
 
 /// CameraManager → CameraCacheEntry（FCameraCacheEntry）
 /// ★ mingyun 的报告里【没有这个值】—— 它只用到 CameraManager 指针，没读 POV。
