@@ -129,6 +129,31 @@ static void Expect(BOOL condition, const char *message) {
 - (void)start;
 - (void)dispose;
 @end
+
+@interface RefreshPolicyOverlay : MFOverlayView
+@property NSInteger simulatedMaximum;
+@end
+@implementation RefreshPolicyOverlay
+- (NSInteger)screenMaximumFPS { return self.simulatedMaximum; }
+@end
+
+static void TestHighRefreshRequestUsesScreenCapacity(void) {
+    RefreshPolicyOverlay *view = [[RefreshPolicyOverlay alloc] initWithFrame:CGRectMake(0, 0, 56, 56)
+                                                                 interactive:YES];
+    view.automaticallyStartsRendering = NO;
+    BOOL reportsPolicy = [view respondsToSelector:NSSelectorFromString(@"effectiveFPS")];
+    Expect(reportsPolicy, "high refresh must expose a screen-bounded effective frame request");
+    if (!reportsPolicy) return;
+    view.simulatedMaximum = 120; view.preferredFPS = 120; [view requestRedraw];
+    Expect([[view valueForKey:@"effectiveFPS"] integerValue] == 120,
+           "a 120Hz screen must receive the requested high refresh policy");
+    view.simulatedMaximum = 60; [view requestRedraw];
+    Expect(view.preferredFPS == 120 && [[view valueForKey:@"effectiveFPS"] integerValue] == 60,
+           "60Hz fallback must clamp effective output while preserving the user's 120fps choice");
+    view.simulatedMaximum = 120; view.preferredFPS = 30;
+    Expect([[view valueForKey:@"effectiveFPS"] integerValue] == 30,
+           "switching back to 30fps must update the effective request immediately");
+}
 @implementation OverlayFixture
 - (instancetype)init {
     if ((self = [super init])) {
@@ -436,6 +461,7 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
         std::exit(1);
     });
     dispatch_async(dispatch_get_main_queue(), ^{
+        TestHighRefreshRequestUsesScreenCapacity();
         TestInteractionGeometry();
         TestActualFrameTime(^{
             TestDrawableWaitDoesNotBlockMain(^{

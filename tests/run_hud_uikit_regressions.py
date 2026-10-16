@@ -75,6 +75,9 @@ def main():
             architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
             if args.suite == "windows":
                 sources = [ROOT / "tests/hud_uikit_regressions.mm", source]
+                shield = ROOT / "app/Sources/HUD/MFHUDCaptureShieldView.mm"
+                if shield.exists():
+                    sources.append(shield)
                 # M5.66：MFHUDWindow 会记录「窗口命中 / 窗口穿透」，
                 # 于是窗口实现多了一个 MFHUDLogLine 依赖，这里显式链上。
                 log_source = ROOT / "app/Sources/HUD/MFHUDLog.m"

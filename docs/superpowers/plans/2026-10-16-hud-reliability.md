@@ -51,7 +51,7 @@ Files: `MFOverlayView.*`, `MFImGuiContext.*`; root integrates `MFDrawingLayer.mm
 
 Files: `MFHUDInputBridge.mm`, `MFHUDWindow.mm`, `MFMenuUI.*`, `MFHUDAppDelegate.mm`, `RootViewController.mm`.
 
-- [x] Verify HID field layout with known factory values; use full identity ownership and remove proximity token rewriting.
+- [x] Verify HID field layout with known factory values; validate field layout, remove proximity token rewriting; hardware feedback later corrected ownership to full digitizer index (see the follow-up below).
 - [x] Share input hit geometry and distinguish ball tap from drag with an 8-point movement threshold.
 - [x] Make menu role stable at native context creation.
 - [x] Fix header/tabs/footer with a scrolling child, clip hit regions and expose popups/scrollbars.
@@ -78,4 +78,16 @@ Files: `MFHUDInputBridge.mm`, `MFHUDWindow.mm`, `MFMenuUI.*`, `MFHUDAppDelegate.
 - Test-only commit `53a254b` replaces the menu preview's fixed lifetime with a screenshot acknowledgement, preserves fixture output on utility failures, and rejects incomplete PNGs. Run `38810544740` still timed out in screenshot; its saved report confirms CPU checks and GPU READY, but no suite PASS. Test-only `7d162c6` isolates any remaining launch CLI before capture; run `38811206407` passed with a complete PNG and a new fixture PASS. The CLI had already exited (status 0), so launch-lock causation is unproven. The actual screenshot took about 25.4 seconds, exceeding the old fixed eight-second preview lifetime.
 - All six production suites now have passing records for identical app code: five in `38809198137`, menu in `38811206407` with test-only lifecycle changes. The original run retains its failure status. The actual Metal screenshot was visually checked; Chinese labels and fixed controls are intact.
 - Independent final review found no remaining production blocker, confirmed the P2 fix and rejected false-green paths in screenshot acknowledgement; physical device acceptance remains separate.
-- USB still reports M5.67. Verified M5.69 IPA and a local install URL have been provided for TrollStore installation; physical installation and touch acceptance remain pending.
+- M5.69 is now installed and independently confirmed through USB (3859ba1-r69). Fresh device feedback shows the three tabs/collapse still fail: raw identity changes 3 -> 2 on lift, while full index stays stable. The previous fixture checked AX changes only and missed this hardware case. The follow-up production candidate is d7b16ad; physical acceptance of that candidate remains pending.
+
+## Follow-up: M5.69 hardware contact ownership
+
+- [x] Capture M5.69 logs and confirm installed build through USB.
+- [x] Confirm the user means the three production page tabs.
+- [x] Observe true RED with real IOKit events against unchanged production (run 38835131771, job 116762445532).
+- [x] Switch ownership/validity from raw identity to full uint32 digitizer index; preserve all cancellation and foreign-finger protections.
+- [x] Add real page-button clicks and three collapse/56pt-ball/expand cycles with UIKit bounds.
+- [x] Run local preflight, structure, entitlement, Python and whitespace checks.
+- [x] Read updated full regression and Release build results; resolve review findings. Six suites have fresh PASS records for d7b16ad; retain attempt1 input/windows launch failures.
+- [x] Verify/package the exact built IPA and provide a version-specific install URL. M5.70/d7b16ad-r70; HTTP8187 hash verified.
+- [ ] Confirm new installed version and physically verify tabs, ball tap/drag, passthrough, exit and restart.

@@ -87,11 +87,59 @@ static void TestMenuUsesItsVisiblePanel(void) {
     menu.hidden = YES;
 }
 
+@interface NSObject (CaptureShieldRegression)
+- (instancetype)initWithFrame:(CGRect)frame error:(NSString **)error;
+@end
+
+static UITextField *FindSecureField(UIView *view) {
+    if ([view isKindOfClass:UITextField.class] && ((UITextField *)view).secureTextEntry)
+        return (UITextField *)view;
+    for (UIView *child in view.subviews) {
+        UITextField *field = FindSecureField(child);
+        if (field) return field;
+    }
+    return nil;
+}
+
+static void TestCaptureShieldPreservesHitsAndResizing(void) {
+    Class shieldClass = NSClassFromString(@"MFHUDCaptureShieldView");
+    CHECK(shieldClass != Nil, "HUD surfaces require a secure content container");
+    NSString *error = nil;
+    UIView *shield = [[shieldClass alloc] initWithFrame:CGRectMake(0, 0, 348, 520) error:&error];
+    CHECK(shield != nil && error == nil, "the real UIKit secure canvas must be available");
+    UIView *content = [shield valueForKey:@"contentView"];
+    UITextField *field = FindSecureField(shield);
+    CHECK(content && field && [content isDescendantOfView:field],
+          "protected content must actually descend from the secure text canvas");
+    CHECK(!field.canBecomeFirstResponder, "capture protection must never open a text keyboard");
+    MFHUDWindow *window = [[MFHUDWindow alloc] initWithFrame:CGRectMake(24, 90, 348, 520)];
+    window.rootViewController = [UIViewController new];
+    [window.rootViewController.view addSubview:shield];
+    window.interactiveView = shield;
+    UIView *control = [[UIView alloc] initWithFrame:CGRectMake(20, 20, 40, 30)];
+    [content addSubview:control];
+    window.hidden = NO;
+    [window layoutIfNeeded]; [shield layoutIfNeeded];
+    CHECK([window hitTest:CGPointMake(30, 30) withEvent:nil] == control,
+          "a protected control must still receive the window hit");
+    CHECK([window hitTest:CGPointMake(200, 200) withEvent:nil] == nil,
+          "the secure text hierarchy must not intercept transparent blank space");
+    window.bounds = CGRectMake(0, 0, 56, 56);
+    shield.frame = window.bounds; [shield layoutIfNeeded];
+    control.frame = CGRectMake(8, 8, 40, 40);
+    CHECK(CGSizeEqualToSize(content.bounds.size, CGSizeMake(56, 56)) &&
+          [window hitTest:CGPointMake(28, 28) withEvent:nil] == control &&
+          [window hitTest:CGPointMake(100, 100) withEvent:nil] == nil,
+          "protected ball geometry must follow native shrink without retaining the old hit area");
+    window.hidden = YES;
+}
+
 @interface RegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation RegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
+        TestCaptureShieldPreservesHitsAndResizing();
         TestDrawingIsPassthroughBeforeInitialization();
         TestMenuUsesItsVisiblePanel();
         puts("PASS: real UIKit drawing initialization and menu hit bounds");
