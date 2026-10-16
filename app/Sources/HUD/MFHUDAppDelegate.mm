@@ -418,10 +418,46 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     }
     reader.targetTaskPort = port;
     [reader loadBasesFromDefaults];
+
+    /*
+     * ★ [M5.74] HUD 侧自己恢复模块基址 ★
+     *
+     * MFUEReader 那条链是【唯一可自动建立】的：
+     *     GWorld = Read<u64>(libBase + 静态偏移) → GameInstance → … → Actors
+     * 起点的 libBase 是 ASLR 值，每次游戏启动都不同。
+     *
+     * 但这条链在 HUD 进程里从来没被点上过：
+     *   · 控制台「一键开始」写下的 mf.game.libbase 只对同一局游戏进程有效，
+     *     而且 HUD 侧只在清理路径里把 libBase 置 0，成功路径从来没恢复过；
+     *   · 结果就是 MFUEReader.libBase 恒为 0，链在第一步就断。
+     *
+     * 这里绑定成功时补上：优先**自己定位**（HUD 有 task port，能直接读目标
+     * 的 dyld 信息），失败再退回控制台写下的值。
+     */
+    uint64_t libBase = 0;
+    {
+        NSString *moduleError = nil;
+        MFModuleInfo *module = [MFModuleLocator mainModuleForPid:pid error:&moduleError];
+        if (module && module.base) {
+            libBase = module.base;
+            [defaults setObject:@(libBase) forKey:@"mf.game.libbase"];
+            [defaults setObject:(module.name ?: @"") forKey:@"mf.game.module"];
+            MFHUDLogLine(@"HUD 侧模块定位：%@ base=0x%llx %@",
+                         module.name ?: @"?", (unsigned long long)libBase,
+                         [module respondsToSelector:@selector(sizeText)] ? module.sizeText : @"");
+        } else {
+            libBase = [[defaults objectForKey:@"mf.game.libbase"] unsignedLongLongValue];
+            MFHUDLogLine(@"HUD 侧模块定位失败（%@）→ 退回控制台记录的 libBase=0x%llx",
+                         moduleError ?: @"?", (unsigned long long)libBase);
+        }
+        [MFUEReader shared].libBase = libBase;
+    }
+
     self.boundTargetPID = pid; self.boundTargetIdentity = identity;
     [defaults setInteger:pid forKey:@"mf.target.pid"];
     [defaults setObject:expected forKey:@"mf.target.name"];
-    MFHUDLogLine(@"HUD 绑定已核验：pid=%d %@", pid, reader.calibrationSummary);
+    MFHUDLogLine(@"HUD 绑定已核验：pid=%d libBase=0x%llx %@",
+                 pid, (unsigned long long)libBase, reader.calibrationSummary);
 }
 
 - (BOOL)isStopping {

@@ -4,8 +4,11 @@
 #import "MFDrawingLayer.h"
 #import "../Render/MFOverlayView.h"
 #import "../Game/MFGameReader.h"
+#import "../Game/MFUEReader.h"
 #import "../Game/MFSettings.h"
 #import "../Game/Offsets.h"
+#import "../Read/MFReadBackend.h"
+#import "MFHUDLog.h"
 
 #import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
 
@@ -13,10 +16,70 @@
 
 static BOOL gDrawEnabled = YES;
 
+/*
+ * ★★ [M5.74] 绘制层的数据源 ★★
+ *
+ * 项目里有两条读游戏的链，能力完全不同：
+ *
+ *   ① MFUEReader —— 模块基址 + GWorld 静态偏移 → GameInstance → … → Actors
+ *      起点只有一个 libBase，而 libBase 由「模块定位」自动拿到。
+ *      也就是说：**这条链可以自动建立**，一键开始跑的就是它。
+ *
+ *   ② MFGameReader —— 白米饭那条纯偏移链，起点是三个**手工校准**的绝对地址
+ *      （rootObjectBase / entityArrayBase / lootArrayBase）。
+ *      它自己头文件里就写着「当前尚无基址校准 UI」——
+ *      全工程没有任何地方能给这三个值赋值。
+ *
+ * 在此之前绘制层接的是 ②：cameraOK 恒为 false，屏幕上永远什么都没有，
+ * 表现就是用户说的「数据链接不上」。
+ *
+ * 现在：② 只要校准过就优先（它能提供物资分级/队伍/血量），
+ *       没校准时自动落到 ① —— 至少人物框、背敌提示能工作。
+ */
+typedef NS_ENUM(NSInteger, MFDrawSource) {
+    MFDrawSourceNone = 0,
+    MFDrawSourceUE4,          // 可自动建立
+    MFDrawSourceCalibrated,   // 需要手工校准的三个绝对基址
+};
+
+/// UE4 那条链的 Actor 世界坐标缓存。
+///
+/// ULevel::Actors 是**整个关卡**的 Actor 列表（静态物件也算在内），数量可能上千。
+/// 逐个 mach_vm_remap 读坐标 = 每帧上千次系统调用，主线程会直接被钉死。
+/// 所以：指针数组定期重读、坐标按预算轮转读、世界坐标缓存下来，
+/// 投影用当前相机每帧重算（相机每帧都在动）。
+@interface MFUECachedActor : NSObject
+@property (nonatomic, assign) uint64_t address;
+@property (nonatomic, assign) float x, y, z;
+@property (nonatomic, assign) CFTimeInterval seenAt;
+@end
+@implementation MFUECachedActor
+@end
+
+static const NSUInteger kMFUEActorBudgetPerFrame = 320;   // 每帧最多读多少个 Actor 坐标
+static const NSTimeInterval kMFUEActorTTL = 1.0;          // 多久没更新就丢弃
+static const NSTimeInterval kMFUEResolveTTL = 1.0;        // 链结构最快多久重解一次
+static const NSTimeInterval kMFUEAddressTTL = 1.0;        // Actor 指针数组多久重读一次
+
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
 /// 这一帧有没有真正画出东西（决定绘制层是全速还是低频空转）
 - (void)noteDrawingActivity:(BOOL)active;
+/// 取一帧数据：先试已校准的 MFGameReader，再落到可自动建立的 UE4 链
+- (BOOL)acquireFrameWithSize:(CGSize)size
+                      camera:(MFCamera *)outCamera
+                    entities:(NSArray<MFEntity *> **)outEntities
+                        loot:(NSArray<MFEntity *> **)outLoot
+                      source:(MFDrawSource *)outSource;
+- (BOOL)acquireUE4FrameWithSize:(CGSize)size
+                         camera:(MFCamera *)outCamera
+                       entities:(NSArray<MFEntity *> **)outEntities
+                           loot:(NSArray<MFEntity *> **)outLoot
+                         source:(MFDrawSource *)outSource;
+/// UE4 链断在哪里（限流记录，不要每帧刷屏）
+- (void)noteUE4Issue:(NSString *)reason;
+/// 本帧数据来自哪条链（诊断文本）
+- (NSString *)dataSourceText;
 - (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
@@ -73,6 +136,15 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     /* ── 背敌计数（[M5.2]）── 供底部状态条显示 */
     NSUInteger _backEnemyCount;
+
+    /* ── UE4 链状态（[M5.74]）────────────────────────── */
+    MFDrawSource _source;                                   // 本帧用的是哪条链
+    NSMutableDictionary<NSNumber *, MFUECachedActor *> *_ueActors;   // 地址 → 世界坐标
+    NSMutableArray<NSNumber *> *_ueActorAddrs;              // 本关卡的 Actor 指针数组
+    NSUInteger _ueCursor;                                   // 坐标轮转游标
+    MFUEResolveResult *_ueResolve;                          // 缓存的链解析结果
+    CFTimeInterval _ueResolveAt, _ueAddrsAt, _ueIssueAt;
+    NSString *_ueLastIssue;
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -82,6 +154,8 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     if ((self = [super init])) {
         _reader = [MFGameReader shared];
         _smoothCache = [NSMutableDictionary dictionary];
+        _ueActors = [NSMutableDictionary dictionary];
+        _ueActorAddrs = [NSMutableArray array];
     }
     return self;
 }
@@ -133,6 +207,171 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     }
 }
 
+/// UE4 链断在哪里 —— 限流记录一次，不要每帧刷日志
+- (void)noteUE4Issue:(NSString *)reason {
+    if (reason.length == 0) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (_ueLastIssue && [reason isEqualToString:_ueLastIssue] && now - _ueIssueAt < 10.0) return;
+    _ueLastIssue = [reason copy];
+    _ueIssueAt = now;
+    MFHUDLogLine(@"[绘制] UE4 链未通：%@", reason);
+}
+
+- (BOOL)acquireFrameWithSize:(CGSize)size
+                      camera:(MFCamera *)outCamera
+                    entities:(NSArray<MFEntity *> **)outEntities
+                        loot:(NSArray<MFEntity *> **)outLoot
+                      source:(MFDrawSource *)outSource {
+    // ① 手工校准过的那条链优先：它能给出物资分级 / 队伍 / 血量这些字段。
+    MFGameReader *calibrated = [MFGameReader shared];
+    if (calibrated.ready && calibrated.rootObjectBase != 0) {
+        NSDictionary *frame = [calibrated readFrameWithSize:size];
+        if ([frame[@"cameraOK"] boolValue]) {
+            NSDictionary *cd = frame[@"camera"];
+            MFCamera cam = {0};
+            cam.x     = [cd[@"x"] floatValue];
+            cam.y     = [cd[@"y"] floatValue];
+            cam.z     = [cd[@"z"] floatValue];
+            cam.pitch = [cd[@"pitch"] floatValue];
+            cam.yaw   = [cd[@"yaw"] floatValue];
+            cam.roll  = [cd[@"roll"] floatValue];
+            cam.fov   = [cd[@"fov"] floatValue];
+            if (outCamera) *outCamera = cam;
+            if (outEntities) *outEntities = frame[@"entities"] ?: @[];
+            if (outLoot) *outLoot = frame[@"loot"] ?: @[];
+            if (outSource) *outSource = MFDrawSourceCalibrated;
+            return YES;
+        }
+    }
+    // ② 回退到可自动建立的 UE4 链
+    return [self acquireUE4FrameWithSize:size camera:outCamera
+                                entities:outEntities loot:outLoot source:outSource];
+}
+
+- (BOOL)acquireUE4FrameWithSize:(CGSize)size
+                         camera:(MFCamera *)outCamera
+                       entities:(NSArray<MFEntity *> **)outEntities
+                           loot:(NSArray<MFEntity *> **)outLoot
+                         source:(MFDrawSource *)outSource {
+    MFUEReader *ue = [MFUEReader shared];
+    if (ue.libBase == 0) {
+        [self noteUE4Issue:@"libBase = 0（HUD 还没拿到模块基址，见绑定日志）"];
+        return NO;
+    }
+    if (![MFReadBackend shared].gateOpen) {
+        [self noteUE4Issue:@"读取后端门未开（目标 task port 未绑定）"];
+        return NO;
+    }
+
+    const CFTimeInterval now = CACurrentMediaTime();
+    if (_ueResolve == nil || now - _ueResolveAt > kMFUEResolveTTL) {
+        _ueResolve = [ue resolve];
+        _ueResolveAt = now;
+    }
+    MFUEResolveResult *r = _ueResolve;
+    if (r == nil || r.brokenAt) {
+        [self noteUE4Issue:r.brokenAt ?: @"链解析失败"];
+        _ueResolve = nil;                 // 下一帧立刻重试
+        return NO;
+    }
+
+    // 相机每帧都要读 —— 玩家一直在动
+    MFCamera cam = {0};
+    if (![ue readCamera:&cam result:r]) {
+        [self noteUE4Issue:@"相机读不出来（CameraCacheEntry 扫描没命中）"];
+        _ueResolve = nil;
+        return NO;
+    }
+    if (outCamera) *outCamera = cam;
+
+    MFReadBackend *rb = [MFReadBackend shared];
+    const uint32_t posOffset = ue.profile.actor_worldPos;
+
+    // ── Actor 指针数组：定期重读（一次批量读，几十 KB）──
+    if (_ueActorAddrs.count == 0 || now - _ueAddrsAt > kMFUEAddressTTL) {
+        [_ueActorAddrs removeAllObjects];
+        _ueAddrsAt = now;
+        _ueCursor = 0;
+        size_t bytes = (size_t)r.actorsNum * 8;
+        uint64_t *ptrs = (uint64_t *)malloc(bytes);
+        if (ptrs) {
+            if ([rb readRemote:r.actorsData into:ptrs size:bytes]) {
+                for (int i = 0; i < r.actorsNum; i++)
+                    if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
+            }
+            free(ptrs);
+        }
+    }
+
+    // ── 坐标：轮转读，每帧有预算 ──
+    const NSUInteger total = _ueActorAddrs.count;
+    if (total > 0) {
+        NSUInteger budget = MIN(kMFUEActorBudgetPerFrame, total);
+        for (NSUInteger i = 0; i < budget; i++) {
+            uint64_t addr = _ueActorAddrs[(_ueCursor + i) % total].unsignedLongLongValue;
+            float pos[3] = {0};
+            if (![rb readFloat3:addr + posOffset out:pos]) continue;
+            if (!(fabsf(pos[0]) <= kMFUE_PosAbsMax)) continue;
+            if (!(fabsf(pos[1]) <= kMFUE_PosAbsMax)) continue;
+            if (!(fabsf(pos[2]) <= kMFUE_PosAbsMax)) continue;
+            if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) continue;
+            NSNumber *key = @(addr);
+            MFUECachedActor *cached = _ueActors[key];
+            if (cached == nil) {
+                cached = [[MFUECachedActor alloc] init];
+                cached.address = addr;
+                _ueActors[key] = cached;
+            }
+            cached.x = pos[0]; cached.y = pos[1]; cached.z = pos[2];
+            cached.seenAt = now;
+        }
+        _ueCursor = (_ueCursor + budget) % total;
+    }
+
+    // ── 用当前相机把缓存的世界坐标投影出来 ──
+    const MFScreen screen = [MFProjection screenWithSize:size fov:cam.fov];
+    const float camPos[3] = {cam.x, cam.y, cam.z};
+    /*
+     * 距离闸：UE4 的 Actors 是整关卡的列表，几百米外的静态物件没有任何意义，
+     * 全画出来会把 GPU 拉满。用菜单里的「盒子距离」当上限，保底 100 米。
+     */
+    const float maxDrawDistance = MAX([MFSettings shared].boxDrawDistance, 100.0f);
+    NSMutableArray<MFEntity *> *ents = [NSMutableArray arrayWithCapacity:_ueActors.count];
+    NSMutableArray<NSNumber *> *stale = nil;
+    for (NSNumber *key in _ueActors) {
+        MFUECachedActor *a = _ueActors[key];
+        if (now - a.seenAt > kMFUEActorTTL) {          // 读不到了（离开关卡/对象销毁）
+            if (stale == nil) stale = [NSMutableArray array];
+            [stale addObject:key];
+            continue;
+        }
+        const float world[3] = {a.x, a.y, a.z};
+        MFEntity *e = [[MFEntity alloc] init];
+        e.address = a.address;
+        e.worldX = a.x; e.worldY = a.y; e.worldZ = a.z;
+        e.distanceMeters = [MFProjection distanceMetersFrom:world to:camPos];
+        if (e.distanceMeters > maxDrawDistance) continue;   // 太远，连投影都不用做
+        e.screen = [[MFProjection shared] projectTarget:world camera:cam screen:screen];
+        e.isVisible = e.screen.valid;
+        {   // 方位角 —— 只由坐标 + 相机 yaw 算，不依赖任何游戏字段
+            float dx = a.x - cam.x, dy = a.y - cam.y;
+            float ty = atan2f(dy, dx) / kMF_Deg2Rad;
+            float d = ty - cam.yaw;
+            while (d >  180.0f) d -= 360.0f;
+            while (d < -180.0f) d += 360.0f;
+            e.bearingDeg = d;
+            e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
+        }
+        [ents addObject:e];
+    }
+    for (NSNumber *key in stale) [_ueActors removeObjectForKey:key];
+
+    if (outEntities) *outEntities = ents;
+    if (outLoot) *outLoot = @[];     // UE4 链还没做物资分类：长度/价值字段都未校准
+    if (outSource) *outSource = MFDrawSourceUE4;
+    return YES;
+}
+
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
     _entCount = 0;
     _lootCount = 0;
@@ -152,24 +391,19 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         return;
     }
 
-    if (!self.reader.ready) { [self noteDrawingActivity:NO]; return; }
-
-    NSDictionary *frame = [self.reader readFrameWithSize:size];
-    _camOK = [frame[@"cameraOK"] boolValue];
-    if (!_camOK) { [self noteDrawingActivity:NO]; return; }
+    if (!self.reader.ready && [MFUEReader shared].libBase == 0) {
+        [self noteDrawingActivity:NO];
+        return;
+    }
 
     MFCamera cam = {0};
-    NSDictionary *cd = frame[@"camera"];
-    cam.x     = [cd[@"x"] floatValue];
-    cam.y     = [cd[@"y"] floatValue];
-    cam.z     = [cd[@"z"] floatValue];
-    cam.pitch = [cd[@"pitch"] floatValue];
-    cam.yaw   = [cd[@"yaw"] floatValue];
-    cam.roll  = [cd[@"roll"] floatValue];
-    cam.fov   = [cd[@"fov"] floatValue];
+    NSArray<MFEntity *> *ents = nil;
+    NSArray<MFEntity *> *loot = nil;
+    MFDrawSource source = MFDrawSourceNone;
+    _camOK = [self acquireFrameWithSize:size camera:&cam entities:&ents loot:&loot source:&source];
+    _source = source;
+    if (!_camOK) { [self noteDrawingActivity:NO]; return; }
 
-    NSArray<MFEntity *> *ents = frame[@"entities"];
-    NSArray<MFEntity *> *loot = frame[@"loot"];
     _entCount = ents.count;
     _lootCount = loot.count;
 
@@ -599,21 +833,41 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
 #pragma mark - 诊断
 
-- (NSString *)dumpFrameWithSize:(CGSize)size {
-    NSDictionary *frame = [self.reader readFrameWithSize:size];
-    NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"相机：%@\n", [frame[@"cameraOK"] boolValue] ? @"✓" : @"✗"];
-    NSDictionary *cd = frame[@"camera"];
-    if (cd) {
-        [s appendFormat:@"  位置 (%.1f, %.1f, %.1f)\n  角度 (%.1f, %.1f, %.1f)  FOV %.1f\n",
-         [cd[@"x"] floatValue], [cd[@"y"] floatValue], [cd[@"z"] floatValue],
-         [cd[@"pitch"] floatValue], [cd[@"yaw"] floatValue], [cd[@"roll"] floatValue],
-         [cd[@"fov"] floatValue]];
+- (NSString *)dataSourceText {
+    switch (_source) {
+        case MFDrawSourceUE4:        return @"UE4 链（模块基址 + GWorld 静态偏移，自动建立）";
+        case MFDrawSourceCalibrated: return @"已校准的白米饭链（三个绝对基址）";
+        default:                     return @"未取到（见下面的断点说明）";
     }
-    [s appendFormat:@"实体：%lu\n物资：%lu\n", (unsigned long)[frame[@"entities"] count],
-     (unsigned long)[frame[@"loot"] count]];
-    [s appendFormat:@"\n%@\n", frame[@"stats"] ?: @""];
+}
+
+- (NSString *)dumpFrameWithSize:(CGSize)size {
+    MFCamera cam = {0};
+    NSArray<MFEntity *> *ents = nil;
+    NSArray<MFEntity *> *loot = nil;
+    MFDrawSource source = MFDrawSourceNone;
+    BOOL ok = [self acquireFrameWithSize:size camera:&cam entities:&ents loot:&loot source:&source];
+    _source = source;
+
+    NSMutableString *s = [NSMutableString string];
+    [s appendFormat:@"数据源：%@\n", [self dataSourceText]];
+    [s appendFormat:@"相机：%@\n", ok ? @"✓" : @"✗"];
+    if (ok) {
+        [s appendFormat:@"  位置 (%.1f, %.1f, %.1f)\n  角度 (%.1f, %.1f, %.1f)  FOV %.1f\n",
+         cam.x, cam.y, cam.z, cam.pitch, cam.yaw, cam.roll, cam.fov];
+    }
+    [s appendFormat:@"实体：%lu\n物资：%lu\n",
+     (unsigned long)ents.count, (unsigned long)loot.count];
+    [s appendFormat:@"\n%@\n", [[MFReadBackend shared] statsText]];
+    [s appendFormat:@"UE4 缓存：Actor 指针 %lu 个 · 坐标 %lu 个 · 游标 %lu\n",
+     (unsigned long)_ueActorAddrs.count, (unsigned long)_ueActors.count,
+     (unsigned long)_ueCursor];
+    if (_ueLastIssue) [s appendFormat:@"UE4 最近问题：%@\n", _ueLastIssue];
+
+    [s appendString:@"\n—— MFGameReader（手工校准那条）——\n"];
     [s appendString:[[MFGameReader shared] diagnosticReport]];
+    [s appendString:@"\n—— MFUEReader（可自动建立那条）——\n"];
+    [s appendString:[[MFUEReader shared] diagnosticReport]];
     return s;
 }
 
