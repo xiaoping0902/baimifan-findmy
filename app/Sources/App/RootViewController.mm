@@ -12,6 +12,7 @@
 #import "../Features/MFKeychain.h"
 #import "../Features/MFAntiBan.h"
 #import "../Features/MFEnvCheck.h"
+#import "../Features/MFModuleExport.h"
 #import "../HUD/MFHUDLauncher.h"
 #import "../HUD/MFHUDLog.h"
 #import "MFDebugExport.h"
@@ -189,6 +190,12 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"模块定位" detail:@"找游戏进程 + 取主模块基址（UE4 链的起点）" action:@"actLocateModule"]];
     [s1.rows addObject:[self actionRow:@"UE4 链解析" detail:@"GWorld → 玩家 → 相机 → Actors 逐级验证" action:@"actUEResolve"]];
     [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
+    [s1.rows addObject:[self actionRow:@"扫描游戏模块"
+                                detail:@"列出游戏 App 里所有 Mach-O：大小 / 架构 / 有没有加密"
+                                action:@"actScanGameModules"]];
+    [s1.rows addObject:[self actionRow:@"导出游戏模块"
+                                detail:@"把 libUE4 之类的大模块拷到 Media，电脑一条命令拉走"
+                                action:@"actExportGameModules"]];
     [secs addObject:s1];
 
     // ---------- 2 清理与防封 ----------
@@ -426,6 +433,77 @@ extern char **environ;
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+#pragma mark 游戏模块扫描 / 导出（[M5.76]）
+
+/*
+ * 为什么在 App 里做这件事：
+ *
+ *   要补上血量 / 骨骼 / 武器这些字段，必须拿到游戏的 libUE4 模块本体。
+ *   它在 /var/containers/Bundle/Application/<UUID>/<App>.app/ 里，
+ *   而 AFC 只暴露 /var/mobile/Media —— 电脑侧够不着。
+ *
+ *   但我们有 no-sandbox + 全盘读权限，所以让 App 自己拷过去最省事：
+ *   不用装 Filza、不用 SSH、更不用 frida-ios-dump。
+ *
+ *   ★ iOS 上 FairPlay 只加密主可执行文件，内嵌的 .framework 是明文 ——
+ *     UE 引擎在 iOS 上通常就是独立 framework，所以大概率根本不用脱壳。
+ *     扫描报告里的 cryptid 会直接告诉我们答案。
+ */
+- (void)showCopyableReport:(NSString *)title text:(NSString *)text {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title
+                                                             message:text
+                                                      preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"复制全文" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *_) {
+        [UIPasteboard generalPasteboard].string = text;
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"关" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)actScanGameModules {
+    NSString *bid = [MFOffsets shared].current.bundleID;
+    if (bid.length == 0) bid = @"com.tencent.tmgp.dfm";
+    self.navigationItem.prompt = @"正在扫描游戏模块…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *report = [MFModuleExport scanReportForBundleID:bid];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.navigationItem.prompt = nil;
+            [self showCopyableReport:@"游戏模块扫描" text:report];
+        });
+    });
+}
+
+- (void)actExportGameModules {
+    NSString *bid = [MFOffsets shared].current.bundleID;
+    if (bid.length == 0) bid = @"com.tencent.tmgp.dfm";
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"导出游戏模块"
+                         message:[NSString stringWithFormat:
+            @"把 %@ 里 32 MB 以上的 Mach-O 模块拷到\n"
+            @"  /var/mobile/Media/mf-debug/modules/\n\n"
+            @"几百 MB 的模块要几十秒，期间别退出 App。\n\n"
+            @"拉取（电脑侧）：\n"
+            @"  python -X utf8 -m pymobiledevice3 afc pull /mf-debug/modules <目录>", bid]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"开始导出" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *_) { [self runModuleExport:bid]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)runModuleExport:(NSString *)bundleID {
+    self.navigationItem.prompt = @"正在导出游戏模块…（大文件会慢，别退出）";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *report = [MFModuleExport exportModulesForBundleID:bundleID
+                                                          minBytes:32ULL * 1024 * 1024];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.navigationItem.prompt = nil;
+            [self showCopyableReport:@"游戏模块导出" text:report];
+        });
+    });
 }
 
 #pragma mark 一键开始（纯 TrollStore 模式，不用内核）
