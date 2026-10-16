@@ -41,7 +41,8 @@ static void TestButtonsAndBallAtNativeSize(void) {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     Frame(menu, overlay); Frame(menu, overlay);
     // These are the actual production buttons, not a replacement ball widget.
-    for (int tab : {1, 2, 0, 2, 1, 0}) {
+    const int tabSequence[] = {1, 2, 0, 2, 1, 0};
+    for (int tab : tabSequence) {
         ClickMenu(menu, overlay, CGPointMake(64 + tab * 110, 80));
         CHECK([[menu valueForKey:@"tab"] intValue] == tab,
               "each production tab click must select its page without a stuck press");
