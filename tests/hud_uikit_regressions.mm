@@ -131,6 +131,16 @@ static void TestCaptureShieldPreservesHitsAndResizing(void) {
           [window hitTest:CGPointMake(28, 28) withEvent:nil] == control &&
           [window hitTest:CGPointMake(100, 100) withEvent:nil] == nil,
           "protected ball geometry must follow native shrink without retaining the old hit area");
+    window.bounds = CGRectMake(0, 0, 520, 348);
+    window.rootViewController.view.frame = window.bounds;
+    shield.bounds = CGRectMake(0, 0, 348, 520);
+    shield.center = CGPointMake(260, 174);
+    shield.transform = CGAffineTransformMakeRotation(M_PI_2);
+    [shield layoutIfNeeded];
+    CGPoint rotatedControl = [shield convertPoint:CGPointMake(28, 28) toView:window];
+    CHECK([window hitTest:rotatedControl withEvent:nil] == control &&
+          CGSizeEqualToSize(content.bounds.size, CGSizeMake(348, 520)) && FindSecureField(shield) == field,
+          "rotation must preserve protected content coordinates without rebuilding the secure field");
     window.hidden = YES;
 }
 

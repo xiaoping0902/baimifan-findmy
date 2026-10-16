@@ -104,6 +104,7 @@ def main():
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
                 if args.suite == "menu":
                     sources += [ROOT / "app/Sources/HUD/MFMenuUI.mm",
+                                ROOT / "app/Sources/HUD/MFHUDCaptureShieldView.mm",
                                 ROOT / "app/Sources/Game/MFSettings.mm",
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]

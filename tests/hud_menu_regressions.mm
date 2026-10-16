@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "MFMenuUI.h"
+#import "MFHUDCaptureShieldView.h"
 #import "../app/Sources/Render/MFOverlayView.h"
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "../app/Sources/Render/imgui/imgui_internal.h"
@@ -28,9 +29,14 @@ static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
 static void TestButtonsAndBallAtNativeSize(void) {
     UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
     window.rootViewController = [UIViewController new];
+    NSString *captureError = nil;
+    MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:window.bounds
+                                                                          error:&captureError];
+    CHECK(shield && !captureError, "production menu cycles require the real secure canvas");
+    [window.rootViewController.view addSubview:shield];
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:window.bounds interactive:YES];
     overlay.automaticallyStartsRendering = NO;
-    [window.rootViewController.view addSubview:overlay]; window.hidden = NO;
+    [shield.contentView addSubview:overlay]; window.hidden = NO;
     MFMenuUI *menu = [MFMenuUI new];
     [MFMenuUI setCollapsed:NO];
     __block BOOL resizePending = NO;
@@ -54,6 +60,7 @@ static void TestButtonsAndBallAtNativeSize(void) {
         resizePending = NO;
         window.bounds = CGRectMake(0, 0, 56, 56);
         window.rootViewController.view.frame = window.bounds;
+        shield.frame = window.bounds; [shield layoutIfNeeded];
         overlay.frame = window.bounds;
         Frame(menu, overlay); Frame(menu, overlay);
         CHECK(CGSizeEqualToSize(overlay.captureRect.size, CGSizeMake(56, 56)) &&
@@ -61,15 +68,22 @@ static void TestButtonsAndBallAtNativeSize(void) {
               ![overlay acceptsInteractionAtPoint:CGPointMake(100, 100)] &&
               ImGui::GetDrawData()->TotalVtxCount > 20,
               "the 56pt native window must contain a drawn, hittable ball and release the old panel area");
+        CHECK([shield hitTest:CGPointMake(28, 28) withEvent:nil] == overlay &&
+              [shield hitTest:CGPointMake(100, 100) withEvent:nil] == nil,
+              "secure canvas must preserve actual ImGui ball hits and reject the old panel area");
         ClickMenu(menu, overlay, CGPointMake(28, 28));
         CHECK(![MFMenuUI collapsed] && resizePending,
               "one tap on the real small ball must restore the production menu");
         resizePending = NO;
         window.bounds = CGRectMake(0, 0, 348, 520);
-        window.rootViewController.view.frame = window.bounds; overlay.frame = window.bounds;
+        window.rootViewController.view.frame = window.bounds;
+        shield.frame = window.bounds; [shield layoutIfNeeded]; overlay.frame = window.bounds;
         Frame(menu, overlay); Frame(menu, overlay);
         CHECK(overlay.captureRect.size.width == 348 && !CGRectIsEmpty(overlay.headerDragRect),
               "restored native window must draw the reachable full menu on every cycle");
+        CHECK([shield hitTest:CGPointMake(64, 80) withEvent:nil] == overlay &&
+              [shield hitTest:CGPointMake(2, 200) withEvent:nil] == nil,
+              "expanded secure canvas must retain tab hits and transparent menu margins");
     }
     [MFMenuUI setCollapseChangeHandler:nil];
     ImGui::DestroyContext(); window.hidden = YES;
