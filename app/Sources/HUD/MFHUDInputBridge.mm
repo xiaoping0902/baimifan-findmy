@@ -253,9 +253,8 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     CGPoint inWindow = [window convertPoint:global fromCoordinateSpace:window.screen.fixedCoordinateSpace];
     CGPoint local = [overlay convertPoint:inWindow fromView:window];
     if (phase == MFHUDTouchBegan) {
-        // The shared window never takes the system hit. Observe menu controls
-        // using overlay geometry independently; a touch starting in a hole
-        // must not become a menu gesture when it later crosses a control.
+        // Use exactly the same geometry as UIKit. A touch which starts in a
+        // hole must not become a menu gesture when it later crosses a control.
         if (![overlay acceptsInteractionAtPoint:local]) return;
         _gestureIndex = contactIndex;
         CGRect dragRect = overlay.headerDragRect;

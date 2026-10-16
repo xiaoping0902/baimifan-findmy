@@ -88,39 +88,6 @@ static void TestMenuUsesItsVisiblePanel(void) {
     menu.hidden = YES;
 }
 
-static void TestSharedMenuNeverTakesTheSystemTouch(void) {
-    // The old exclusive menu is the RED comparison when the new role is absent.
-    Class cls = NSClassFromString(@"MFHUDSharedTouchWindow") ?: MFHUDWindow.class;
-    MFHUDWindow *allocated = [cls alloc];
-    CHECK([allocated _ignoresHitTest],
-          "shared menu must leave system touches to the lower app BEFORE context initialization");
-    CHECK(![allocated _canBecomeKeyWindow],
-          "shared menu must never take key focus from the normal touch recipient");
-    drawingContextCreations = interactiveDrawingCreations = 0;
-    Method options = class_getInstanceMethod(UIWindow.class,
-                                             @selector(_contextOptionsWithInitialOptions:));
-    originalContextOptions = method_setImplementation(options, (IMP)ObserveOptions);
-    MFHUDWindow *menu = [allocated initWithFrame:CGRectMake(24, 90, 348, 520)];
-    menu.rootViewController = [UIViewController new];
-    UIView *control = [[UIView alloc] initWithFrame:CGRectMake(20, 20, 80, 40)];
-    [menu.rootViewController.view addSubview:control];
-    menu.interactiveView = menu.rootViewController.view;
-    menu.hidden = NO;
-    [menu layoutIfNeeded]; [CATransaction flush];
-    method_setImplementation(options, originalContextOptions);
-    CHECK(drawingContextCreations > 0 && menu._contextId != 0 &&
-          interactiveDrawingCreations == 0,
-          "shared menu must create an actual native context that never consumes system hits");
-    CHECK([control hitTest:CGPointMake(10, 10) withEvent:nil] == control &&
-          [menu hitTest:CGPointMake(30, 30) withEvent:nil] == nil,
-          "even a visible menu control must leave the UIKit touch unclaimed");
-    menu.bounds = CGRectMake(0, 0, 56, 56);
-    control.frame = menu.bounds;
-    CHECK([menu hitTest:CGPointMake(28, 28) withEvent:nil] == nil,
-          "the restore ball must also leave system touches to the lower app");
-    menu.hidden = YES;
-}
-
 @interface NSObject (CaptureShieldRegression)
 - (instancetype)initWithFrame:(CGRect)frame error:(NSString **)error;
 @end
@@ -186,7 +153,6 @@ static void TestCaptureShieldPreservesHitsAndResizing(void) {
         TestCaptureShieldPreservesHitsAndResizing();
         TestDrawingIsPassthroughBeforeInitialization();
         TestMenuUsesItsVisiblePanel();
-        TestSharedMenuNeverTakesTheSystemTouch();
         puts("PASS: real UIKit drawing initialization and menu hit bounds");
         fflush(stdout);
         exit(0);

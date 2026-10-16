@@ -141,12 +141,11 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     drawWin.hidden = NO;
     self.drawingWindow = drawWin;
 
-    // ── ② 菜单窗（HID 交互，系统触摸全部放行）────────────
+    // ── ② 菜单窗（可交互）────────────────────────────
     // [M5.22] 对齐 TrollSpeed（绘制窗 10000010，菜单窗略低一点）
-    // HID observes menu gestures independently. The original system touch must
-    // reach the lower app even when the same point activates a menu control.
-    MFHUDSharedTouchWindow *menuWin = [[MFHUDSharedTouchWindow alloc]
-        initWithFrame:CGRectMake(24, 90, 348, 520)];
+    // A full-screen interactive UIWindow blocks the desktop even when its
+    // Metal view rejects points. Keep the actual native surface panel-sized.
+    MFHUDWindow *menuWin = [[MFHUDWindow alloc] initWithFrame:CGRectMake(24, 90, 348, 520)];
     menuWin.windowLevel = 10000009.0;
     menuWin.backgroundColor = [UIColor clearColor];
     menuWin.opaque = NO;
@@ -172,9 +171,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     [self.menuContent.contentView addSubview:menuView];
     menuWin.interactiveView = self.menuContent;
     menuWin.hidden = NO;
+    [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
-    self.startupReport[@"menuInputPolicy"] = @"shared-hid-system-passthrough";
-    MFHUDLogLine(@"菜单输入：系统触摸全部放行，HID 独立操作菜单；点按和拖动同时作用下层");
     self.startupReport[@"captureProtectedSurfaces"] = @[@"menu", @"ball", @"drawing"];
     MFHUDLogLine(@"菜单、悬浮球、绘制层已挂入固定安全画布；截图和录屏效果待真机验收");
 
@@ -244,20 +242,12 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             Class hostingClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
             uint32_t nativeMenu = [self nativeContextIDForWindow:self.hudMenuWindow];
             uint32_t nativeDrawing = [self nativeContextIDForWindow:self.drawingWindow];
-            MFHUDLogLine(@"菜单窗口=%@ nativeContext=0x%x（创建时固定忽略命中，HID 输入独立）",
-                         NSStringFromClass(self.hudMenuWindow.class), nativeMenu);
             MFHUDLogLine(@"绘制窗口=%@ nativeContext=0x%x（创建时固定忽略命中）",
                          NSStringFromClass(self.drawingWindow.class), nativeDrawing);
             if (nativeDrawing == 0) {
                 // A generic remote CAContext does not inherit the window's
                 // input policy. Do not silently create a full-screen blocker.
                 [self failStartup:@"绘制窗口未取得原生 context，已停止悬浮窗以免遮挡触摸。"];
-                return;
-            }
-            if (nativeMenu == 0) {
-                // A generic remote layer context need not inherit the native
-                // window's ignores-hit-test policy. Do not silently use one.
-                [self failStartup:@"菜单窗口未取得原生 context，无法确认系统触摸放行，已停止悬浮窗。"];
                 return;
             }
             self.menuHost = [[MFHUDWindowHost alloc] initWithLayer:self.hudMenuWindow.layer

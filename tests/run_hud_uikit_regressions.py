@@ -86,7 +86,7 @@ def main():
             elif args.suite == "input":
                 sources = [ROOT / "tests/hud_input_bridge_regressions.mm",
                            ROOT / "app/Sources/HUD/MFHUDInputBridge.mm",
-                           ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm", source]
+                           ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"]
                 sources += [ROOT / f"app/Sources/Render/imgui/{name}.cpp"
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
             elif args.suite == "game-reader":
@@ -105,7 +105,6 @@ def main():
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
                 if args.suite == "menu":
                     sources += [ROOT / "app/Sources/HUD/MFMenuUI.mm",
-                                source,
                                 ROOT / "app/Sources/Game/MFSettings.mm",
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]
