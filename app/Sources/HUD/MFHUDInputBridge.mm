@@ -26,8 +26,9 @@
 - (BOOL)isInRange;
 @end
 
-// IOHID digitizer fields retain the full contact identity across touch/range
-// changes. Read children from the retained BKS event, never the hand's own ID.
+// Track the full digitizer index of the finger child. On the target iPad,
+// raw identity changes 3 -> 2 on lift while index stays stable. The factory
+// probe below validates field locations, not hardware identity stability.
 typedef CFTypeRef (*MFCreateDigitizer)(CFAllocatorRef, uint64_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double,
     Boolean, Boolean, uint32_t);
@@ -95,7 +96,7 @@ static BOOL ReadContacts(CFTypeRef event, const MFHIDFunctions &api,
     result.identity = (uint32_t)api.integer(event, api.identityField);
     result.index = (uint32_t)api.integer(event, api.indexField);
     result.type = type;
-    if (result.identity == 0) result.invalid = YES;
+    if (result.index == 0) result.invalid = YES;
     // Do not filter touch/range: both can be false on the final finger event.
     return YES;
 }
@@ -137,13 +138,13 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     __weak UIWindow *_window;
     Class _representationClass;
     MFHUDTouchRouter *_router;
-    NSNumber *_dragIdentity;
+    NSNumber *_dragIndex;
     CGPoint _dragStart, _windowStart;
     unsigned _loggedBegins, _loggedMoves, _loggedOther, _loggedLag, _loggedTraces;
     int _lockToken;
     BOOL _installed;
 
-    NSInteger _gestureIdentity; // Full, validated IOHID identity; zero means no owner.
+    NSInteger _gestureIndex; // Full uint32_t contact index; zero means no owner.
     BOOL _dragMoved;
 
 }
@@ -174,7 +175,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     __weak MFHUDInputBridge *weakSelf = self;
     notify_register_dispatch("com.apple.springboard.lockstate", &_lockToken,
                              dispatch_get_main_queue(), ^(int token) { [weakSelf cancelAll]; });
-    MFHUDLogLine(@"HID 输入已接通：IOHID 完整触点编号 + AX 阶段/坐标；原生触摸转发已停用以避免双击");
+    MFHUDLogLine(@"HID 输入已接通：IOHID 完整触点 index + AX 阶段/坐标（rawID 仅诊断）；原生触摸转发已停用以避免双击");
     return YES;
 }
 - (void)dealloc { if (_lockToken != NOTIFY_TOKEN_INVALID) notify_cancel(_lockToken); }
@@ -185,7 +186,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     BOOL routerWillCancel = _router.hasActiveTouch;
     [_router cancelAll];
     if (!routerWillCancel) [self cancelTouch];
-    _dragIdentity = nil; _gestureIdentity = 0; _dragMoved = NO;
+    _dragIndex = nil; _gestureIndex = 0; _dragMoved = NO;
 }
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down {
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
@@ -223,7 +224,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
             rep.isInRangeLift, rep.isInRange, rep.isCancel,
             (unsigned)(paths.firstObject ? paths.firstObject.pathIdentity : 0),
             (unsigned long)contacts.count, contacts.identity, contacts.index, contacts.type, contacts.invalid,
-            NSStringFromCGPoint(rep.location), _router.hasActiveTouch, _dragIdentity, delay * 1000);
+            NSStringFromCGPoint(rep.location), _router.hasActiveTouch, _dragIndex, delay * 1000);
     }
     // AX's aggregate location describes one path. Never assign it to other fingers.
     // Use the visible scrollbar for content scrolling; multi-touch cancels input.
@@ -232,22 +233,22 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     }
     if (paths.count == 0) return;
     if (contacts.count != 1) { [self cancelAll]; return; }
-    NSInteger identity = (NSInteger)contacts.identity;
+    NSInteger contactIndex = (NSInteger)contacts.index;
     MFHUDTouchPhase phase;
     if (rep.isTouchDown) phase = MFHUDTouchBegan;
     else if (rep.isMove) phase = MFHUDTouchMoved;
     else if (rep.isLift || rep.isInRangeLift) phase = MFHUDTouchEnded;
     else return;  // Hover/range notifications are not finger lifts.
     CGPoint global = rep.location;
-    if (!isfinite(global.x) || !isfinite(global.y) || identity <= 0) return;
+    if (!isfinite(global.x) || !isfinite(global.y) || contactIndex <= 0) return;
 
     // A new contact cancels an existing press. Move/up from an unowned
     // contact cannot alter ownership, position, drag state or a button.
-    if (phase == MFHUDTouchBegan && _gestureIdentity != 0) {
-        if (identity != _gestureIdentity) [self cancelAll];
+    if (phase == MFHUDTouchBegan && _gestureIndex != 0) {
+        if (contactIndex != _gestureIndex) [self cancelAll];
         return;
     }
-    if (phase != MFHUDTouchBegan && identity != _gestureIdentity) return;
+    if (phase != MFHUDTouchBegan && contactIndex != _gestureIndex) return;
 
     CGPoint inWindow = [window convertPoint:global fromCoordinateSpace:window.screen.fixedCoordinateSpace];
     CGPoint local = [overlay convertPoint:inWindow fromView:window];
@@ -255,15 +256,15 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         // Use exactly the same geometry as UIKit. A touch which starts in a
         // hole must not become a menu gesture when it later crosses a control.
         if (![overlay acceptsInteractionAtPoint:local]) return;
-        _gestureIdentity = identity;
+        _gestureIndex = contactIndex;
         CGRect dragRect = overlay.headerDragRect;
         if (!CGRectIsNull(dragRect) && !CGRectIsEmpty(dragRect) &&
             CGRectContainsPoint(dragRect, local)) {
-            _dragIdentity = @(identity); _dragStart = global;
+            _dragIndex = @(contactIndex); _dragStart = global;
             _windowStart = window.center; _dragMoved = NO;
         }
     }
-    if (_dragIdentity) {
+    if (_dragIndex) {
         CGFloat dx = global.x - _dragStart.x, dy = global.y - _dragStart.y;
         if (dx * dx + dy * dy >= 64.0) _dragMoved = YES;
         if (_dragMoved) {
@@ -282,14 +283,14 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
                 [self touchAtPoint:local down:YES];
                 [self touchAtPoint:local down:NO];
             }
-            _dragIdentity = nil; _gestureIdentity = 0; _dragMoved = NO;
+            _dragIndex = nil; _gestureIndex = 0; _dragMoved = NO;
         }
         return;
     }
-    BOOL handled = [_router handleTouchID:identity point:local phase:phase captureRect:overlay.captureRect];
-    if (phase == MFHUDTouchEnded) _gestureIdentity = 0;
-    if (trace) MFHUDLogLine(@"触摸路由=menu phase=%ld identity=%ld local=%@ handled=%d",
-        (long)phase, (long)identity, NSStringFromCGPoint(local), handled);
+    BOOL handled = [_router handleTouchID:contactIndex point:local phase:phase captureRect:overlay.captureRect];
+    if (phase == MFHUDTouchEnded) _gestureIndex = 0;
+    if (trace) MFHUDLogLine(@"触摸路由=menu phase=%ld index=%ld local=%@ handled=%d",
+        (long)phase, (long)contactIndex, NSStringFromCGPoint(local), handled);
 }
 
 @end

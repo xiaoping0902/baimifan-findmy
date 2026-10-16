@@ -13,8 +13,8 @@
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fflush(stderr); exit(1); } } while (0)
 
 // Use real IOHID events and production input/coordinate/ownership code. Only AX
-// decoding and Metal output are substituted: the device's AX IDs change 3 -> 2
-// during one tap, while BackBoard retains touch ID 420 on path 12 throughout it.
+// decoding and Metal output are substituted. Real M5.69 logs show both AX
+// pathIdentity and raw identity changing 3 -> 2; raw index owns the gesture.
 typedef CFTypeRef (*CreateDigitizer)(CFAllocatorRef, uint64_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double,
     Boolean, Boolean, uint32_t);
@@ -176,7 +176,7 @@ static void TestDeviceIndexOwnsTheCompleteGesture(void) {
     DeviceEvent(b, w, p, 12, 3, 0, CGPointMake(120, 100));
     DeviceEvent(b, w, p, 13, 3, 1, CGPointMake(125, 100));
     DeviceEvent(b, w, p, 13, 2, 3, CGPointMake(125, 100));
-    CHECK(p.imgui.presses == 2 && p.imgui.releases == 1,
+    CHECK(p.imgui.presses == 2 && p.imgui.releases == 1 && p.imgui.lastPoint.x == 120,
           "another index with the same hardware identity must not move or release the owner");
     DeviceEvent(b, w, p, 12, 2, 3, CGPointMake(120, 100));
     CHECK(p.imgui.releases == 2, "the original device index must still release");
@@ -191,6 +191,18 @@ static void TestDeviceIndexOwnsTheCompleteGesture(void) {
     DeviceEvent(b, w, p, 7, 2, 3, CGPointMake(29, 28));
     CHECK(p.imgui.cancellations == 1 && p.imgui.presses == 3,
           "a second index must cancel a pending ball gesture even with equal raw identities");
+    w.hidden = YES;
+}
+static void TestOnlyTheIndexDeterminesContactValidity(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    DeviceEvent(b, w, p, 14, 0, 0, CGPointMake(120, 100));
+    DeviceEvent(b, w, p, 14, 0, 3, CGPointMake(120, 100));
+    CHECK(p.imgui.presses == 1 && p.imgui.releases == 1,
+          "raw identity is diagnostic and must not invalidate a nonzero contact index");
+    DeviceEvent(b, w, p, 15, 3, 0, CGPointMake(120, 100));
+    DeviceEvent(b, w, p, 0, 3, 3, CGPointMake(120, 100));
+    CHECK(p.imgui.cancellations == 1 && p.imgui.releases == 1,
+          "a zero index with a nonzero raw identity must cancel without clicking");
     w.hidden = YES;
 }
 static void TestDeviceTapReleasesDespiteChangingAXIdentity(void) {
@@ -281,7 +293,7 @@ static void TestMetadataDoesNotEndGestureButInvalidContactCancels(void) {
     Send(b, w, p, 421, 3, 0, CGPointMake(80, 100));
     Send(b, w, p, 0, 3, 2, CGPointMake(80, 100));
     CHECK(p.imgui.cancellations == 1 && p.imgui.releases == 1,
-          "an explicit digitizer contact without an identity must cancel without clicking");
+          "an explicit digitizer contact without an index must cancel without clicking");
     w.hidden = YES;
 }
 static void TestNewFingerBeginCancelsAnExistingOwner(void) {
@@ -295,14 +307,14 @@ static void TestNewFingerBeginCancelsAnExistingOwner(void) {
     w.hidden = YES;
 }
 
-// Historical logs read 3 -> 2 from hardcoded private fields. That does not
-// prove contact identity changes. The production bridge must validate the
-// runtime fields using a factory, then keep actual contact ownership strict.
+// Field layout and gesture ownership are separate checks. Even at identical
+// coordinates, a different full index cannot release the owner; a changing
+// raw identity on the same index is covered by the hardware replay above.
 static void TestForeignLiftAtSamePointCannotRelease(void) {
     UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
     Send(b, w, p, 3, 3, 0, CGPointMake(80, 100));
     CHECK(p.imgui.presses == 1 && p.redrawRequests > 0,
-          "a known factory identity must reach ImGui and request redraw");
+          "a known factory index must reach ImGui and request redraw");
     Send(b, w, p, 2, 2, 2, CGPointMake(80, 100));
     CHECK(p.imgui.releases == 0,
           "a different validated contact at the same point cannot release the owner");
@@ -341,7 +353,7 @@ static void TestRawIdentityCannotCollideWithInternalToken(void) {
     Send(b, w, p, 420, 3, 0, CGPointMake(80, 100));
     Send(b, w, p, 1, 2, 2, CGPointMake(310, 490));
     CHECK(p.imgui.releases == 0,
-          "raw ID 1 must not release an unrelated internal gesture token 1");
+          "raw index 1 must not release an unrelated internal gesture token 1");
     [b cancelAll]; w.hidden = YES;
 }
 
@@ -445,6 +457,7 @@ static void TestCancellationDiscardsQueuedBallTap(void) {
         createVendor = (CreateVendor)dlsym(RTLD_DEFAULT, "IOHIDEventCreateVendorDefinedEvent");
         CHECK(createDigitizer && appendEvent && createVendor, "real IOKit event factories must be available");
         TestDeviceIndexOwnsTheCompleteGesture();
+        TestOnlyTheIndexDeterminesContactValidity();
         TestDeviceTapReleasesDespiteChangingAXIdentity();
         TestDifferentRawContactCannotReleasePrimary();
         TestTitleDragEndsWithTheSameRawContact();
@@ -459,7 +472,7 @@ static void TestCancellationDiscardsQueuedBallTap(void) {
         TestBlankSpaceCannotStartMenuInteraction();
         TestBallTapAndDragHaveDifferentOutcomes();
         TestCancellationDiscardsQueuedBallTap();
-        puts("PASS: production HID bridge releases device taps and drags with stable raw contact ownership");
+        puts("PASS: production HID bridge releases device taps and drags with full digitizer-index ownership");
         fflush(stdout); exit(0);
     });
     return YES;
