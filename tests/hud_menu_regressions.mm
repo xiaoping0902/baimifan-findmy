@@ -8,11 +8,70 @@
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
 static void Frame(MFMenuUI *menu, MFOverlayView *overlay) {
-    ImGui::GetIO().DisplaySize = ImVec2(348, 520);
+    ImGui::GetIO().DisplaySize = ImVec2(overlay.bounds.size.width, overlay.bounds.size.height);
     ImGui::GetIO().DeltaTime = 1.0f / 60;
     ImGui::NewFrame();
     [menu overlayBuildUI:nil overlay:overlay];
     ImGui::Render();
+}
+
+static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
+    ImGuiIO &io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMousePosEvent(point.x, point.y);
+    io.AddMouseButtonEvent(0, true);
+    Frame(menu, overlay); Frame(menu, overlay);
+    io.AddMouseButtonEvent(0, false);
+    Frame(menu, overlay); Frame(menu, overlay);
+}
+
+static void TestButtonsAndBallAtNativeSize(void) {
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
+    window.rootViewController = [UIViewController new];
+    MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:window.bounds interactive:YES];
+    overlay.automaticallyStartsRendering = NO;
+    [window.rootViewController.view addSubview:overlay]; window.hidden = NO;
+    MFMenuUI *menu = [MFMenuUI new];
+    [MFMenuUI setCollapsed:NO];
+    __block BOOL resizePending = NO;
+    [MFMenuUI setCollapseChangeHandler:^(BOOL collapsed) { resizePending = YES; }];
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
+    unsigned char *pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    Frame(menu, overlay); Frame(menu, overlay);
+    // These are the actual production buttons, not a replacement ball widget.
+    for (int tab : {1, 2, 0, 2, 1, 0}) {
+        ClickMenu(menu, overlay, CGPointMake(64 + tab * 110, 80));
+        CHECK([[menu valueForKey:@"tab"] intValue] == tab,
+              "each production tab click must select its page without a stuck press");
+    }
+    for (int cycle = 0; cycle < 3; cycle++) {
+        ClickMenu(menu, overlay, CGPointMake(220, 28));
+        CHECK([MFMenuUI collapsed] && resizePending,
+              "the production collapse button must request a native-window resize");
+        resizePending = NO;
+        window.bounds = CGRectMake(0, 0, 56, 56);
+        window.rootViewController.view.frame = window.bounds;
+        overlay.frame = window.bounds;
+        Frame(menu, overlay); Frame(menu, overlay);
+        CHECK(CGSizeEqualToSize(overlay.captureRect.size, CGSizeMake(56, 56)) &&
+              [overlay acceptsInteractionAtPoint:CGPointMake(28, 28)] &&
+              ![overlay acceptsInteractionAtPoint:CGPointMake(100, 100)] &&
+              ImGui::GetDrawData()->TotalVtxCount > 20,
+              "the 56pt native window must contain a drawn, hittable ball and release the old panel area");
+        ClickMenu(menu, overlay, CGPointMake(28, 28));
+        CHECK(![MFMenuUI collapsed] && resizePending,
+              "one tap on the real small ball must restore the production menu");
+        resizePending = NO;
+        window.bounds = CGRectMake(0, 0, 348, 520);
+        window.rootViewController.view.frame = window.bounds; overlay.frame = window.bounds;
+        Frame(menu, overlay); Frame(menu, overlay);
+        CHECK(overlay.captureRect.size.width == 348 && !CGRectIsEmpty(overlay.headerDragRect),
+              "restored native window must draw the reachable full menu on every cycle");
+    }
+    [MFMenuUI setCollapseChangeHandler:nil];
+    ImGui::DestroyContext(); window.hidden = YES;
 }
 
 static void TestProductionMenuLayout(void) {
@@ -101,6 +160,7 @@ static void PreviewProductionMenu(void) {
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
         TestProductionMenuLayout();
+        TestButtonsAndBallAtNativeSize();
         PreviewProductionMenu();
     });
     return YES;
