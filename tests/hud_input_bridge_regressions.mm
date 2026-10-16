@@ -98,11 +98,14 @@ static AXFixtureEvent *currentAX;
 
 void MFHUDLogLine(NSString *format, ...) { }
 
-static CFTypeRef Contact(uint32_t identity, BOOL touch, BOOL range) {
-    CFTypeRef event = createDigitizer(kCFAllocatorDefault, 0, 2, 12, identity,
+static CFTypeRef IndexedContact(uint32_t index, uint32_t identity, BOOL touch, BOOL range) {
+    CFTypeRef event = createDigitizer(kCFAllocatorDefault, 0, 2, index, identity,
         2, 0, 0.3, 0.4, 0, touch ? 1 : 0, 0, range, touch, 0);
     CHECK(event, "the test must create real IOKit digitizer contacts");
     return event;
+}
+static CFTypeRef Contact(uint32_t identity, BOOL touch, BOOL range) {
+    return IndexedContact(identity, identity, touch, range);
 }
 static CFTypeRef Hand(uint32_t identity, BOOL touch, uint32_t secondary = 0, BOOL range = YES) {
     CFTypeRef parent = createDigitizer(kCFAllocatorDefault, 0, 3, 0, 0,
@@ -154,6 +157,41 @@ static MFHUDInputBridge *NewBridge(UIWindow **windowOut, InputPanel **panelOut) 
     [bridge setValue:AXFixtureEvent.class forKey:@"representationClass"];
     *windowOut = window; *panelOut = panel;
     return bridge;
+}
+// Fresh M5.69 device logs: index 11 stays fixed while both AX pathIdentity
+// and factory-validated raw identity change 3 (down) -> 2 (lift). Factory
+// field discovery alone cannot establish that a hardware value is stable.
+static void DeviceEvent(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
+                        uint32_t index, uint32_t identity, NSInteger phase, CGPoint local) {
+    CFTypeRef finger = IndexedContact(index, identity, phase < 2, phase < 2);
+    Deliver(bridge, window, panel, finger, (unsigned char)identity, phase, local);
+    CFRelease(finger);
+}
+static void TestDeviceIndexOwnsTheCompleteGesture(void) {
+    UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
+    DeviceEvent(b, w, p, 11, 3, 0, CGPointMake(220, 100));
+    DeviceEvent(b, w, p, 11, 2, 3, CGPointMake(220, 100));
+    CHECK(p.imgui.presses == 1 && p.imgui.releases == 1,
+          "device index 11 must release when its raw identity changes 3 to 2");
+    DeviceEvent(b, w, p, 12, 3, 0, CGPointMake(120, 100));
+    DeviceEvent(b, w, p, 13, 3, 1, CGPointMake(125, 100));
+    DeviceEvent(b, w, p, 13, 2, 3, CGPointMake(125, 100));
+    CHECK(p.imgui.presses == 2 && p.imgui.releases == 1,
+          "another index with the same hardware identity must not move or release the owner");
+    DeviceEvent(b, w, p, 12, 2, 3, CGPointMake(120, 100));
+    CHECK(p.imgui.releases == 2, "the original device index must still release");
+    p.captureRect = p.interactionRect = p.headerDragRect = CGRectMake(0, 0, 56, 56);
+    DeviceEvent(b, w, p, 0x80000006u, 3, 0, CGPointMake(28, 28));
+    DeviceEvent(b, w, p, 0x80000006u, 2, 3, CGPointMake(28, 28));
+    CHECK(p.imgui.presses == 3 && p.imgui.releases == 3,
+          "a full-width device index must deliver the collapsed ball's expansion click");
+    DeviceEvent(b, w, p, 6, 3, 0, CGPointMake(28, 28));
+    DeviceEvent(b, w, p, 7, 3, 0, CGPointMake(29, 28));
+    DeviceEvent(b, w, p, 6, 2, 3, CGPointMake(28, 28));
+    DeviceEvent(b, w, p, 7, 2, 3, CGPointMake(29, 28));
+    CHECK(p.imgui.cancellations == 1 && p.imgui.presses == 3,
+          "a second index must cancel a pending ball gesture even with equal raw identities");
+    w.hidden = YES;
 }
 static void TestDeviceTapReleasesDespiteChangingAXIdentity(void) {
     UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
@@ -406,6 +444,7 @@ static void TestCancellationDiscardsQueuedBallTap(void) {
         appendEvent = (AppendEvent)dlsym(RTLD_DEFAULT, "IOHIDEventAppendEvent");
         createVendor = (CreateVendor)dlsym(RTLD_DEFAULT, "IOHIDEventCreateVendorDefinedEvent");
         CHECK(createDigitizer && appendEvent && createVendor, "real IOKit event factories must be available");
+        TestDeviceIndexOwnsTheCompleteGesture();
         TestDeviceTapReleasesDespiteChangingAXIdentity();
         TestDifferentRawContactCannotReleasePrimary();
         TestTitleDragEndsWithTheSameRawContact();
