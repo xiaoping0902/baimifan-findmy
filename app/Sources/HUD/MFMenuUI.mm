@@ -415,7 +415,7 @@ static const float kMFMenuBallSize = 56.0f;
         const int rateValues[] = {30, 45, 60, 90, 120};
         int ri = 2;
         for (int i = 0; i < 5; i++) if (s.refreshRate >= rateValues[i]) ri = i;
-        ImGui::TextUnformatted("刷新率");
+        ImGui::TextUnformatted("刷新率请求");
         ImGui::SetNextItemWidth(-1);
         if (ImGui::Combo("##刷新率", &ri, rates, 5)) {
             s.refreshRate = rateValues[ri];
@@ -425,7 +425,12 @@ static const float kMFMenuBallSize = 56.0f;
             else self.overlay.preferredFPS = s.refreshRate;
         }
         MFTrackLastItem();
+        ImGui::TextDisabled("屏幕上限 %ld Hz / 当前请求 %ld fps",
+            (long)self.overlay.maximumFPS, (long)self.overlay.effectiveFPS);
+        ImGui::TextDisabled("实测绘制：菜单 %.0f / 绘制层 %.0f fps",
+            self.overlay.renderedFPS, self.drawingOverlay.renderedFPS);
         ImGui::TextDisabled("菜单空闲时会自动降到 12 帧");
+        ImGui::TextWrapped("高刷受系统电量、温度和负载影响，实测值为本工具的绘制帧率。");
     }
     {
         const char *bars[] = {"细线", "圆头", "分段"};
@@ -447,6 +452,7 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
+    ImGui::TextWrapped("截图与录屏隐藏：菜单、悬浮球、绘制内容全部开启。");
     ImGui::TextDisabled("观战 / 直播模式：功能尚未接入");
 
     ImGui::Spacing();

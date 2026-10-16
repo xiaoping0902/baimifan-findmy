@@ -57,6 +57,9 @@
 	</dict>
 	<key>UIRequiresFullScreen</key>
 	<true/>
+	<!-- iPhone ProMotion opt-in; iPad Pro does not require this special key. -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<!--
 	  [M5.18] 对照白米饭 Info.plist 补的两个键（原版有、我们没有）：
 

@@ -58,6 +58,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 满帧率（默认 60）
 @property (nonatomic, assign) NSInteger preferredFPS;
+/// Screen capacity and the current (active/idle) bounded request. iOS may
+/// choose a lower display cadence because of power, thermal or user policy.
+@property (nonatomic, readonly) NSInteger maximumFPS;
+@property (nonatomic, readonly) NSInteger effectiveFPS;
+/// Successful GPU completions per second; not game FPS or physical scanout.
+@property (nonatomic, readonly) double renderedFPS;
 /// 空闲帧率（默认 0 = 不降频）。菜单设成 ~12：不交互时不占 GPU。
 @property (nonatomic, assign) NSInteger idleFPS;
 /// 一次交互之后保持满帧的秒数（默认 0.6）

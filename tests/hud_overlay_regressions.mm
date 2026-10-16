@@ -20,6 +20,7 @@
 // A category declaration keeps the RED suite linkable against the old API.
 - (BOOL)acceptsInteractionAtPoint:(CGPoint)point;
 - (void)invalidateRenderingGeneration;
+- (void)applyAdaptiveFrameRate;
 - (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
                  size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits;
 @end
@@ -153,6 +154,13 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
     view.simulatedMaximum = 120; view.preferredFPS = 30;
     Expect([[view valueForKey:@"effectiveFPS"] integerValue] == 30,
            "switching back to 30fps must update the effective request immediately");
+    view.simulatedMaximum = 0; [view requestRedraw];
+    Expect(view.maximumFPS == 60, "an unavailable screen capacity must fall back to 60Hz");
+    view.simulatedMaximum = 120; view.preferredFPS = 120; view.idleFPS = 12;
+    [view setValue:@0 forKey:@"activeUntil"]; [view applyAdaptiveFrameRate];
+    Expect(view.effectiveFPS == 12, "an idle menu must retain its low-power 12fps request");
+    [view requestRedraw];
+    Expect(view.effectiveFPS == 120, "new input must immediately restore the active high-refresh request");
 }
 @implementation OverlayFixture
 - (instancetype)init {
@@ -178,6 +186,17 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
     Expect([self.overlay startRenderingWithError:&error],
            "the real simulator Metal/ImGui context must start");
     if (error) std::fprintf(stderr, "Metal setup: %s\n", error.UTF8String);
+    CADisplayLink *link = [self.overlay valueForKey:@"link"];
+    if (@available(iOS 15.0, *)) {
+        CAFrameRateRange range = link.preferredFrameRateRange;
+        Expect(link != nil && range.preferred == self.overlay.effectiveFPS &&
+               range.maximum <= self.overlay.maximumFPS && range.minimum <= range.preferred,
+               "the real running display link must receive the screen-bounded frame-rate range");
+        self.overlay.preferredFPS = 30;
+        Expect(link.preferredFrameRateRange.preferred == 30,
+               "changing the request must update the real display link immediately");
+        self.overlay.preferredFPS = 120;
+    }
 }
 - (void)dispose {
     [self.overlay stopRendering];
@@ -432,6 +451,8 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
                 Expect(barrier.signaledValue == 0, "GPU pressure assertions must run before the independent safety release");
                 Expect(fixture.counter.builds > 0 && fixture.counter.builds <= 2 && layer.calls <= 2,
                        "held GPU completions must bound reserved/acquired/in-flight frames to two");
+                Expect(fixture.overlay.renderedFPS == 0,
+                       "queued frames must never be reported as completed rendering FPS");
                 barrier.signaledValue = 1;
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                     BOOL completed = dispatch_semaphore_wait(firstFrame,
@@ -439,9 +460,14 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         Expect(completed && fixture.overlay.hasCompletedFrame,
                                "GPU completion must return frame credits and restore renderer progress");
-                        PumpTicks(fixture.overlay, 20, ^{
+                        PumpTicks(fixture.overlay, 70, ^{
                             Expect(fixture.counter.builds > 2, "returned GPU credits must permit subsequent frames");
-                            [fixture dispose]; completion();
+                            Expect(fixture.overlay.renderedFPS > 0,
+                                   "successful GPU completions must produce an actual rendering FPS sample");
+                            [fixture dispose];
+                            Expect(fixture.overlay.renderedFPS == 0,
+                                   "stopping must clear old frame statistics");
+                            completion();
                         });
                     });
                 });

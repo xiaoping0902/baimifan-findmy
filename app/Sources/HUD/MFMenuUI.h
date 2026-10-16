@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MFMenuUI : NSObject <MFOverlayViewDelegate>
 
 @property (nonatomic, weak, nullable) MFOverlayView *overlay;
+@property (nonatomic, weak, nullable) MFOverlayView *drawingOverlay;
 
 /// 由 AppDelegate 持有（delegate 是 weak）
 + (void)setGlobalVisible:(BOOL)visible;

@@ -62,7 +62,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _fontArmor = 12.0f;
     _skeletonThickness = 1.5f;
 
-    _refreshRate = 60;
+    _refreshRate = 120; // Fresh installs request high refresh; saved choices are preserved.
     _healthBarStyle = 0;
     _smoothAim = NO;
 

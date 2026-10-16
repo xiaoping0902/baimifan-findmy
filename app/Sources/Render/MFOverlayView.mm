@@ -5,6 +5,12 @@
 #import "../HUD/MFHUDLog.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include <cmath>
+#include <atomic>
+#include <memory>
+
+struct MFOverlayFrameStats {
+    std::atomic<uint64_t> completed{0};
+};
 
 /// 每帧上报的可交互矩形上限。菜单控件约 40 个，256 足够且不占内存。
 static const NSUInteger kMFOverlayMaxInteractiveRects = 256;
@@ -22,6 +28,8 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 @interface MFOverlayView ()
 /// 按「是否刚交互过」切换满帧率与空闲帧率
 - (void)applyAdaptiveFrameRate;
+- (NSInteger)screenMaximumFPS;
+- (void)sampleCompletedFrames;
 - (void)invalidateRenderingGeneration;
 - (void)renderDrawable:(id<CAMetalDrawable>)drawable generation:(uint64_t)generation
                  size:(CGSize)size scale:(CGFloat)scale credits:(dispatch_semaphore_t)credits;
@@ -58,6 +66,9 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 
     // ── 自适应帧率 ──────────────────────────────────────
     NSTimeInterval _activeUntil;
+    std::shared_ptr<MFOverlayFrameStats> _frameStats;
+    CFTimeInterval _fpsSampleTime;
+    uint64_t _fpsSampleCount;
 }
 
 + (Class)layerClass {
@@ -72,6 +83,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     if ((self = [super initWithFrame:frame])) {
         _interactive = interactive;
         _preferredFPS = 60;
+        _effectiveFPS = 60;
         _idleFPS = 0;                 // 0 = 不降频（绘制层保持稳定输出）
         _activeWindow = 0.6;
         _automaticallyStartsRendering = YES;
@@ -148,7 +160,6 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     [self.imgui resetFrameTime];
     _rendering = YES;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-    _link.preferredFramesPerSecond = _preferredFPS;
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self requestRedraw];   // 首帧必须马上出来，不能被空闲降频拖住
     NSLog(@"[MF][Overlay] 渲染已启动 (interactive=%d, %.0fx%.0f, 满帧%ld/空闲%ld)",
@@ -170,6 +181,12 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     _firstFrameReported = NO;
     _firstFramePending = NO;
     _hasCompletedFrame = NO;
+    // Each generation owns a counter. Late GPU work can only increment its
+    // retired counter, without queueing one main-thread block per frame.
+    _frameStats = std::make_shared<MFOverlayFrameStats>();
+    _fpsSampleTime = CACurrentMediaTime();
+    _fpsSampleCount = 0;
+    _renderedFPS = 0;
     // Do not clear _drawablePending: the old driver's wait still occupies the
     // one acquisition slot, even across stop/resize/restart.
 }
@@ -190,6 +207,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     if (self.bounds.size.width < 1 || self.bounds.size.height < 1) return;
 
     [self applyAdaptiveFrameRate];
+    [self sampleCompletedFrames];
 
     CAMetalLayer *ml = self.metalLayer;
     [self layoutSubviews];
@@ -284,9 +302,12 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     [cb presentDrawable:drawable];
     BOOL reportFirstFrame = !_firstFrameReported && !_firstFramePending;
     if (reportFirstFrame) _firstFramePending = YES;
+    std::shared_ptr<MFOverlayFrameStats> stats = _frameStats;
     __weak MFOverlayView *weakSelf = self;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         dispatch_semaphore_signal(credits);
+        if (completed.status == MTLCommandBufferStatusCompleted)
+            stats->completed.fetch_add(1, std::memory_order_relaxed);
         if (!reportFirstFrame) return;
         NSString *error = completed.status == MTLCommandBufferStatusCompleted ? nil :
             (completed.error.localizedDescription ?: @"Metal 首帧执行失败");
@@ -385,11 +406,38 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 }
 
 - (void)applyAdaptiveFrameRate {
-    if (!_link) return;
     BOOL busy = (CACurrentMediaTime() < _activeUntil);
     NSInteger want = busy ? _preferredFPS : (_idleFPS > 0 ? _idleFPS : _preferredFPS);
-    want = MAX(5, MIN(120, want));
-    if (_link.preferredFramesPerSecond != want) _link.preferredFramesPerSecond = want;
+    _effectiveFPS = MIN(self.maximumFPS, MAX(5, MIN(_preferredFPS, want)));
+    if (!_link) return;
+    if (@available(iOS 15.0, *)) {
+        float target = (float)_effectiveFPS;
+        CAFrameRateRange range = _link.preferredFrameRateRange;
+        float minimum = MIN(30.0f, target);
+        if (range.minimum != minimum || range.maximum != target || range.preferred != target)
+            _link.preferredFrameRateRange = CAFrameRateRangeMake(minimum, target, target);
+    } else if (_link.preferredFramesPerSecond != _effectiveFPS) {
+        _link.preferredFramesPerSecond = _effectiveFPS;
+    }
+}
+
+- (NSInteger)screenMaximumFPS {
+    return (self.window.screen ?: UIScreen.mainScreen).maximumFramesPerSecond;
+}
+
+- (NSInteger)maximumFPS {
+    NSInteger maximum = [self screenMaximumFPS];
+    return maximum > 0 ? MIN(120, maximum) : 60;
+}
+
+- (void)sampleCompletedFrames {
+    CFTimeInterval now = CACurrentMediaTime();
+    CFTimeInterval elapsed = now - _fpsSampleTime;
+    if (!_frameStats || elapsed < 0.5) return;
+    uint64_t count = _frameStats->completed.load(std::memory_order_relaxed);
+    _renderedFPS = (count - _fpsSampleCount) / elapsed;
+    _fpsSampleCount = count;
+    _fpsSampleTime = now;
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {

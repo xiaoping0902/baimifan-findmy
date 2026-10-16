@@ -6,6 +6,7 @@
 #import "MFHUDWindowHost.h"
 #import "MFHUDStartupStatus.h"
 #import "MFHUDInputBridge.h"
+#import "MFHUDCaptureShieldView.h"
 #import "MFHUDControl.h"
 #import <mach/mach.h>
 #include <unistd.h>
@@ -68,8 +69,8 @@ static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName) {
 @property (nonatomic, strong) NSMutableDictionary *startupReport;
 @property (nonatomic, copy) NSString *startupToken;
 @property (nonatomic, strong) MFHUDInputBridge *inputBridge;
-@property (nonatomic, strong) UIView *menuContent;
-@property (nonatomic, strong) UIView *drawingContent;
+@property (nonatomic, strong) MFHUDCaptureShieldView *menuContent;
+@property (nonatomic, strong) MFHUDCaptureShieldView *drawingContent;
 @property (nonatomic, strong) id<MFHUDOrientationObserver> orientationObserver;
 @property (nonatomic) UIInterfaceOrientation hudOrientation;
 @property (nonatomic) BOOL exitRequested;
@@ -121,7 +122,9 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     drawVC.view.userInteractionEnabled = NO;
     drawWin.rootViewController = drawVC;
     drawVC.view.frame = drawWin.bounds;
-    self.drawingContent = [[UIView alloc] initWithFrame:drawVC.view.bounds];
+    NSString *captureError = nil;
+    self.drawingContent = [[MFHUDCaptureShieldView alloc] initWithFrame:drawVC.view.bounds error:&captureError];
+    if (!self.drawingContent) { [self failStartup:captureError]; return YES; }
     self.drawingContent.userInteractionEnabled = NO;
     [drawVC.view addSubview:self.drawingContent];
 
@@ -134,7 +137,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     drawLayer.overlay = drawView;
     drawView.delegate = drawLayer;
     self.drawingLayer = drawLayer;           // 强引用保活（delegate 是 weak）
-    [self.drawingContent addSubview:drawView];
+    [self.drawingContent.contentView addSubview:drawView];
     drawWin.hidden = NO;
     self.drawingWindow = drawWin;
 
@@ -151,7 +154,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuVC.view.backgroundColor = [UIColor clearColor];
     menuWin.rootViewController = menuVC;
     menuVC.view.frame = menuWin.bounds;
-    self.menuContent = [[UIView alloc] initWithFrame:menuVC.view.bounds];
+    self.menuContent = [[MFHUDCaptureShieldView alloc] initWithFrame:menuVC.view.bounds error:&captureError];
+    if (!self.menuContent) { [self failStartup:captureError]; return YES; }
     [menuVC.view addSubview:self.menuContent];
 
     MFOverlayView *menuView = [[MFOverlayView alloc] initWithFrame:self.menuContent.bounds
@@ -161,13 +165,16 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     MFMenuUI *menu = [[MFMenuUI alloc] init];
     menu.overlay = menuView;
+    menu.drawingOverlay = drawView;
     menuView.delegate = menu;
     self.menuController = menu;              // 强引用保活（delegate 是 weak）
-    [self.menuContent addSubview:menuView];
-    menuWin.interactiveView = menuView;
+    [self.menuContent.contentView addSubview:menuView];
+    menuWin.interactiveView = self.menuContent;
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
+    self.startupReport[@"captureProtectedSurfaces"] = @[@"menu", @"ball", @"drawing"];
+    MFHUDLogLine(@"菜单、悬浮球、绘制层已挂入固定安全画布；截图和录屏效果待真机验收");
 
     /*
      * ★ 帧率策略（M5.66）★

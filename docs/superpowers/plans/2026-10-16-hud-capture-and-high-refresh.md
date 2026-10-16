@@ -10,9 +10,9 @@
 
 - [x] Inspect the reference and existing hit geometry, ball, secure flags and display link.
 - [x] Resolve capture scope with user: hide menu, ball and drawing.
-- [ ] Add real UIKit regressions for the protected container, transparent hit geometry and resizing; add frame-policy regressions before production changes. Observe baseline failures.
-- [ ] Implement one secure content container, used for both HUD surfaces. Preserve orientation/size anchors and input coordinate conversions, disallow text focus and keep blank space transparent. Explicitly report missing secure canvas rather than silently claim protection.
-- [ ] Implement screen-capped CAFrameRateRange and real completed-frame FPS; retain bounded drawable/GPU work, frame generations and idle redraw policy. Expose requested/capacity/actual FPS in menu.
+- [x] Add real UIKit regressions for the protected container, transparent hit geometry and resizing; add frame-policy regressions before production changes. Baseline ea13f87 actually ran and failed: windows run 38837232160/job 116768973999 requires a secure content container; overlay run 38837235070/job 116768980153 requires a screen-bounded effective request. Full logs archived locally.
+- [x] Implement one secure content container, used for both HUD surfaces. Preserve orientation/size anchors and input coordinate conversions, disallow text focus and keep blank space transparent. Explicitly report missing secure canvas rather than silently claim protection.
+- [x] Implement screen-capped CAFrameRateRange and real completed-frame FPS; retain bounded drawable/GPU work, frame generations and idle redraw policy. Expose requested/capacity/actual FPS in menu. GPU callbacks increment a generation-owned atomic counter; only the first frame queues a main-thread callback. Fresh settings default to 120, saved preferences remain intact.
 - [ ] Run affected regressions, integrate review and run complete suite/build for final code. Keep original infrastructure failures documented.
 - [ ] Verify artifact version/hash and isolated install URL, update current reports. Inspect new device build and physical passthrough, ball, screenshot/recording and FPS when installed.
 
