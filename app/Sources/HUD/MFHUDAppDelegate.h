@@ -19,6 +19,11 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MFHUDDrawingWindow : MFHUDWindow
 @end
 
+/// Menu input is observed by MFHUDInputBridge while the original system touch
+/// goes to the lower app. This policy is fixed before native context creation.
+@interface MFHUDSharedTouchWindow : MFHUDWindow
+@end
+
 @interface MFHUDAppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong, nullable) UIWindow *hudMenuWindow;
 @property (nonatomic, strong, nullable) UIWindow *drawingWindow;

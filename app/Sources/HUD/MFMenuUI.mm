@@ -398,7 +398,8 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::TextDisabled("穿透与窗口");
     ImGui::Separator();
     ImGui::TextWrapped("拖动标题移动窗口；收起后仅保留小圆球，点球展开。");
-    ImGui::TextWrapped("需要操作下层 App 时，先点标题右侧的收起。");
+    ImGui::TextWrapped("点击菜单和悬浮球时，下层 App 也会同时响应。");
+    ImGui::TextDisabled("滑条和拖动也会传给下层");
     ImGui::TextDisabled("拖动右侧滚动条浏览设置");
 
     ImGui::Spacing();

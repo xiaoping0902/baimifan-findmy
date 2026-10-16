@@ -53,3 +53,11 @@ static unsigned sMFHitTestMissLogged = 0;
 - (BOOL)_canBecomeKeyWindow { return NO; }
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { return nil; }
 @end
+
+@implementation MFHUDSharedTouchWindow
+// Keep system touch targeting separate from the HID observer's menu geometry.
+// Setting this after super init can leave an already-interactive native context.
+- (BOOL)_ignoresHitTest { return YES; }
+- (BOOL)_canBecomeKeyWindow { return NO; }
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { return nil; }
+@end
