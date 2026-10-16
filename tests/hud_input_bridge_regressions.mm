@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import "MFHUDInputBridge.h"
+#import "MFHUDAppDelegate.h"
 #import "MFHUDLog.h"
 #import "../app/Sources/Render/MFOverlayView.h"
 #include "../app/Sources/Render/MFImGuiInput.h"
@@ -11,6 +12,10 @@
 #include "HUDRegressionOutput.h"
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fflush(stderr); exit(1); } } while (0)
+
+@interface UIWindow (MFSharedTouchRegression)
+- (BOOL)_ignoresHitTest;
+@end
 
 // Use real IOHID events and production input/coordinate/ownership code. Only AX
 // decoding and Metal output are substituted. Real M5.69 logs show both AX
@@ -146,13 +151,18 @@ static MFHUDInputBridge *NewBridge(UIWindow **windowOut, InputPanel **panelOut) 
     // at x=50 leaves too little room and correctly triggers clamping.
     CHECK(UIScreen.mainScreen.fixedCoordinateSpace.bounds.size.width >= 368,
           "the drag fixture needs at least 20pt of horizontal screen clearance");
-    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
+    Class cls = NSClassFromString(@"MFHUDSharedTouchWindow") ?: MFHUDWindow.class;
+    MFHUDWindow *window = [[cls alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
     window.rootViewController = [UIViewController new];
     InputPanel *panel = [[InputPanel alloc] initWithFrame:window.bounds];
     panel.captureRect = panel.bounds; panel.headerDragRect = CGRectMake(0, 0, 248, 31);
     panel.interactionRect = panel.bounds;
     panel.hasCompletedFrame = YES; panel.imgui = [TouchRecorder new];
     [window.rootViewController.view addSubview:panel]; window.hidden = NO;
+    window.interactiveView = panel;
+    CHECK([window _ignoresHitTest] &&
+          [window hitTest:CGPointMake(220, 100) withEvent:nil] == nil,
+          "HID controls must work in a production menu which leaves every system touch unclaimed");
     MFHUDInputBridge *bridge = [[MFHUDInputBridge alloc] initWithOverlay:(MFOverlayView *)panel window:window];
     [bridge setValue:AXFixtureEvent.class forKey:@"representationClass"];
     *windowOut = window; *panelOut = panel;

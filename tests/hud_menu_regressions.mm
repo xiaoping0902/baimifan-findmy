@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "MFMenuUI.h"
 #import "MFHUDCaptureShieldView.h"
+#import "MFHUDAppDelegate.h"
 #import "../app/Sources/Render/MFOverlayView.h"
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "../app/Sources/Render/imgui/imgui_internal.h"
@@ -8,6 +9,10 @@
 #include <cmath>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
+
+@interface UIWindow (MFSharedMenuRegression)
+- (BOOL)_ignoresHitTest;
+@end
 
 static void Frame(MFMenuUI *menu, MFOverlayView *overlay) {
     ImGui::GetIO().DisplaySize = ImVec2(overlay.bounds.size.width, overlay.bounds.size.height);
@@ -46,13 +51,17 @@ static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield
 }
 
 static void TestButtonsAndBallAtNativeSize(void) {
-    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
+    Class cls = NSClassFromString(@"MFHUDSharedTouchWindow") ?: MFHUDWindow.class;
+    MFHUDWindow *window = [[cls alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
     window.rootViewController = [UIViewController new];
     NSString *captureError = nil;
     MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:window.bounds
                                                                           error:&captureError];
     CHECK(shield && !captureError, "production menu cycles require the real secure canvas");
     [window.rootViewController.view addSubview:shield];
+    window.interactiveView = shield;
+    CHECK([window _ignoresHitTest],
+          "production menu cycles must use a window that leaves touches to the lower app");
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:window.bounds interactive:YES];
     overlay.automaticallyStartsRendering = NO;
     [shield.contentView addSubview:overlay]; window.hidden = NO;
@@ -87,6 +96,8 @@ static void TestButtonsAndBallAtNativeSize(void) {
         CHECK([shield hitTest:CGPointMake(28, 28) withEvent:nil] == overlay &&
               [shield hitTest:CGPointMake(100, 100) withEvent:nil] == nil,
               "secure canvas must preserve actual ImGui ball hits and reject the old panel area");
+        CHECK([window hitTest:CGPointMake(28, 28) withEvent:nil] == nil,
+              "a visible restore ball must remain transparent to system touch targeting");
         ClickMenu(menu, overlay, CGPointMake(28, 28));
         CHECK(![MFMenuUI collapsed] && resizePending,
               "one tap on the real small ball must restore the production menu");
@@ -104,8 +115,10 @@ static void TestButtonsAndBallAtNativeSize(void) {
         ResizeProtectedMenu(window, shield, overlay, CGSizeMake(348, 520), angle);
         Frame(menu, overlay); Frame(menu, overlay);
         CGPoint tab = [overlay convertPoint:CGPointMake(64, 80) toView:window];
-        CHECK([window hitTest:tab withEvent:nil] == overlay,
-              "protected menu must retain visible tab coordinates in both landscape orientations");
+        CGPoint local = [shield convertPoint:tab fromView:window];
+        CHECK([shield hitTest:local withEvent:nil] == overlay &&
+              [window hitTest:tab withEvent:nil] == nil,
+              "rotated tabs must retain local input geometry while leaving system touches unclaimed");
     }
     [MFMenuUI setCollapseChangeHandler:nil];
     ImGui::DestroyContext(); window.hidden = YES;
