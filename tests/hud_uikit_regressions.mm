@@ -5,6 +5,7 @@
 #import "MFHUDAppDelegate.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <cmath>
 #include "HUDRegressionOutput.h"
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fflush(stderr); exit(1); } } while (0)

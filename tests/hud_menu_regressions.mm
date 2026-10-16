@@ -5,6 +5,7 @@
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "../app/Sources/Render/imgui/imgui_internal.h"
 #include "HUDRegressionOutput.h"
+#include <cmath>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
@@ -24,6 +25,24 @@ static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
     Frame(menu, overlay); Frame(menu, overlay);
     io.AddMouseButtonEvent(0, false);
     Frame(menu, overlay); Frame(menu, overlay);
+}
+
+static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield,
+                                MFOverlayView *overlay, CGSize panel, CGFloat angle) {
+    BOOL landscape = fabs(angle) > 0.1;
+    CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
+    window.bounds = (CGRect){CGPointZero, physical};
+    window.rootViewController.view.frame = window.bounds;
+    shield.bounds = (CGRect){CGPointZero, panel};
+    shield.center = CGPointMake(physical.width/2, physical.height/2);
+    shield.transform = CGAffineTransformMakeRotation(angle);
+    // Match the production delegate's order: set overlay geometry BEFORE
+    // flushing parent layout, to catch delayed canvas/autoresize interference.
+    overlay.frame = shield.bounds;
+    [window layoutIfNeeded]; [overlay layoutIfNeeded];
+    CHECK(CGRectEqualToRect(overlay.frame, shield.contentView.bounds) &&
+          CGSizeEqualToSize(overlay.bounds.size, panel),
+          "production layout order must keep the nested Metal view exactly panel-sized");
 }
 
 static void TestButtonsAndBallAtNativeSize(void) {
@@ -58,10 +77,7 @@ static void TestButtonsAndBallAtNativeSize(void) {
         CHECK([MFMenuUI collapsed] && resizePending,
               "the production collapse button must request a native-window resize");
         resizePending = NO;
-        window.bounds = CGRectMake(0, 0, 56, 56);
-        window.rootViewController.view.frame = window.bounds;
-        shield.frame = window.bounds; [shield layoutIfNeeded];
-        overlay.frame = window.bounds;
+        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(56, 56), 0);
         Frame(menu, overlay); Frame(menu, overlay);
         CHECK(CGSizeEqualToSize(overlay.captureRect.size, CGSizeMake(56, 56)) &&
               [overlay acceptsInteractionAtPoint:CGPointMake(28, 28)] &&
@@ -75,15 +91,21 @@ static void TestButtonsAndBallAtNativeSize(void) {
         CHECK(![MFMenuUI collapsed] && resizePending,
               "one tap on the real small ball must restore the production menu");
         resizePending = NO;
-        window.bounds = CGRectMake(0, 0, 348, 520);
-        window.rootViewController.view.frame = window.bounds;
-        shield.frame = window.bounds; [shield layoutIfNeeded]; overlay.frame = window.bounds;
+        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(348, 520), 0);
         Frame(menu, overlay); Frame(menu, overlay);
         CHECK(overlay.captureRect.size.width == 348 && !CGRectIsEmpty(overlay.headerDragRect),
               "restored native window must draw the reachable full menu on every cycle");
         CHECK([shield hitTest:CGPointMake(64, 80) withEvent:nil] == overlay &&
               [shield hitTest:CGPointMake(2, 200) withEvent:nil] == nil,
               "expanded secure canvas must retain tab hits and transparent menu margins");
+    }
+    const CGFloat angles[] = { (CGFloat)M_PI_2, (CGFloat)-M_PI_2, (CGFloat)0 };
+    for (CGFloat angle : angles) {
+        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(348, 520), angle);
+        Frame(menu, overlay); Frame(menu, overlay);
+        CGPoint tab = [overlay convertPoint:CGPointMake(64, 80) toView:window];
+        CHECK([window hitTest:tab withEvent:nil] == overlay,
+              "protected menu must retain visible tab coordinates in both landscape orientations");
     }
     [MFMenuUI setCollapseChangeHandler:nil];
     ImGui::DestroyContext(); window.hidden = YES;

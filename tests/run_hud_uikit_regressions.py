@@ -99,12 +99,12 @@ def main():
                            ROOT / "app/Sources/Render/MFOverlayView.mm",
                            ROOT / "app/Sources/Render/MFImGuiContext.mm",
                            ROOT / "app/Sources/Render/imgui/backends/imgui_impl_metal.mm",
+                           ROOT / "app/Sources/HUD/MFHUDCaptureShieldView.mm",
                            ROOT / "app/Sources/HUD/MFHUDLog.m"]
                 sources += [ROOT / f"app/Sources/Render/imgui/{name}.cpp"
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
                 if args.suite == "menu":
                     sources += [ROOT / "app/Sources/HUD/MFMenuUI.mm",
-                                ROOT / "app/Sources/HUD/MFHUDCaptureShieldView.mm",
                                 ROOT / "app/Sources/Game/MFSettings.mm",
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]

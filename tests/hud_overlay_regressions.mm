@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import "../app/Sources/Render/MFOverlayView.h"
+#import "MFHUDCaptureShieldView.h"
 #include "HUDRegressionOutput.h"
 #include "imgui.h"
 #include <atomic>
@@ -173,7 +174,13 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
         self.overlay.preferredFPS = 120;
         self.counter = [FrameCounter new];
         self.overlay.delegate = self.counter;
-        [self.window.rootViewController.view addSubview:self.overlay];
+        NSString *captureError = nil;
+        MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:self.window.bounds
+                                                                              error:&captureError];
+        Expect(shield != nil && captureError == nil,
+               "real production Metal frames require an available secure parent canvas");
+        [self.window.rootViewController.view addSubview:shield];
+        [shield.contentView addSubview:self.overlay];
         self.window.hidden = NO;
         [self.window layoutIfNeeded];
         [self.overlay layoutIfNeeded];
@@ -447,7 +454,7 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
             dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
         dispatch_async(dispatch_get_main_queue(), ^{
             Expect(built, "GPU backpressure regression must build a real production frame");
-            PumpTicks(fixture.overlay, 40, ^{
+            PumpTicks(fixture.overlay, 70, ^{
                 Expect(barrier.signaledValue == 0, "GPU pressure assertions must run before the independent safety release");
                 Expect(fixture.counter.builds > 0 && fixture.counter.builds <= 2 && layer.calls <= 2,
                        "held GPU completions must bound reserved/acquired/in-flight frames to two");
