@@ -92,13 +92,31 @@ jobs:
           ENT="$PWD/Support/entitlements.plist"
           EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
           echo "Executable: $EXEC_NAME"
-          ldid -S"$ENT" "$APP/$EXEC_NAME"
+
+          # ── [M5.91] 用「空 requirements」签，别让 ldid 自造 DR ──
+          #
+          # 原因（见 白米饭复刻/docs 与 白米饭-taskport-真相 的交叉验证）：
+          #   ldid 不带 -Q 时会自动生成一条开发证书指定要求
+          #   （ldid.cpp:2062-2089），形如
+          #     identifier "FindMy" and anchor apple generic and ...
+          #   而 TrollStore 重签时按 kSecCSPreserveRequirements 把这条
+          #   CS_REQUIREMENTS **原样保留**（codesign.m:127），于是一路活到设备上。
+          #   问题是 ad-hoc 签名永远满足不了 "anchor apple generic"，
+          #   等于给自己挂了一条注定失败的设计要求。
+          #
+          #   白米饭那边这一项是 **12 字节空要求**：
+          #     fa de 0c 01 00 00 00 0c 00 00 00 00
+          #   我们照做，逐字节对齐。
+          EMPTY_REQ=/tmp/mf_empty.req
+          printf '\xfa\xde\x0c\x01\x00\x00\x00\x0c\x00\x00\x00\x00' > "$EMPTY_REQ"
+
+          ldid -S"$ENT" -Q"$EMPTY_REQ" "$APP/$EXEC_NAME"
           echo "--- entitlements 验证 ---"
           ldid -e "$APP/$EXEC_NAME"
           if [ -d "$APP/Frameworks" ]; then
             find "$APP/Frameworks" -type f | while read -r bin; do
               if file -b "$bin" | grep -q "Mach-O"; then
-                ldid -S"$ENT" "$bin"
+                ldid -S"$ENT" -Q"$EMPTY_REQ" "$bin"
                 echo "signed: $bin"
               fi
             done
@@ -125,6 +143,15 @@ jobs:
             echo "::error::entitlements 注入不完整 —— 装机后权限不会生效"
             exit 1
           fi
+
+          # ── [M5.91] 验 CS_REQUIREMENTS 必须是 12 字节空要求 ──
+          #
+          # 只查 entitlement 字符串是不够的：ldid 生成的 DR 会带一条
+          # "anchor apple generic"，ad-hoc 签名永远满足不了它，
+          # 而 TrollStore 重签会把它保留到设备上。
+          #
+          # 解析逻辑放在 scripts/verify_requirements.py（Mach-O → SuperBlob → slot 2）。
+          python3 scripts/verify_requirements.py "$APP/$EXEC_NAME"
 
           echo "=== 伪装身份核对 ==="
           NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist")
