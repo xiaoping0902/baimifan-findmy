@@ -41,8 +41,16 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
     NSMutableArray<MFFeedEntity *> *_entities;
     MFCamera _camera;
     BOOL _hasCamera;
-    // 注意：port / packetCount / errorCount / lastSequence 是头文件的 readonly property，
-    // 由编译器自动合成 _port / _packetCount / _errorCount / _lastSequence，这里不能重复声明。
+    /*
+     * 注意：@property (nonatomic, readonly) **不会**自动合成 ivar（编译器认为你不需要
+     * 内部存储），所以下面几个必须自己声明，否则 _running / _port / _packetCount /
+     * _errorCount / _lastSequence 全部报 undeclared。
+     */
+    uint16_t _port;
+    BOOL _running;
+    uint32_t _lastSequence;
+    NSUInteger _packetCount;
+    NSUInteger _errorCount;
     uint64_t _lastPacketTicks;      // 0 = 从未收到
 }
 
@@ -67,7 +75,7 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
 #pragma mark - 生命周期
 
 - (BOOL)startOnPort:(uint16_t)port error:(NSString **)error {
-    if (_fd >= 0 && _running) return YES;
+    if (_running) return YES;
     if (port == 0) port = MFExternalFeedDefaultPort;
     _port = port;
 
@@ -101,7 +109,7 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
 
     _fd = fd;
     _readSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, _queue);
-    __weak typeof(self) weakSelf = self;
+    __weak MFExternalFeed *weakSelf = self;
     dispatch_source_set_event_handler(_readSource, ^{
         [weakSelf drain];
     });
@@ -110,6 +118,7 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
     });
     dispatch_resume(_readSource);
 
+    _running = YES;
     NSLog(@"[MF][Feed] 外部数据源监听 127.0.0.1:%u", port);
     return YES;
 }
@@ -123,13 +132,14 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
         // cancel handler 会 close；这里只清标记
         _fd = -1;
     }
+    _running = NO;
     @synchronized (self) {
         [_entities removeAllObjects];
         _hasCamera = NO;
     }
 }
 
-- (BOOL)running { return _fd >= 0; }
+- (BOOL)running { return _running; }
 
 #pragma mark - 收包
 
