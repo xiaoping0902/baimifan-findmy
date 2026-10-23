@@ -173,6 +173,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     NSMutableDictionary<NSString *, NSNumber *> *_kindHistogram;  // 类名 → 出现次数
     CFTimeInterval _histogramAt;
     NSUInteger _kindPerson, _kindLoot, _kindBox, _kindUnknown;
+    NSUInteger _kindReal, _kindBot;                         // 真人 / 人机（本帧）
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -253,25 +254,35 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     return name;
 }
 
-/// 类名 → 用途。规则保守：只认明确的关键词，其余留给日志去统计。
+/// 类名 → 用途。
+///
+/// ★ [M5.77] 角色判定改成「类名以 Character 结尾」★
+///
+/// Dumper-7 完整 SDK（游戏 1.201.37117）里，所有可打角色都是 XXXCharacter：
+///     DFMCharacter / DFMPlayerCharacter / DFMAICharacter / DFMVirtualAICharacter
+///     DFMNPCCharacter / BattleFieldCharacter / SOLCharacter / GPSafeHouseCharacter
+/// 而它们在场景里的组件、动画、能力类都不是（CharacterMovementComponent、
+/// CharacterAnimSnapshotManager、GameplayAbility_CharacterJump……），
+/// 所以用**后缀**而不是**包含**，才不会把组件误判成角色。
 - (MFActorKind)kindForClassName:(NSString *)name {
     if (name.length == 0) return MFActorKindUnknown;
 
-    static NSArray<NSString *> *personKeys = nil;
+    if ([name hasSuffix:kMFUE_CharacterSuffixName] || [name isEqualToString:@"CHARACTER"]) {
+        return MFActorKindPerson;
+    }
+
     static NSArray<NSString *> *lootKeys = nil;
     static NSArray<NSString *> *boxKeys = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        personKeys = @[@"Character", @"Pawn", @"Player", @"Bot", @"Soldier"];
-        lootKeys   = @[@"Item", @"Pickup", @"Loot", @"Prop", @"Weapon", @"Ammo",
+        lootKeys   = @[@"Item", @"Pickup", @"Loot", @"Weapon", @"Ammo",
                        @"Aid", @"Medicine", @"Attachment", @"Backpack"];
         boxKeys    = @[@"Box", @"Crate", @"Container", @"DeadBody", @"Corpse",
                        @"Bag", @"Supply", @"Cache"];
     });
 
-    for (NSString *k in boxKeys)    if ([name rangeOfString:k].location != NSNotFound) return MFActorKindBox;
-    for (NSString *k in lootKeys)   if ([name rangeOfString:k].location != NSNotFound) return MFActorKindLoot;
-    for (NSString *k in personKeys) if ([name rangeOfString:k].location != NSNotFound) return MFActorKindPerson;
+    for (NSString *k in boxKeys)  if ([name rangeOfString:k].location != NSNotFound) return MFActorKindBox;
+    for (NSString *k in lootKeys) if ([name rangeOfString:k].location != NSNotFound) return MFActorKindLoot;
     return MFActorKindUnknown;
 }
 
@@ -521,6 +532,23 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             e.level = [rb readInt32:a.address + ue.profile.loot_level];
             e.value = [rb readInt32:a.address + ue.profile.loot_value];
             [lootOut addObject:e];
+        } else if (a.kind == MFActorKindPerson) {
+            /*
+             * ★ [M5.77] 人机 / 真人 ★
+             *
+             * AGPCharacterBase + 0x0E60 = bool bIsPlayerAI
+             * （Dumper-7 SDK：GPGameplay_classes.hpp，AGPCharacterBase 的字段）
+             * 1 = 人机，0 = 真人。整个角色继承链共用这个偏移。
+             *
+             * 读失败时保持 false（当真人画）—— 宁可多画一个真人框，
+             * 也不要把真人误标成人机。
+             */
+            uint8_t isAI = 0;
+            if ([rb readRemote:a.address + ue.profile.character_isAI into:&isAI size:1]) {
+                e.isBot = (isAI != 0);
+            }
+            if (e.isBot) _kindBot++; else _kindReal++;
+            [ents addObject:e];
         } else {
             [ents addObject:e];
         }
@@ -547,8 +575,10 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     for (NSUInteger i = 0; i < MIN((NSUInteger)12, top.count); i++) {
         [sample appendFormat:@"%@×%@ ", top[i], _kindHistogram[top[i]]];
     }
-    MFHUDLogLine(@"[绘制] UE4 分类：人=%lu 物资=%lu 盒子=%lu 未识别=%lu · GNames 解析 ok=%lu fail=%lu(%@) · 类名 Top: %@",
-                 (unsigned long)_kindPerson, (unsigned long)_kindLoot,
+    MFHUDLogLine(@"[绘制] UE4 分类(累计)：角色=%lu（真人 %lu / 人机 %lu）物资=%lu 盒子=%lu 未识别=%lu"
+                 @" · GNames 解析 ok=%lu fail=%lu(%@) · 类名 Top: %@",
+                 (unsigned long)_kindPerson, (unsigned long)_kindReal, (unsigned long)_kindBot,
+                 (unsigned long)_kindLoot,
                  (unsigned long)_kindBox, (unsigned long)_kindUnknown,
                  (unsigned long)_classResolved, (unsigned long)_classFailed,
                  [self classificationUsable] ? @"分类生效" : @"退回全画",

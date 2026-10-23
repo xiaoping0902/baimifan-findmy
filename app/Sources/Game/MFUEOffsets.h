@@ -65,6 +65,28 @@ static const uint64_t kMFUE_DefaultGNames   = 0x173776C0ULL;   // = 389510848
 /// 这个 ID 就是 UClass 的名字索引，用它把 Actor 分成人物/物资/盒子。
 static const uint32_t kMFUE_Actor_ClassID = 28;               // 0x1C
 
+/*
+ * ★★★ [M5.77] 角色字段 —— 来源：Dumper-7 完整 SDK（游戏 1.201.37117）★★★
+ *
+ * 这是一份 12,619 个类、109,269 个 UObject 的完整 dump，字段偏移是编译期布局，
+ * 不需要再猜。角色的继承链（SDK: DFMGameplay_classes.hpp / GPGameplay_classes.hpp）：
+ *
+ *   ADFMPlayerCharacter : ADFMCharacter : AGPCharacter : AGPCharacterBase   ← 真人
+ *   ADFMAICharacter     : ADFMCharacter : AGPCharacter : AGPCharacterBase   ← 人机
+ *   ADFMVirtualAICharacter / ADFMNPCCharacter : ADFMAICharacter             ← 人机
+ *   ABattleFieldCharacter : ADFMPlayerCharacter                             ← 真人
+ *
+ * 下面三个字段都声明在 AGPCharacterBase 上，所以上面整条链通用。
+ */
+/// bool bIsPlayerAI —— 人机标志：1 = 人机，0 = 真人
+static const uint32_t kMFUE_Character_IsAI   = 0x0E60;
+/// bool LastIsDead —— 上一帧是否已死亡
+static const uint32_t kMFUE_Character_IsDead = 0x0E35;
+
+/// 角色类名后缀 —— 游戏的玩家/AI 角色类都以 Character 结尾
+/// （CharacterMovementComponent / GameplayAbility_CharacterJump 这些不以它结尾）
+#define kMFUE_CharacterSuffixName @"Character"
+
 /// 物资对象的两个属性 —— 从白米饭 sub_1001F74CC 的原始指令逐条钉出来的：
 ///     0x1001f7d78  add x1, x23, #0xDC   → 读 4 字节 → w21（价值）
 ///     0x1001f7e00  add x1, x23, #0x68   → 读 4 字节 → w22（等级）
@@ -181,6 +203,10 @@ static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 /// 物资对象上的等级 / 价值字段（白米饭钉出来的候选值）
 @property (nonatomic, assign) uint32_t loot_level;
 @property (nonatomic, assign) uint32_t loot_value;
+
+/// 角色字段（AGPCharacterBase，Dumper-7 SDK 1.201.37117）
+@property (nonatomic, assign) uint32_t character_isAI;      // bool bIsPlayerAI
+@property (nonatomic, assign) uint32_t character_isDead;    // bool LastIsDead
 
 /// CameraManager → CameraCacheEntry（FCameraCacheEntry）
 /// ★ mingyun 的报告里【没有这个值】—— 它只用到 CameraManager 指针，没读 POV。

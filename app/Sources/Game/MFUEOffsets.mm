@@ -29,6 +29,8 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         _actor_classID           = kMFUE_Actor_ClassID;
         _loot_level              = kMFUE_Loot_LevelOffset;
         _loot_value              = kMFUE_Loot_ValueOffset;
+        _character_isAI          = kMFUE_Character_IsAI;
+        _character_isDead        = kMFUE_Character_IsDead;
         _cameraManager_cacheEntry = 0;      // 未校准 —— 用扫描自动定
     }
     return self;
@@ -61,6 +63,8 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         MFUE_TAKE_U32(actor_classID, @"actor_cls");
         MFUE_TAKE_U32(loot_level, @"loot_lv");
         MFUE_TAKE_U32(loot_value, @"loot_val");
+        MFUE_TAKE_U32(character_isAI, @"char_ai");
+        MFUE_TAKE_U32(character_isDead, @"char_dead");
         MFUE_TAKE_U32(cameraManager_cacheEntry, @"cam_cache");
 
         #undef MFUE_TAKE_U64
@@ -87,6 +91,8 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         @"actor_cls":  @(self.actor_classID),
         @"loot_lv":    @(self.loot_level),
         @"loot_val":   @(self.loot_value),
+        @"char_ai":    @(self.character_isAI),
+        @"char_dead":  @(self.character_isDead),
         @"cam_cache":  @(self.cameraManager_cacheEntry),
     };
     [[NSUserDefaults standardUserDefaults] setObject:d forKey:kMFUEProfileKey];
