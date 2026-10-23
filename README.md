@@ -1,7 +1,7 @@
 # 白米饭复刻 · FindMy
 
 一个 iOS 工具 App：**伪装成系统「查找」**，带主界面控制台、悬浮 HUD（C++ ImGui/Metal）、内核读取链与系统清理功能。
-本轮实际验证设备：**iPad8,11 / A12Z · iPadOS 16.6.1 · TrollStore**。源码在 Windows 上维护，Apple SDK 编译与 simulator 回归在 GitHub Actions macOS 执行。
+当前核实设备：**iPad14,4 / J618AP / 2022 款 11 英寸 iPad Pro M2（蜂窝网络版）· iPadOS 16.1**。历史 M5.72 等测试使用的是 iPad8,11 / A12Z · iPadOS 16.6.1；此前交接报告将 iPad14,4 写成 mini 6 / A15 是错误的。源码在 Windows 上维护，Apple SDK 编译与 simulator 回归在 GitHub Actions macOS 执行。
 
 > 本工程为**独立重写**，参考对象是 `白米饭无验证.ipa` 的静态逆向分析结论（见 `docs/复刻总方案.md` §3）。
 > 不含任何授权校验、联网上报或设备指纹采集。
@@ -10,7 +10,15 @@
 
 ## 当前进度
 
-最新 HUD 修复位于 `fix/hud-reliability`，**已按用户要求回档到 M5.72 / `7629429-r72` 的应用与资源，M5.73 / `07617ea-r73` 已撤回**。用户确认M5.73下层App可以操作，但整个悬浮面板失去响应；两次新鲜USB日志均确认该版HUD完成首帧/ready后没有AX触摸跟踪。全窗口忽略命中后的HID持续投递未通过真机验证，停止继续尝试该方案。
+### 2026-10-24：M5.91 绘制入口修复
+
+已修复 `MFDrawingLayer` 在本地读取未就绪时提前返回、使独立外部 UDP 数据源也无法启动的问题。新包：`dist/drawing-fix-M5.91/FindMy-M5.91-DrawingFix.ipa`，包内版本 `b05aec3-r91`。新增真实 UDP→生产绘制→ImGui 回归，修复前实际失败，修复后收到合成包并生成非空顶点。7 套回归最终均取得通过结果，其中 `game-reader` 首轮模拟器未生成结果，单项重试通过；原始失败证据保留。构建与验证详情见 [绘制排查与验证](docs/绘制排查与验证-2026-10-24.md)。
+
+真机 M5.90 的内置合成自检已观测到非空图形及 GPU 提交。用户本轮暂不方便进入游戏场景，因此**新包尚未覆盖安装、真实游戏数据绘制尚未验收**。原外部推流脚本还存在 Frida 17 API 不兼容和布局未同步问题；本轮未修改该脚本。不要把构建成功、合成测试或 GPU 首帧完成写成游戏链已打通。根目录 `dist/FindMy-unsigned.ipa` 是旧 M5.55，请使用上述带版本的路径。
+
+### 历史 HUD 修复与回档记录
+
+此前 HUD 修复位于 `fix/hud-reliability`，**曾按用户要求回档到 M5.72 / `7629429-r72` 的应用与资源，M5.73 / `07617ea-r73` 已撤回**。用户确认M5.73下层App可以操作，但整个悬浮面板失去响应；两次新鲜USB日志均确认该版HUD完成首帧/ready后没有AX触摸跟踪。全窗口忽略命中后的HID持续投递未通过真机验证，停止继续尝试该方案。
 
 回档直接使用用户此前已安装并认可流畅性的原M5.72包：`dist/hud-reliability-M5.72/FindMy-M5.72-HUD.ipa`，地址 `http://192.168.2.6:8189/FindMy-M5.72-HUD.ipa`。本轮重新检查IPA和完整GET，大小/哈希均匹配；未重新打包。源码app/assets精确等同 `762942927780bf758cb0bfa5fb4cc464ea206cba`，回归夹具恢复为M5.72原状态。控制台“结束悬浮窗”后通过TrollStore覆盖安装；iPad上的实际回档安装仍待用户完成。
 
@@ -68,7 +76,9 @@ M5.72沿用完整触点index、收球、退出重启、安全画布、渲染/GPU
 📋 **[复刻版验证状态](docs/复刻版验证状态.md)** —— 哪些已证、哪些未证、哪些做不到（诚实盘点）
 📋 **[kfd-移植清单](docs/kfd-移植清单.md)** —— 20 文件闭包 + 7 处 patch + 风险清单
 
-### 待验证与待完成
+### 历史待验收项目（M5.72–M5.74）
+
+以下保留当时的排查记录；当前交付和已验证范围以顶部 M5.91 说明及本轮验证报告为准。
 
 - ⏳ **回档后设备确认** —— 覆盖安装M5.72后，确认面板点击、拖动和收球恢复；此前流畅性认可保留。
 - ⏳ **M5.74 数据链真机确认** —— 装新包后看 `hud.log`：`HUD 侧模块定位` 是否拿到 libBase、
@@ -79,8 +89,8 @@ M5.72沿用完整触点index、收球、退出重启、安全画布、渲染/GPU
 ### 本地自检
 
 ```bash
-python -X utf8 scripts/preflight.py # 当前 156 项通过，Windows 使用 UTF-8 输出
-python scripts/verify_ipa.py dist/FindMy-unsigned.ipa   # IPA 验货（含 entitlements 逐条核对）
+python -X utf8 scripts/preflight.py # 本轮 168 项通过，Windows 使用 UTF-8 输出
+python scripts/verify_ipa.py dist/drawing-fix-M5.91/FindMy-M5.91-DrawingFix.ipa # 本轮新包验货（含 entitlements 逐条核对）
 python scripts/make_icon.py        # 重新生成图标
 python scripts/make_font.py        # 重新生成中文子集字体（加了新文案就跑一遍）
 python scripts/serve_ipa.py        # 局域网分发 IPA，iPad 上 Safari 直接下
