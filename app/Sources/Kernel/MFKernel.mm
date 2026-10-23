@@ -38,6 +38,11 @@ extern "C" {
 #ifndef HOST_PRIV_PORT
 #define HOST_PRIV_PORT 1
 #endif
+// iOS SDK 的 <mach/host_special_ports.h> 可能没有被间接引入，
+// HOST_NODENAME 是 host_get_special_port() 的 flavor 参数（值为 5）。
+#ifndef HOST_NODENAME
+#define HOST_NODENAME 5
+#endif
 
 /*
  * ★★★ [M5.78] 用 processor_set_tasks 拿 task port ★★★
