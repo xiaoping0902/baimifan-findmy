@@ -52,6 +52,8 @@ static void TestButtonsAndBallAtNativeSize(void) {
     MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:window.bounds
                                                                           error:&captureError];
     CHECK(shield && !captureError, "production menu cycles require the real secure canvas");
+    CHECK([shield setCaptureProtectionEnabled:YES error:&captureError] && !captureError,
+          "protected menu cycles must explicitly opt into capture protection");
     [window.rootViewController.view addSubview:shield];
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:window.bounds interactive:YES];
     overlay.automaticallyStartsRendering = NO;

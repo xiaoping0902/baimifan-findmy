@@ -12,13 +12,9 @@
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         s = [[MFProjection alloc] init];
-        /*
-         * ★ 审查修正：applyRoll 默认【关】。
-         *   原版分类 §3 明确「算法主体只用俯仰 + 偏航」，roll 参与度低。
-         *   第一版默认开启，等于引入了一个原版没有的变换 ——
-         *   真机校准时如果画面出现奇怪的旋转，第一个怀疑对象就是这里。
-         */
-        s.convention = (MFSignConvention){ .negateSide = YES, .negateUp = NO, .applyRoll = NO };
+        // UE 的 +Y 已是右向，up 分量在下面已转换为屏幕 Y 向下。
+        // 横滚保留显式开关，默认不应用。
+        s.convention = (MFSignConvention){ .negateSide = NO, .negateUp = NO, .applyRoll = NO };
     });
     return s;
 }
@@ -31,9 +27,12 @@
     s.height  = (float)size.height;
     s.centerX = s.width  * 0.5f;
     s.centerY = s.height * 0.5f;
-    // 已证：焦距 = tan(FOV × π/360)；FOV ≤ 0 时退化为 tan(π/4)
-    s.focal = (fov <= 0.0f) ? tanf((float)M_PI / 4.0f)
-                            : tanf(fov * (float)M_PI / 360.0f);
+    s.focal = 0.0f;
+    if (!isfinite(s.width) || !isfinite(s.height) || s.width <= 0 || s.height <= 0 ||
+        !isfinite(fov) || fov <= 0 || fov >= 180) return s;
+    // 水平 FOV 的焦距使用屏幕半宽，横纵两个方向共用这个逻辑点尺度。
+    s.focal = s.centerX / tanf(fov * (float)M_PI / 360.0f);
+    if (!isfinite(s.focal) || s.focal <= 0) s.focal = 0.0f;
     return s;
 }
 
@@ -47,7 +46,13 @@
     MFPoint2D out;
     out.x = out.y = kMF_Sentinel;
     out.valid = NO;
-    if (!t) return out;
+    if (!t || !isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2]) ||
+        !isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z) ||
+        !isfinite(c.pitch) || !isfinite(c.yaw) || !isfinite(c.roll) ||
+        !isfinite(c.fov) || c.fov <= 0 || c.fov >= 180 ||
+        !isfinite(sc.width) || !isfinite(sc.height) || sc.width <= 0 || sc.height <= 0 ||
+        !isfinite(sc.centerX) || !isfinite(sc.centerY) ||
+        !isfinite(sc.focal) || sc.focal <= 0) return out;
 
     // 1) 角度 → 弧度（已证常量 0.0174533）
     float P = c.pitch * kMF_Deg2Rad;
@@ -66,20 +71,12 @@
     // 3) 深度 = 与相机前向的点积（已证式子）
     float depth = dx * cosP * cosY + dy * cosP * sinY + dz * sinP;
 
-    /*
-     * 4) 背后剔除（已证阈值 0.1）
-     *
-     * ★ 审查修正：写成 `!(depth >= kMF_MinDepth)` 而不是 `depth < kMF_MinDepth`。
-     *   两者对 NaN 的行为相反 —— NaN 参与任何比较都是 false，
-     *   所以 `depth < 0.1` 对 NaN 也为 false → NaN 会被当成「有效点」
-     *   进 DrawList（NaN 坐标的矩形会污染整个绘制批次）。
-     *   取反写法能把 NaN 一起挡掉。
-     */
-    if (!(depth >= kMF_MinDepth)) {
+    // 4) 背后/近面剔除，并拒绝有限输入在中间计算中产生的溢出。
+    if (!isfinite(depth) || !(depth >= kMF_MinDepth)) {
         return out;                     // 哨兵 (-9999, -9999)
     }
 
-    // 5) 横向 / 纵向分量（报告未逐条列出，按标准相机模型补全）
+    // 5) UE 相机横向 / 屏幕纵向分量
     //    右向量 R = (-sinY, cosY, 0)
     float side = -dx * sinY + dy * cosY;
     //    上向量 U = (-sinP·cosY, -sinP·sinY, cosP)；屏幕 Y 向下 → 取负
@@ -98,8 +95,11 @@
 
     // 6) 透视除法 + 屏幕中心
     float inv = sc.focal / depth;
-    out.x = sc.centerX + side * inv;
-    out.y = sc.centerY + up   * inv;
+    float x = sc.centerX + side * inv;
+    float y = sc.centerY + up   * inv;
+    if (!isfinite(x) || !isfinite(y)) return out;
+    out.x = x;
+    out.y = y;
     out.valid = YES;
     return out;
 }

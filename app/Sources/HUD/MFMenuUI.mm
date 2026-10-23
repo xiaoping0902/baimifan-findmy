@@ -100,6 +100,7 @@ static BOOL gVisible = YES;
 static BOOL gCollapsed = NO;
 static void (^gCollapseChangeHandler)(BOOL) = nil;
 static void (^gFrameRateApplier)(NSInteger fps) = nil;
+static void (^gCaptureProtectionApplier)(BOOL enabled) = nil;
 
 /// 收起态的圆球直径（点）
 static const float kMFMenuBallSize = 56.0f;
@@ -120,6 +121,9 @@ static const float kMFMenuBallSize = 56.0f;
 + (void)setFullPassthrough:(BOOL)passthrough { [self setCollapsed:passthrough]; }
 
 + (void)setFrameRateApplier:(void (^_Nullable)(NSInteger))applier { gFrameRateApplier = applier; }
++ (void)setCaptureProtectionApplier:(void (^_Nullable)(BOOL))applier {
+    gCaptureProtectionApplier = [applier copy];
+}
 
 - (instancetype)init {
     if ((self = [super init])) {
@@ -452,7 +456,14 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
-    ImGui::TextWrapped("截图与录屏隐藏：菜单、悬浮球、绘制内容全部开启。");
+    bool captureProtection = s.captureProtectionEnabled;
+    if (ImGui::Checkbox("防录屏", &captureProtection)) {
+        s.captureProtectionEnabled = captureProtection;
+        [s save];
+        if (gCaptureProtectionApplier) gCaptureProtectionApplier(captureProtection);
+    }
+    MFTrackLastItem();
+    ImGui::TextWrapped("默认关闭，便于截图核对。开启后保护菜单、悬浮球和绘制内容。");
     ImGui::TextDisabled("观战 / 直播模式：功能尚未接入");
 
     ImGui::Spacing();

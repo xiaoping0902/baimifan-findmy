@@ -64,30 +64,9 @@ static uint32_t MFGetTaskPortViaProcessorSet(int targetPid, NSString **errOut) {
         return MACH_PORT_NULL;                                                \
     } while (0)
 
-    /*
-     * ★★★ [M5.91] 修 pset 端口类型 bug —— 这才是 kr=0x4 的真因 ★★★
-     *
-     * 原来的写法把 processor_set_default() 的返回值**直接**喂给
-     * processor_set_tasks()，于是恒返回 kr=0x4 KERN_INVALID_ARGUMENT。
-     *
-     * XNU 内核 bsd/kern/processor.c:1529-1531：
-     *     if (pset == PROCESSOR_SET_NULL || pset != &pset0)
-     *         return KERN_INVALID_ARGUMENT;
-     *
-     * 原因：processor_set_default() 交出来的是 **processor_set_name_t**
-     * （只读命名端口），而 processor_set_tasks() 要的是
-     * **processor_set_t**（控制端口）。两者在用户态都只是 mach_port_t，
-     * 编译器不会报错，所以这个 bug 一直藏着，还一直被误判成"权限不足"。
-     *
-     * 正确顺序（原来漏了中间那一步）：
-     *     processor_set_default()         → name 端口（只读）
-     *     processor_set_name_to_control() → control 端口（可操作）★
-     *     processor_set_tasks(control)
-     *
-     * 转换的门槛只有 mac_task_check_expose_task，凭据是我们已有的
-     * task_for_pid-allow entitlement —— 这条路上 XNU 没有任何
-     * "必须平台二进制"的检查（那是 task_for_pid 那条路的规则）。
-     */
+    // processor_set_default returns a name port; processor_set_tasks needs
+    // a control port obtained through host_processor_set_priv. Availability
+    // still depends on the current process's actual host privileges.
     processor_set_name_t psetName = MACH_PORT_NULL;
     kern_return_t kr = processor_set_default(mach_host_self(), &psetName);
     NSString *firstFailure = nil;
@@ -99,19 +78,8 @@ static uint32_t MFGetTaskPortViaProcessorSet(int targetPid, NSString **errOut) {
 
     processor_set_t pset = MACH_PORT_NULL;
 
-    /* ── 路 1：name → control（免 host_priv，靠 task_for_pid-allow）── */
-    if (psetName != MACH_PORT_NULL) {
-        kr = processor_set_name_to_control(psetName, &pset);
-        if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
-            firstFailure = [NSString stringWithFormat:@"%@；name_to_control kr=0x%x",
-                            firstFailure ?: @"", kr];
-            pset = MACH_PORT_NULL;
-        } else {
-            NSLog(@"[MF][Kernel] pset 控制端口拿到（name_to_control）");
-        }
-    }
-
-    /* ── 路 2：host_priv + host_processor_set_priv ── */
+    // The previous revision referenced processor_set_name_to_control, which
+    // is not an available iOS SDK API and prevented the application building.
     if (pset == MACH_PORT_NULL) {
         mach_port_t hostPriv = MACH_PORT_NULL;
         host_get_special_port(mach_host_self(), HOST_NODENAME, HOST_PRIV_PORT, &hostPriv);

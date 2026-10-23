@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash tests/run_hud_binding_regressions.sh
 sources=(tests/hud_regressions.mm)
 for source in app/Sources/HUD/MFHUDWindowHost.mm app/Sources/HUD/MFHUDStartupStatus.mm; do
     if [[ -f "$source" ]]; then sources+=("$source"); fi
@@ -10,6 +11,11 @@ trap 'rm -rf "$(dirname "$binary")"' EXIT
 clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
     -framework Foundation -framework QuartzCore "${sources[@]}" -o "$binary"
 "$binary"
+clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -Iapp/Sources/Kernel \
+    -framework Foundation -lproc tests/hud_binding_native_regressions.mm \
+    app/Sources/Kernel/MFModuleLocator.mm app/Sources/HUD/MFHUDPassiveState.mm \
+    -o "$(dirname "$binary")/hud-binding-native-regressions"
+"$(dirname "$binary")/hud-binding-native-regressions"
 sudo mkdir -p /var/mobile/Library/Caches /var/mobile/Media/mf-debug
 sudo chmod 777 /var/mobile/Library/Caches /var/mobile/Media/mf-debug
 # M5.66：停止链路改成「通知 + 看门狗」，所以 MFHUDLauncher 现在依赖

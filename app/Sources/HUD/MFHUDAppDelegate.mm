@@ -8,6 +8,8 @@
 #import "MFHUDInputBridge.h"
 #import "MFHUDCaptureShieldView.h"
 #import "MFHUDControl.h"
+#import "MFHUDTargetBinding.h"
+#import "MFHUDPassiveState.h"
 #import <mach/mach.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -25,24 +27,84 @@
 #include <sys/proc.h>
 extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 #import "../Read/MFReadBackend.h"
+#import "../Read/MFExternalFeed.h"
 #import <objc/message.h>
 #include <string.h>
 #include <math.h>
 #include <dlfcn.h>
+#include <errno.h>
 
 // Validate the process instance before using a persisted PID or absolute base.
-static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName) {
-    if (pid <= 0 || !expectedName.length) return nil;
+static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName, NSString **error) {
+    if (pid <= 0 || !expectedName.length) {
+        if (error) *error = expectedName.length ? @"未找到目标进程" : @"当前档案未配置目标进程名";
+        return nil;
+    }
     char path[4096] = {0};
-    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return nil;
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
+        if (error) *error = [NSString stringWithFormat:@"目标路径不可读：pid=%d errno=%d", pid, errno];
+        return nil;
+    }
     NSString *executable = [NSString stringWithUTF8String:path].stringByResolvingSymlinksInPath;
-    if (![executable.lastPathComponent isEqual:expectedName]) return nil;
+    if (![executable.lastPathComponent isEqual:expectedName]) {
+        if (error) *error = [NSString stringWithFormat:@"目标进程名不匹配：%@ / %@", executable.lastPathComponent, expectedName];
+        return nil;
+    }
     int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
     struct kinfo_proc info = {}; size_t length = sizeof(info);
     if (sysctl(mib, 4, &info, &length, NULL, 0) != 0 || length < sizeof(info) ||
-        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0) return nil;
+        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0) {
+        if (error) *error = [NSString stringWithFormat:@"目标启动时间无法确认：pid=%d errno=%d", pid, errno];
+        return nil;
+    }
     return [NSString stringWithFormat:@"%d|%@|%lld|%d", pid, executable,
         (long long)info.kp_proc.p_starttime.tv_sec, (int)info.kp_proc.p_starttime.tv_usec];
+}
+
+static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
+    return {
+        [](const MFHUD::Target &target) {
+            NSString *error = nil;
+            uint32_t port = [MFKernel acquireTaskPortForPid:target.pid error:&error];
+            return MFHUD::PortResult{port, error.UTF8String ?: ""};
+        },
+        [](uint32_t port, const MFHUD::Target &target) -> std::string {
+            int portPID = 0;
+            NSString *error = nil;
+            NSString *identity = MFTargetIdentity(target.pid, [MFOffsets shared].current.processName, &error);
+            NSString *expectedIdentity = [NSString stringWithUTF8String:target.identity.c_str()];
+            if (pid_for_task(port, &portPID) != KERN_SUCCESS || portPID != target.pid)
+                return "Acquired task port does not identify the selected PID";
+            if (![identity isEqual:expectedIdentity]) return error.UTF8String ?: "Target instance changed while acquiring its port";
+            return "";
+        },
+        [](uint32_t port, const MFHUD::Target &target) {
+            NSString *error = nil;
+            MFModuleInfo *module = [MFModuleLocator mainModuleForPid:target.pid borrowedTask:port error:&error];
+            NSString *identity = MFTargetIdentity(target.pid, [MFOffsets shared].current.processName, NULL);
+            if (![identity isEqual:[NSString stringWithUTF8String:target.identity.c_str()]])
+                return MFHUD::ModuleResult{0, "", "Target instance changed during module lookup"};
+            return MFHUD::ModuleResult{module.base, module.name.UTF8String ?: "", error.UTF8String ?: ""};
+        },
+        [](uint32_t port) {
+            MFGameReader *reader = [MFGameReader shared];
+            reader.targetTaskPort = port;
+            [reader loadBasesFromDefaults];
+        },
+        [](uint64_t base) { [MFUEReader shared].libBase = base; },
+        [] {
+            MFGameReader *reader = [MFGameReader shared];
+            reader.targetTaskPort = MACH_PORT_NULL;
+            reader.rootObjectBase = reader.entityArrayBase = reader.lootArrayBase = 0;
+            [MFReadBackend shared].modeFlag = NO;
+            [MFUEReader shared].libBase = 0;
+            for (NSString *key in @[@"mf.game.libbase", @"mf.game.module", @"mf.game.pid"])
+                [NSUserDefaults.standardUserDefaults removeObjectForKey:key];
+        },
+        [](uint32_t port) {
+            if (port != MACH_PORT_NULL && port != mach_task_self()) mach_port_deallocate(mach_task_self(), port);
+        },
+    };
 }
 
 #pragma mark - HUD 应用代理
@@ -77,9 +139,15 @@ static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName) {
 @property (nonatomic, strong) NSTimer *targetTimer;
 @property (nonatomic) pid_t boundTargetPID;
 @property (nonatomic, copy) NSString *boundTargetIdentity;
+@property (nonatomic, copy) NSString *lastBindingLog;
+@property (nonatomic, copy) NSString *lastPassiveStateError;
+@property (nonatomic) NSUInteger menuFirstFrameCompletions;
+@property (nonatomic) NSUInteger drawingFirstFrameCompletions;
 @end
 
-@implementation MFHUDAppDelegate
+@implementation MFHUDAppDelegate {
+    MFHUD::TargetBinding _targetBinding;
+}
 
 static BOOL gIsHUD = NO;
 + (BOOL)isHUDProcess { return gIsHUD; }
@@ -103,6 +171,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     __weak MFHUDAppDelegate *weakTargetOwner = self;
     self.targetTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
         [weakTargetOwner refreshTargetBinding];
+        [weakTargetOwner writePassiveStateSnapshot];
     }];
     [[NSRunLoop mainRunLoop] addTimer:self.targetTimer forMode:NSRunLoopCommonModes];
 
@@ -173,8 +242,16 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
-    self.startupReport[@"captureProtectedSurfaces"] = @[@"menu", @"ball", @"drawing"];
-    MFHUDLogLine(@"菜单、悬浮球、绘制层已挂入固定安全画布；截图和录屏效果待真机验收");
+    [self applyCaptureProtectionEnabled:[MFSettings shared].captureProtectionEnabled];
+    __weak MFHUDAppDelegate *weakSelfForCapture = self;
+    [MFMenuUI setCaptureProtectionApplier:^(BOOL enabled) {
+        // Reparent content after the current ImGui build has ended.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MFHUDAppDelegate *owner = weakSelfForCapture;
+            if (!owner || [owner isStopping]) return;
+            [owner applyCaptureProtectionEnabled:enabled];
+        });
+    }];
 
     /*
      * ★ 帧率策略（M5.66）★
@@ -382,82 +459,125 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         [self failStartup:@"旋转后窗口 context 已变化，悬浮窗已退出，请重新启动悬浮窗。"];
 }
 
+- (void)applyCaptureProtectionEnabled:(BOOL)enabled {
+    NSString *menuError = nil, *drawingError = nil;
+    BOOL menuOK = [self.menuContent setCaptureProtectionEnabled:enabled error:&menuError];
+    BOOL drawingOK = [self.drawingContent setCaptureProtectionEnabled:enabled error:&drawingError];
+    if (!menuOK || !drawingOK) {
+        // Optional capture protection must not stop the HUD or leave only one
+        // surface hidden. Ordinary content remains available for screenshots.
+        [self.menuContent setCaptureProtectionEnabled:NO error:NULL];
+        [self.drawingContent setCaptureProtectionEnabled:NO error:NULL];
+        [MFSettings shared].captureProtectionEnabled = NO;
+        [[MFSettings shared] save];
+        self.startupReport[@"captureProtectionError"] = menuError ?: drawingError ?: @"防录屏切换失败";
+        MFHUDLogLine(@"防录屏切换失败，已回退关闭：menu=%@ drawing=%@", menuError ?: @"无", drawingError ?: @"无");
+    } else {
+        [self.startupReport removeObjectForKey:@"captureProtectionError"];
+    }
+    BOOL menuProtected = self.menuContent.captureProtectionEnabled;
+    BOOL drawingProtected = self.drawingContent.captureProtectionEnabled;
+    BOOL active = menuProtected && drawingProtected;
+    self.startupReport[@"captureProtectionEnabled"] = @(active);
+    NSMutableArray *surfaces = [NSMutableArray array];
+    if (menuProtected) [surfaces addObjectsFromArray:@[@"menu", @"ball"]];
+    if (drawingProtected) [surfaces addObject:@"drawing"];
+    self.startupReport[@"captureProtectedSurfaces"] = surfaces;
+    MFHUDLogLine(@"防录屏=%@ menu=%d drawing=%d（请求=%d）", active ? @"开" : @"关", menuProtected, drawingProtected, enabled);
+    NSError *reportError = nil;
+    if (self.startupToken && ![MFHUDStartupStatus writeReport:self.startupReport token:self.startupToken error:&reportError])
+        MFHUDLogLine(@"防录屏状态写入失败：%@", reportError);
+    [self writePassiveStateSnapshot];
+}
+
 - (void)refreshTargetBinding {
     if ([self isStopping]) return;
-    MFGameReader *reader = [MFGameReader shared];
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults synchronize];
     NSString *expected = [MFOffsets shared].current.processName;
     pid_t pid = (pid_t)[defaults integerForKey:@"mf.target.pid"];
-    NSString *identity = MFTargetIdentity(pid, expected);
+    NSString *identityError = nil;
+    NSString *identity = MFTargetIdentity(pid, expected, &identityError);
     if (!identity) {
         pid = [MFModuleLocator pidForProcessName:expected];
-        identity = MFTargetIdentity(pid, expected);
+        identity = MFTargetIdentity(pid, expected, &identityError);
     }
-    if (identity && [identity isEqual:self.boundTargetIdentity] && reader.targetTaskPort != MACH_PORT_NULL) return;
-    if (self.boundTargetIdentity || reader.targetTaskPort != MACH_PORT_NULL) {
-        mach_port_t oldPort = reader.targetTaskPort;
-        reader.targetTaskPort = MACH_PORT_NULL;
-        reader.rootObjectBase = reader.entityArrayBase = reader.lootArrayBase = 0;
-        [MFReadBackend shared].modeFlag = NO;
-        if (oldPort != MACH_PORT_NULL && oldPort != mach_task_self()) mach_port_deallocate(mach_task_self(), oldPort);
-        [MFUEReader shared].libBase = 0;
-        for (NSString *key in @[@"mf.game.libbase", @"mf.game.module", @"mf.game.pid"])
-            [defaults removeObjectForKey:key];
-        self.boundTargetIdentity = nil; self.boundTargetPID = 0;
-        MFHUDLogLine(@"目标实例变化/退出：已释放旧端口并清除绝对基址");
+    MFHUD::Target target{pid, identity.UTF8String ?: "", identityError.UTF8String ?: ""};
+    _targetBinding.tick(CACurrentMediaTime(), target, MFMakeTargetBindingHooks());
+    const MFHUD::BindingState &state = _targetBinding.state();
+    self.boundTargetPID = state.port ? state.target.pid : 0;
+    self.boundTargetIdentity = state.port ? [NSString stringWithUTF8String:state.target.identity.c_str()] : nil;
+    if (state.port) {
+        [defaults setInteger:state.target.pid forKey:@"mf.target.pid"];
+        [defaults setObject:expected forKey:@"mf.target.name"];
     }
-    if (!identity) return;
-    NSString *error = nil;
-    mach_port_t port = [MFKernel acquireTaskPortForPid:pid error:&error];
-    if (port == MACH_PORT_NULL) return;
-    // Close the PID-reuse race between the name check and port acquisition.
-    int portPID = 0;
-    if (pid_for_task(port, &portPID) != KERN_SUCCESS || portPID != pid ||
-        ![identity isEqual:MFTargetIdentity(pid, expected)]) {
-        mach_port_deallocate(mach_task_self(), port); return;
+    // A stable denial is recorded once; every retry still updates the passive
+    // snapshot's attempt counters and uptime without flooding the HUD log.
+    NSString *line = [NSString stringWithFormat:@"stage=%s pid=%d port=0x%x libBase=0x%llx error=%s",
+        state.stage.c_str(), state.target.pid, state.port, (unsigned long long)state.base, state.error.c_str()];
+    if (![line isEqual:self.lastBindingLog]) {
+        self.lastBindingLog = line;
+        MFHUDLogLine(@"[Binding] %@", line);
     }
-    reader.targetTaskPort = port;
-    [reader loadBasesFromDefaults];
+}
 
-    /*
-     * ★ [M5.74] HUD 侧自己恢复模块基址 ★
-     *
-     * MFUEReader 那条链是【唯一可自动建立】的：
-     *     GWorld = Read<u64>(libBase + 静态偏移) → GameInstance → … → Actors
-     * 起点的 libBase 是 ASLR 值，每次游戏启动都不同。
-     *
-     * 但这条链在 HUD 进程里从来没被点上过：
-     *   · 控制台「一键开始」写下的 mf.game.libbase 只对同一局游戏进程有效，
-     *     而且 HUD 侧只在清理路径里把 libBase 置 0，成功路径从来没恢复过；
-     *   · 结果就是 MFUEReader.libBase 恒为 0，链在第一步就断。
-     *
-     * 这里绑定成功时补上：优先**自己定位**（HUD 有 task port，能直接读目标
-     * 的 dyld 信息），失败再退回控制台写下的值。
-     */
-    uint64_t libBase = 0;
-    {
-        NSString *moduleError = nil;
-        MFModuleInfo *module = [MFModuleLocator mainModuleForPid:pid error:&moduleError];
-        if (module && module.base) {
-            libBase = module.base;
-            [defaults setObject:@(libBase) forKey:@"mf.game.libbase"];
-            [defaults setObject:(module.name ?: @"") forKey:@"mf.game.module"];
-            MFHUDLogLine(@"HUD 侧模块定位：%@ base=0x%llx %@",
-                         module.name ?: @"?", (unsigned long long)libBase,
-                         [module respondsToSelector:@selector(sizeText)] ? module.sizeText : @"");
-        } else {
-            libBase = [[defaults objectForKey:@"mf.game.libbase"] unsignedLongLongValue];
-            MFHUDLogLine(@"HUD 侧模块定位失败（%@）→ 退回控制台记录的 libBase=0x%llx",
-                         moduleError ?: @"?", (unsigned long long)libBase);
-        }
-        [MFUEReader shared].libBase = libBase;
+- (void)writePassiveStateSnapshot {
+    // Read cached getters only. Do not acquire a frame, resolve a chain, locate
+    // a module, refresh the binding, or start a receiver on this path.
+    const MFHUD::BindingState &binding = _targetBinding.state();
+    MFExternalFeed *feed = [MFExternalFeed shared];
+    MFGameReader *reader = [MFGameReader shared];
+    MFReadBackend *backend = [MFReadBackend shared];
+    MFDrawingLayer *drawing = self.drawingLayer;
+    MFSettings *settings = [MFSettings shared];
+    MFKernel *kernel = [MFKernel shared];
+    MFCamera camera = {};
+    BOOL hasCamera = [feed snapshotCamera:&camera];
+    NSUInteger packets = feed.packetCount;
+    NSTimeInterval age = feed.lastPacketAge;
+    double fps = self.drawingOverlay.renderedFPS;
+    NSDictionary *snapshot = @{
+        @"role": @"hud",
+        @"captureProtectionEnabled": @(self.menuContent.captureProtectionEnabled && self.drawingContent.captureProtectionEnabled),
+        @"kernelState": @(kernel.state), @"kernelBase": @(kernel.kbase),
+        @"startup": [self.startupReport copy] ?: @{},
+        @"binding": @{
+            @"stage": [NSString stringWithUTF8String:binding.stage.c_str()],
+            @"error": [NSString stringWithUTF8String:binding.error.c_str()],
+            @"targetPID": @(binding.target.pid),
+            @"identity": [NSString stringWithUTF8String:binding.target.identity.c_str()],
+            @"taskPort": @(binding.port), @"libBase": @(binding.base),
+            @"module": [NSString stringWithUTF8String:binding.module.c_str()],
+            @"portAttempts": @(binding.portAttempts), @"moduleAttempts": @(binding.moduleAttempts),
+            @"lastAttemptUptime": @(binding.lastAttemptUptime),
+        },
+        @"reader": @{ @"targetTaskPort": @(reader.targetTaskPort), @"ready": @(reader.ready),
+            @"gateOpen": @(backend.gateOpen), @"modeFlag": @(backend.modeFlag),
+            @"libBase": @([MFUEReader shared].libBase) },
+        @"feed": @{ @"running": @(feed.running), @"packetCount": @(packets),
+            @"errorCount": @(feed.errorCount), @"fresh": @(feed.fresh),
+            @"lastPacketAge": packets && isfinite(age) ? @(age) : NSNull.null,
+            @"lastSequence": @(feed.lastSequence), @"hasCamera": @(hasCamera),
+            @"cameraFOV": hasCamera && isfinite(camera.fov) ? @(camera.fov) : NSNull.null,
+            @"entities": @([feed snapshotEntities].count) },
+        @"drawing": @{ @"cameraOK": @(drawing.lastCameraOK),
+            @"entities": @(drawing.lastEntityCount), @"loot": @(drawing.lastLootCount),
+            @"hasCompletedFrame": @(self.drawingOverlay.hasCompletedFrame),
+            @"renderedFPS": isfinite(fps) ? @(fps) : NSNull.null,
+            @"masterEnabled": @(settings.masterEnabled), @"drawEnabled": @(settings.drawEnabled),
+            @"renderSelfTest": @(settings.renderSelfTest) },
+        @"firstFrameCompletions": @{ @"menu": @(self.menuFirstFrameCompletions),
+            @"drawing": @(self.drawingFirstFrameCompletions) },
+    };
+    NSError *error = nil;
+    if (![MFHUDPassiveState writeSnapshot:snapshot token:self.startupToken ?: @""
+        directory:@"/var/mobile/Media/mf-debug" error:&error]) {
+        if (![error.localizedDescription isEqual:self.lastPassiveStateError])
+            MFHUDLogLine(@"HUD 被动状态写入失败：%@", error);
+        self.lastPassiveStateError = error.localizedDescription;
+    } else {
+        self.lastPassiveStateError = nil;
     }
-
-    self.boundTargetPID = pid; self.boundTargetIdentity = identity;
-    [defaults setInteger:pid forKey:@"mf.target.pid"];
-    [defaults setObject:expected forKey:@"mf.target.name"];
-    MFHUDLogLine(@"HUD 绑定已核验：pid=%d libBase=0x%llx %@",
-                 pid, (unsigned long long)libBase, reader.calibrationSummary);
 }
 
 - (BOOL)isStopping {
@@ -509,7 +629,12 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         [self failStartup:@"调整菜单尺寸后 context 已变化，已停止悬浮窗，请重新启动。"];
 }
 
-- (void)dealloc { [self.orientationObserver invalidate]; [self.targetTimer invalidate]; }
+- (void)dealloc {
+    [self.orientationObserver invalidate];
+    [self.targetTimer invalidate];
+    _targetBinding.reset(MFMakeTargetBindingHooks());
+    [MFMenuUI setCaptureProtectionApplier:nil];
+}
 
 - (void)publishStartupState:(NSString *)state error:(NSString *)error {
     NSString *previous = self.startupReport[@"state"];
@@ -525,11 +650,15 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
                             token:self.startupToken error:&writeError]) {
         MFHUDLogLine(@"启动状态写入失败：%@", writeError);
     }
+    [self writePassiveStateSnapshot];
 }
 
 - (void)failStartup:(NSString *)error {
     if ([self isStopping]) return;
     [self.targetTimer invalidate];
+    [MFMenuUI setCaptureProtectionApplier:nil];
+    _targetBinding.reset(MFMakeTargetBindingHooks());
+    self.boundTargetPID = 0; self.boundTargetIdentity = nil;
     [self.inputBridge cancelAll];
     [self.menuOverlay stopRendering];
     [self.drawingOverlay stopRendering];
@@ -556,12 +685,15 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 - (void)shutdownForExitRequest {
     if (self.exitRequested) return;
     self.exitRequested = YES;
+    _targetBinding.reset(MFMakeTargetBindingHooks());
+    self.boundTargetPID = 0; self.boundTargetIdentity = nil;
 
     MFHUDLogLine(@"HUD 退出：撤窗口 → 停渲染 → 结束进程（身份保留到确认死亡）（pid=%d）", getpid());
     [self publishStartupState:@"stopping" error:nil];
     [self.targetTimer invalidate];
     [MFMenuUI setCollapseChangeHandler:nil];
     [MFMenuUI setFrameRateApplier:nil];
+    [MFMenuUI setCaptureProtectionApplier:nil];
     self.menuOverlay.firstFrameCompletion = nil;
     self.drawingOverlay.firstFrameCompletion = nil;
 
@@ -599,6 +731,8 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     if ([self isStopping]) return;
     if (error) { [self failStartup:[NSString stringWithFormat:@"%@：%@", key, error]]; return; }
     self.startupReport[key] = @YES;
+    if ([key isEqual:@"menuFrame"]) self.menuFirstFrameCompletions++;
+    if ([key isEqual:@"drawingFrame"]) self.drawingFirstFrameCompletions++;
     MFHUDLogLine(@"%@：GPU 首帧已完成", key);
     BOOL complete = [self.startupReport[@"menuFrame"] boolValue] &&
                     [self.startupReport[@"drawingFrame"] boolValue];

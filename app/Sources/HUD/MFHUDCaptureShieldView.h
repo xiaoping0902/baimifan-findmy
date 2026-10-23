@@ -2,10 +2,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// A persistent secure-text canvas for hosted HUD content. UIKit's private
-/// canvas behavior must also be checked on the installed OS with capture tests.
+/// HUD content defaults to an ordinary, capturable view. Capture protection
+/// can be explicitly enabled using UIKit's secure-text canvas.
 @interface MFHUDCaptureShieldView : UIView
 @property (nonatomic, strong, readonly) UIView *contentView;
+@property (nonatomic, assign, readonly) BOOL captureProtectionEnabled;
+- (BOOL)setCaptureProtectionEnabled:(BOOL)enabled
+                             error:(NSString *_Nullable *_Nullable)error;
 - (nullable instancetype)initWithFrame:(CGRect)frame
                                 error:(NSString *_Nullable *_Nullable)error;
 @end

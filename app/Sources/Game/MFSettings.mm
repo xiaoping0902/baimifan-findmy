@@ -68,6 +68,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
 
     _spectatorMode = NO;
     _liveMode = NO;
+    _captureProtectionEnabled = NO;
     _renderSelfTest = NO;
 
     // 颜色槽默认值（对齐分析的配色规则：3/4/5/6 级各自专属色）
@@ -118,6 +119,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         @[@"showLootName", @(_showLootName)], @[@"showLootStats", @(_showLootStats)],
         @[@"backEnemyEnabled", @(_backEnemyEnabled)],
         @[@"spectatorMode", @(_spectatorMode)], @[@"liveMode", @(_liveMode)],
+        @[@"captureProtectionEnabled", @(_captureProtectionEnabled)],
         @[@"smoothAim", @(_smoothAim)],
         @[@"renderSelfTest", @(_renderSelfTest)],
     ];
@@ -166,6 +168,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     LOAD_BOOL(showLoot); LOAD_BOOL(showBox); LOAD_BOOL(showLootName); LOAD_BOOL(showLootStats);
     LOAD_BOOL(backEnemyEnabled); LOAD_BOOL(spectatorMode); LOAD_BOOL(liveMode); LOAD_BOOL(smoothAim);
     LOAD_BOOL(renderSelfTest);
+    LOAD_BOOL(captureProtectionEnabled);
 
     LOAD_NUM(minLootLevel); LOAD_NUM(minLootValue);
     LOAD_NUM(boxDrawDistance); LOAD_NUM(lootDrawDistance); LOAD_NUM(skeletonDistance);

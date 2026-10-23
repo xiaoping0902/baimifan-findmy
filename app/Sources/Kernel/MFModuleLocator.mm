@@ -117,6 +117,10 @@ static NSString *gLastReport = nil;
 }
 @end
 
+@interface MFModuleLocator ()
++ (nullable MFModuleInfo *)mainModuleFromModules:(nullable NSArray<MFModuleInfo *> *)modules;
+@end
+
 @implementation MFModuleLocator
 
 + (instancetype)shared {
@@ -312,6 +316,21 @@ static NSString *MFRemoteString(mach_port_t task, uint64_t addr, size_t max) {
 
 + (NSArray<MFModuleInfo *> *)modulesForPid:(pid_t)pid
                                       error:(NSString **)error {
+    mach_port_t task = pid > 0 ? [self taskPortForPid:pid] : MACH_PORT_NULL;
+    if (task == MACH_PORT_NULL) {
+        if (error) *error = pid <= 0 ? @"pid 无效" : @"拿不到 task port —— 检查 task_for_pid-allow 权限";
+        gLastReport = [NSString stringWithFormat:@"=== 模块定位诊断 ===\npid=%d\n✗ %@\n", pid,
+            pid <= 0 ? @"pid 无效" : @"拿不到 task port（task_for_pid 失败）"];
+        return nil;
+    }
+    NSArray<MFModuleInfo *> *modules = [self modulesForPid:pid borrowedTask:task error:error];
+    mach_port_deallocate(mach_task_self(), task);
+    return modules;
+}
+
++ (NSArray<MFModuleInfo *> *)modulesForPid:(pid_t)pid
+                            borrowedTask:(mach_port_t)task
+                                   error:(NSString **)error {
     NSMutableString *rep = [NSMutableString string];
     [rep appendFormat:@"=== 模块定位诊断 ===\npid=%d\n", pid];
 
@@ -321,10 +340,10 @@ static NSString *MFRemoteString(mach_port_t task, uint64_t addr, size_t max) {
         return nil;
     }
 
-    mach_port_t task = [self taskPortForPid:pid];
-    if (task == MACH_PORT_NULL) {
-        [rep appendString:@"✗ 拿不到 task port（task_for_pid 失败）\n"];
-        if (error) *error = @"拿不到 task port —— 检查 task_for_pid-allow 权限";
+    int actualPID = 0;
+    if (task == MACH_PORT_NULL || pid_for_task(task, &actualPID) != KERN_SUCCESS || actualPID != pid) {
+        [rep appendString:@"✗ 借用的 task port 无效或不属于目标 PID\n"];
+        if (error) *error = @"借用的 task port 无效或目标 PID 不匹配";
         gLastReport = rep;
         return nil;
     }
@@ -349,11 +368,9 @@ static NSString *MFRemoteString(mach_port_t task, uint64_t addr, size_t max) {
         }];
     }
 
-    mach_port_deallocate(mach_task_self(), task);
-
     [rep appendFormat:@"\n合计 %lu 个模块\n", (unsigned long)mods.count];
     gLastReport = rep;
-    if (error) *error = nil;
+    if (error) *error = mods.count ? nil : @"目标端口已核验，但没有找到已加载模块";
     return mods;
 }
 
@@ -377,6 +394,15 @@ static NSString *MFRemoteString(mach_port_t task, uint64_t addr, size_t max) {
 
 + (MFModuleInfo *)mainModuleForPid:(pid_t)pid error:(NSString **)error {
     NSArray<MFModuleInfo *> *mods = [self modulesForPid:pid error:error];
+    return [self mainModuleFromModules:mods];
+}
+
++ (MFModuleInfo *)mainModuleForPid:(pid_t)pid borrowedTask:(mach_port_t)task error:(NSString **)error {
+    NSArray<MFModuleInfo *> *mods = [self modulesForPid:pid borrowedTask:task error:error];
+    return [self mainModuleFromModules:mods];
+}
+
++ (MFModuleInfo *)mainModuleFromModules:(NSArray<MFModuleInfo *> *)mods {
     if (mods.count == 0) return nil;
 
     NSMutableString *rep = [NSMutableString stringWithString:gLastReport ?: @""];

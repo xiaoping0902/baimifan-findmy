@@ -64,12 +64,21 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSArray<MFModuleInfo *> *)modulesForPid:(pid_t)pid
                                               error:(NSString *_Nullable *_Nullable)error;
 
+/// Use an already verified send right in the caller's IPC space. This method
+/// neither acquires another task port nor consumes/deallocates the borrowed one.
++ (nullable NSArray<MFModuleInfo *> *)modulesForPid:(pid_t)pid
+                                       borrowedTask:(mach_port_t)task
+                                              error:(NSString *_Nullable *_Nullable)error;
+
 /// 取「主模块」—— 也就是 UE4 那个几百 MB 的大模块。
 ///
 /// 判定顺序（每一步都留痕，便于诊断）：
 ///   ① 路径里含已知的 UE4 特征名（libUE4 / UE4Game / 主可执行名）
 ///   ② 体积最大的那个（UE4 模块通常 300~600 MB，其余都是几十 KB~几 MB 的 SDK）
 + (nullable MFModuleInfo *)mainModuleForPid:(pid_t)pid
+                                      error:(NSString *_Nullable *_Nullable)error;
++ (nullable MFModuleInfo *)mainModuleForPid:(pid_t)pid
+                               borrowedTask:(mach_port_t)task
                                       error:(NSString *_Nullable *_Nullable)error;
 
 /// 一步到位：按进程名找 pid + 取主模块基址

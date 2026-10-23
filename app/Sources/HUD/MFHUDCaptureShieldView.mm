@@ -25,6 +25,7 @@ static UIView *MFFindSecureCanvas(UIView *view) {
 
 @implementation MFHUDCaptureShieldView {
     MFHUDSecureField *_secureField;
+    BOOL _captureProtectionEnabled;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame error:(NSString **)error {
@@ -32,6 +33,21 @@ static UIView *MFFindSecureCanvas(UIView *view) {
     if ((self = [super initWithFrame:frame])) {
         self.backgroundColor = UIColor.clearColor;
         self.opaque = NO;
+        _contentView = [[UIView alloc] initWithFrame:self.bounds];
+        _contentView.backgroundColor = UIColor.clearColor;
+        _contentView.opaque = NO;
+        _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self addSubview:_contentView];
+    }
+    return self;
+}
+
+- (BOOL)captureProtectionEnabled { return _captureProtectionEnabled; }
+
+- (BOOL)setCaptureProtectionEnabled:(BOOL)enabled error:(NSString **)error {
+    if (error) *error = nil;
+    if (enabled == _captureProtectionEnabled) return YES;
+    if (enabled && !_secureField) {
         _secureField = [[MFHUDSecureField alloc] initWithFrame:self.bounds];
         _secureField.secureTextEntry = YES;
         _secureField.borderStyle = UITextBorderStyleNone;
@@ -46,18 +62,25 @@ static UIView *MFFindSecureCanvas(UIView *view) {
         UIView *canvas = MFFindSecureCanvas(_secureField);
         if (!canvas) {
             if (error) *error = @"当前系统未提供安全文本画布，无法建立悬浮内容截屏保护。";
-            return nil;
+            [_secureField removeFromSuperview];
+            _secureField = nil;
+            return NO;
         }
         _secureField.protectedCanvas = canvas;
         canvas.userInteractionEnabled = YES;
         canvas.frame = self.bounds;
-        _contentView = [[UIView alloc] initWithFrame:canvas.bounds];
-        _contentView.backgroundColor = UIColor.clearColor;
-        _contentView.opaque = NO;
-        _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [canvas addSubview:_contentView];
     }
-    return self;
+    // Keep the same content and Metal children when switching either way.
+    // Reparent only between two containers with the same local coordinates.
+    UIView *host = enabled ? _secureField.protectedCanvas : self;
+    [_contentView removeFromSuperview];
+    _contentView.frame = host.bounds;
+    [host addSubview:_contentView];
+    _secureField.hidden = !enabled;
+    _captureProtectionEnabled = enabled;
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    return YES;
 }
 
 - (void)setBounds:(CGRect)bounds {
@@ -78,7 +101,7 @@ static UIView *MFFindSecureCanvas(UIView *view) {
     _secureField.frame = self.bounds;
     [_secureField setNeedsLayout];
     [_secureField layoutIfNeeded];
-    _contentView.frame = _secureField.protectedCanvas.bounds;
+    _contentView.frame = _captureProtectionEnabled ? _secureField.protectedCanvas.bounds : self.bounds;
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {

@@ -85,6 +85,8 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 #pragma mark 模式
 @property (nonatomic, assign) BOOL spectatorMode;      // 观战模式
 @property (nonatomic, assign) BOOL liveMode;           // 直播模式
+/// 默认关闭，便于截图检查 HUD；用户可在菜单中选择开启。
+@property (nonatomic, assign) BOOL captureProtectionEnabled;
 
 #pragma mark 自检
 /// 渲染自检：不读游戏内存，直接画合成方块。

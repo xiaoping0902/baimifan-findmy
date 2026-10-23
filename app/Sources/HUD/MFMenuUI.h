@@ -35,6 +35,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// AppDelegate 注入：把刷新率同时应用到菜单层与绘制层。
 + (void)setFrameRateApplier:(void (^_Nullable)(NSInteger fps))applier;
+/// 同时更新菜单、悬浮球和绘制层的截屏保护。
++ (void)setCaptureProtectionApplier:(void (^_Nullable)(BOOL enabled))applier;
 
 @end
 
