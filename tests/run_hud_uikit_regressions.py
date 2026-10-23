@@ -32,7 +32,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-source", type=Path,
                         default=ROOT / "app/Sources/HUD/MFHUDWindow.mm")
-    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay", "game-reader"], default="windows")
+    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay", "game-reader", "drawing"], default="windows")
     args = parser.parse_args()
     sdk = run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path", capture=True).stdout.strip()
     devices = json.loads(run("xcrun", "simctl", "list", "devices", "available", "-j", capture=True).stdout)
@@ -108,6 +108,16 @@ def main():
                                 ROOT / "app/Sources/Game/MFSettings.mm",
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]
+                elif args.suite == "drawing":
+                    # Real UDP receiver, drawing delegate, settings and projection.
+                    # The fixture keeps local readers unbound and fails on any
+                    # remote read; no kernel or game process is part of this suite.
+                    sources.append(ROOT / "app/Sources/HUD/MFDrawingLayer.mm")
+                    sources += [ROOT / f"app/Sources/Game/{name}.mm" for name in (
+                        "MFGameReader", "MFUEReader", "MFUEOffsets", "MFProjection", "Offsets",
+                        "MFSettings", "MFGearCatalog", "MFGearReader", "MFUEGNames", "MFItemTable")]
+                    sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
+                                ROOT / "app/Sources/Read/MFExternalFeed.mm"]
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-x", "objective-c++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
@@ -134,7 +144,8 @@ def main():
             environment["SIMCTL_CHILD_MF_REGRESSION_SCREENSHOT_ACK"] = str(screenshot_ack)
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
-                      "game-reader": "PASS: production game reader"}[args.suite]
+                      "game-reader": "PASS: production game reader",
+                      "drawing": "PASS: production drawing consumes synthetic UDP"}[args.suite]
             report = ""
             menu_captured = False
             launch_log = Path(directory) / "simctl-launch.log"
