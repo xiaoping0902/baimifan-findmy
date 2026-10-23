@@ -164,33 +164,54 @@
      * 而且 panic 重启比正常重启慢很多（要落 panic 日志 + iOS 走额外诊断），
      * 连崩四次就是用户感觉的「重启要很久很久」。
      *
-     * ★ 好消息：主线根本不需要内核。
-     *   读取链走查确认零 KFD 依赖（MFReadBackend/MFGameReader/MFModuleLocator），
-     *   门条件只看 task port，而 task port 来自 task_for_pid + entitlement。
-     *   用「★ 一键开始」就够。
+     * ⚠ 范围说明：上面这四次 panic 是 **2026-10-15、旧设备 iPad8,11 / 16.6.1**
+     *   的历史记录（见 docs 与 /Panics 里的 panic-full-*.ips）。
+     *   本机 iPad14,4 / 16.1 的 /Panics 目录目前是**空的** —— 还没因 KFD panic 过。
+     *   但这只是"还没发生"，不代表不会发生；panic 原理对这台同样适用。
+     *
+     * ★ [M5.87] 这里原来写着「好消息：主线根本不需要内核」。
+     *   那个结论**已被真机推翻**：读链的门条件确实只看 task port，
+     *   可 task port 恰恰拿不到 ——
+     *       task_for_pid(游戏/launchd/SpringBoard) 全 kr=0x5（PPL 按 CS_HARD 拒）
+     *       processor_set_tasks 全 kr=0x4
+     *   所以"task port 来自 task_for_pid + entitlement"这条前提不成立。
+     *   没有内核读写 ⇒ 没有 task port ⇒ 读不了游戏内存 ⇒ 没有绘制。
+     *   内核不是可选项，是唯一路径。
+     */
+    /*
+     * ★ [M5.87] 这段文案原来在劝退用户（默认按钮是"取消（推荐）"），
+     * 依据是"主线不需要内核，一键开始走 task_for_pid 就够"。
+     * 那个前提已被真机推翻：task_for_pid 在 A12+/iOS15+ 被 PPL 全线封死
+     * （实测游戏 / launchd / SpringBoard 全 kr=0x5，processor_set 全 kr=0x4）。
+     *
+     * 也就是说：内核从"可选的风险优化"变成了"唯一可走的路径"。
+     * 文案必须如实反映这一点 —— 既要保留 panic 风险提示（那是真的），
+     * 又不能让用户以为"不点内核也行"（那是假的）。
      */
     NSInteger panics = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kernel.panicWarned"];
     UIAlertController *warn = [UIAlertController
-        alertControllerWithTitle:@"⛔️ 这个按钮会重启整台设备"
+        alertControllerWithTitle:@"⚠️ 内核是当前唯一路径"
                          message:[NSString stringWithFormat:
-                                 @"设备日志里已经有【4 次内核 panic】：\n"
-                                 @"  21:42:55 · 22:31:49 · 22:44:35 · 22:58:26\n"
-                                 @"每次 panic = 一次整机重启，而且比正常重启慢很多。\n\n"
-                                 @"原因：\n"
-                                 @"  KFD 制造的悬空页被 vm_copy 碰到时，\n"
-                                 @"  内核报 pmap_map_cpu_windows_copy_internal\n"
-                                 @"  attempted to map a managed page @pmap.c:10917\n\n"
-                                 @"★ 主线不需要内核：\n"
-                                 @"  「★ 一键开始」走 task_for_pid + mach_vm_remap，\n"
-                                 @"  完全不碰 KFD —— 不会 panic。\n\n"
-                                 @"确定要继续启动内核吗？%@",
-                                 panics > 0 ? @"\n（你已经被告知过一次了）" : @""]
+                                 @"先说风险（真的）：\n"
+                                 @"  设备日志里已经有【4 次内核 panic】：\n"
+                                 @"    21:42:55 · 22:31:49 · 22:44:35 · 22:58:26\n"
+                                 @"  每次 panic = 一次整机重启，而且比正常重启慢很多。\n\n"
+                                 @"再说为什么还得点：\n"
+                                 @"  task_for_pid 已被内核 PPL 封死 —— 实测\n"
+                                 @"    游戏/launchd/SpringBoard 全部 kr=0x5\n"
+                                 @"    processor_set_tasks 全部 kr=0x4\n"
+                                 @"  所以「★ 一键开始」拿不到 task port，数据链起不来。\n"
+                                 @"  没有内核读写，就没有任何办法读游戏内存。\n\n"
+                                 @"本版本（M5.87）起，拿到内核后会先用 proc patch\n"
+                                 @"绕开 taskgated 的 CS_HARD 拒绝，再重试 task_for_pid。\n\n"
+                                 @"确定要启动内核吗？%@",
+                                 panics > 0 ? @"\n（你已经走过一次了）" : @""]
                   preferredStyle:UIAlertControllerStyleAlert];
-    [warn addAction:[UIAlertAction actionWithTitle:@"取消（推荐）"
+    [warn addAction:[UIAlertAction actionWithTitle:@"取消"
                                              style:UIAlertActionStyleCancel
                                            handler:nil]];
     [warn addAction:[UIAlertAction actionWithTitle:@"仍要启动内核"
-                                             style:UIAlertActionStyleDestructive
+                                             style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *_) {
         [[NSUserDefaults standardUserDefaults] setInteger:panics + 1
                                                    forKey:@"mf.kernel.panicWarned"];

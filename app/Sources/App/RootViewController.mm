@@ -177,8 +177,23 @@ extern char **environ;
     [s1.rows addObject:[self actionRow:@"★ 一键开始"
                                 detail:@"查找并验证游戏进程、模块和 UE4 数据链"
                                 action:@"actOneClick"]];
+    /*
+     * ★ [M5.87] 「启动内核」的文案改过 —— 原来写的是「⛔️ 别点！…主线不需要它」。
+     *
+     * 那个判断基于一个**已经被真机推翻**的假设：
+     *     "task port 来自 task_for_pid + entitlement，所以主线不需要内核"
+     * 实测（无越狱 / iPad14,4 / 16.1）：
+     *     task_for_pid(游戏)    kr=0x5 KERN_FAILURE   （PPL 按 CS_HARD 拒）
+     *     task_for_pid(launchd) kr=0x5
+     *     processor_set_tasks   kr=0x4
+     * 三条路全断。entitlement 本身是生效的（自己 task port=0x203 拿得到）。
+     *
+     * 结论：内核不是"可选优化"，它是**唯一还能走的路**。
+     * 所以文案必须改成引导用户去点，而不是劝退 ——
+     * 之前那段"别点"，直接导致用户反复点「一键开始」并反复看到失败。
+     */
     [s1.rows addObject:[self actionRow:@"启动内核"
-                                detail:@"⛔️ 别点！KFD 已让设备 panic 重启 4 次，主线不需要它"
+                                detail:@"⚠️ 必点：task_for_pid 已被 PPL 封死，内核是唯一出路（可能 panic）"
                                 action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:(self.hudStopping ? @"正在结束悬浮窗" :
@@ -587,7 +602,17 @@ extern char **environ;
 - (void)actOneClick {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableString *rep = [NSMutableString string];
-        [rep appendString:@"复刻版 · 一键开始（纯 TrollStore，不用内核）\n"];
+        /*
+         * ★ [M5.87] 标题改过。原来只有"（纯 TrollStore，不用内核）"这几个字，
+         * 用户看到"② 拿不到 task port"时会以为是自己操作错了或者版本有问题。
+         * 实际上这个模式**必然失败**——它不碰 KFD，而 task_for_pid 已被 PPL 封死。
+         * 所以标题里就要把这件事说清楚，并直接指向正确按钮。
+         */
+        [rep appendString:@"复刻版 · 一键开始（纯 TrollStore 模式）\n"];
+        [rep appendString:@"─────────────────────────────────\n"];
+        [rep appendString:@"⚠️ 本模式不调用 KFD。task_for_pid 已被内核 PPL 封死，\n"];
+        [rep appendString:@"   所以下面第 ② 步必然失败——这是预期结果，不是你操作错了。\n"];
+        [rep appendString:@"   要真正读游戏数据，请先回功能页点「启动内核」。\n"];
         [rep appendString:@"─────────────────────────────────\n\n"];
 
         MFGameProfile *prof = [MFOffsets shared].current;
