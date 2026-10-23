@@ -151,7 +151,7 @@ jobs:
           # 而 TrollStore 重签会把它保留到设备上。
           #
           # 解析逻辑放在 scripts/verify_requirements.py（Mach-O → SuperBlob → slot 2）。
-          python3 scripts/verify_requirements.py "$APP/$EXEC_NAME"
+          python3 ../scripts/verify_requirements.py "$APP/$EXEC_NAME"
 
           echo "=== 伪装身份核对 ==="
           NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist")
