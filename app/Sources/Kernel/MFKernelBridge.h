@@ -214,6 +214,28 @@ int mf_clear_proc_csflags(uint64_t proc, int scan_only,
 int mf_prepare_task_for_pid(int pid, int apply,
                             char *report, size_t report_len);
 
+/*
+ * ★ 首选方案：把自己提升成「内核级 task」（TF_PLATFORM）
+ *
+ * task_for_pid 有两道闸：
+ *   ① taskgated —— 看目标 proc 的 CS_HARD
+ *   ② task_conversion_eval —— 看**调用者** task 是否内核级
+ * 只清目标的 CS_HARD 过不了第 ② 道。本函数给自己 task 的 t_flags 置
+ * TF_PLATFORM(0x400)，让 task_conversion_eval 把自己当内核级调用者。
+ *
+ * t_flags 偏移是版本相关的（论文给 iOS 11 是 0x3a8），所以做成
+ * 「逐候选置位 → 试 task_for_pid → 失败立刻回滚」的试错扫描。
+ * 只置一个位、不整体改写，最坏情况是没效果。
+ *
+ * apply = 0 → 只列出候选偏移（不写内核）
+ * apply = 1 → 真正尝试
+ *
+ * 返回值：成功返回命中的偏移（正数，如 0x3a8）；
+ *         -1 KFD 未开；-2 拿不到 current_task；-3 全部候选都失败。
+ */
+int mf_try_tf_platform(int pid, int apply,
+                       char *report, size_t report_len);
+
 /* ------------------------------------------------------------------ */
 /* 诊断                                                                */
 /* ------------------------------------------------------------------ */

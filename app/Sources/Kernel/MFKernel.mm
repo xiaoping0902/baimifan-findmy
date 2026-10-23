@@ -599,18 +599,46 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
      */
     if ([MFKernel shared].kbase != 0) {
         char rep[2048] = {0};
-        int prc = mf_prepare_task_for_pid(pid, 1, rep, sizeof(rep));
-        NSLog(@"[MF][Kernel] 内核 patch pid=%d → rc=%d\n%s", pid, prc, rep);
+        mach_port_t task2 = MACH_PORT_NULL;
+        kern_return_t kr2 = KERN_FAILURE;
 
-        if (prc == 0) {
-            mach_port_t task2 = MACH_PORT_NULL;
-            kern_return_t kr2 = task_for_pid(mach_task_self(), pid, &task2);
+        /*
+         * 闸 ② 优先：把自己提升成内核级 task（TF_PLATFORM）。
+         *
+         * task_conversion_eval 要求「只有内核或自己」能解析任意 task port。
+         * 我们的 App 是普通用户态进程，所以必须靠 TF_PLATFORM 冒充内核级调用者。
+         * 只改自己的 task、只置一个位，比改目标 proc 安全得多。
+         */
+        int tfp = mf_try_tf_platform(pid, 1, rep, sizeof(rep));
+        NSLog(@"[MF][Kernel] TF_PLATFORM pid=%d → rc=%d\n%s", pid, tfp, rep);
+
+        if (tfp > 0) {
+            kr2 = task_for_pid(mach_task_self(), pid, &task2);
             if (kr2 == KERN_SUCCESS && task2 != MACH_PORT_NULL) {
-                NSLog(@"[MF][Kernel] ✓ 内核 patch 后 task_for_pid(%d) 成功 port=0x%x",
-                      pid, task2);
+                NSLog(@"[MF][Kernel] ✓ TF_PLATFORM 后拿端口成功 port=0x%x", task2);
                 return task2;
             }
-            NSLog(@"[MF][Kernel] 内核 patch 后仍失败 kr=0x%x（继续走 processor_set）", kr2);
+            NSLog(@"[MF][Kernel] TF_PLATFORM 已置但取端口仍 kr=0x%x", kr2);
+        }
+
+        /*
+         * 闸 ① 补充：清目标 proc 的 CS_HARD。
+         *
+         * 单独做这一步过不了闸 ②，但如果闸 ① 也在拦（目标带 CS_HARD），
+         * 两道一起处理覆盖面最大。失败无副作用。
+         */
+        memset(rep, 0, sizeof(rep));
+        int prc = mf_prepare_task_for_pid(pid, 1, rep, sizeof(rep));
+        NSLog(@"[MF][Kernel] proc csflags patch pid=%d → rc=%d\n%s", pid, prc, rep);
+
+        if (prc == 0) {
+            task2 = MACH_PORT_NULL;
+            kr2 = task_for_pid(mach_task_self(), pid, &task2);
+            if (kr2 == KERN_SUCCESS && task2 != MACH_PORT_NULL) {
+                NSLog(@"[MF][Kernel] ✓ proc patch 后拿端口成功 port=0x%x", task2);
+                return task2;
+            }
+            NSLog(@"[MF][Kernel] proc patch 后仍失败 kr=0x%x（继续走 processor_set）", kr2);
         }
     }
 
