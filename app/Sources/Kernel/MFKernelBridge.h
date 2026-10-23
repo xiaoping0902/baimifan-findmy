@@ -236,6 +236,20 @@ int mf_prepare_task_for_pid(int pid, int apply,
 int mf_try_tf_platform(int pid, int apply,
                        char *report, size_t report_len);
 
+/*
+ * ★ 安全定位 t_flags 偏移（纯只读，绝不写内核）
+ *
+ * 判据：kernel_task 的 t_flags 一定带 TF_PLATFORM(0x400)，我们自己的 task 不带。
+ * 逐偏移对比两者的 32 位值，取「内核有 0x400 / 自身没有 / 其余位差异≤3」的字段。
+ *
+ * 这是 2026-10-24 内核 panic 事故后改用的方法：不用盲写试错，
+ * 靠一个必然成立的内核事实把偏移算出来。
+ *
+ * 返回候选个数（≥0）；-1 KFD 未开；-2 拿不到 task 地址。
+ * report 里会逐行列出候选偏移及两边的原值。
+ */
+int mf_locate_tf_platform_offset(char *report, size_t report_len);
+
 /* ------------------------------------------------------------------ */
 /* 诊断                                                                */
 /* ------------------------------------------------------------------ */

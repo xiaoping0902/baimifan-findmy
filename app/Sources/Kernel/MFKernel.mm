@@ -597,49 +597,47 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
      * 只有 KFD 已开（kbase != 0）才走这一步；否则会白跑一遍扫描。
      * patch 失败不影响后续的 processor_set 回退，只是白花一点时间。
      */
+    /*
+     * ★★★ [M5.90] 事故后的紧急处置：此段**只诊断，不写内核** ★★★
+     *
+     * 2026-10-24 真机事故：在 iPad14,4 / iPadOS 16.1 上，内核启动成功后
+     * 点「一键开始」，触发内核 panic、整机重启。
+     *
+     * 根因：M5.87/M5.89 在这里用 apply=1 直接往 task/proc 结构里盲写。
+     * 那两个结构的 0x100..0x800 区间混着引用计数、itk_space 指针、链表等
+     * 关键字段，往错误偏移写一个位就会把内核打崩。
+     *
+     * 现在的做法：
+     *   · 两个 patch 函数一律传 apply=0 / scan_only=1 → 只读、只报告候选
+     *   · 候选值会完整打到日志里，用来离线确定 t_flags / p_csflags 的真实偏移
+     *   · 等偏移用可靠来源（XNU 源码 / 已知偏移表）确认后，再硬编码精确偏移
+     *     一次性定点写入，不再做任何"扫描式盲写"
+     *
+     * 在此之前，task port 这一环是拿不到的，读取链会停在 gateOpen=NO ——
+     * 这是已知状态，不是新的故障。
+     */
     if ([MFKernel shared].kbase != 0) {
         char rep[2048] = {0};
-        mach_port_t task2 = MACH_PORT_NULL;
-        kern_return_t kr2 = KERN_FAILURE;
 
         /*
-         * 闸 ② 优先：把自己提升成内核级 task（TF_PLATFORM）。
-         *
-         * task_conversion_eval 要求「只有内核或自己」能解析任意 task port。
-         * 我们的 App 是普通用户态进程，所以必须靠 TF_PLATFORM 冒充内核级调用者。
-         * 只改自己的 task、只置一个位，比改目标 proc 安全得多。
+         * 第一步（最安全）：用 kernel_task vs 自己的 task 对比，算出 t_flags 偏移。
+         * 纯只读，不写内核一个字节 —— 这条一定能跑，且结果可直接用于下一版定点写入。
          */
-        int tfp = mf_try_tf_platform(pid, 1, rep, sizeof(rep));
-        NSLog(@"[MF][Kernel] TF_PLATFORM pid=%d → rc=%d\n%s", pid, tfp, rep);
+        int loc = mf_locate_tf_platform_offset(rep, sizeof(rep));
+        NSLog(@"[MF][Kernel][定位] t_flags 候选=%d\n%s", loc, rep);
 
-        if (tfp > 0) {
-            kr2 = task_for_pid(mach_task_self(), pid, &task2);
-            if (kr2 == KERN_SUCCESS && task2 != MACH_PORT_NULL) {
-                NSLog(@"[MF][Kernel] ✓ TF_PLATFORM 后拿端口成功 port=0x%x", task2);
-                return task2;
-            }
-            NSLog(@"[MF][Kernel] TF_PLATFORM 已置但取端口仍 kr=0x%x", kr2);
-        }
-
-        /*
-         * 闸 ① 补充：清目标 proc 的 CS_HARD。
-         *
-         * 单独做这一步过不了闸 ②，但如果闸 ① 也在拦（目标带 CS_HARD），
-         * 两道一起处理覆盖面最大。失败无副作用。
-         */
+        /* 闸②：TF_PLATFORM —— 只读扫描，列出候选偏移和原值 */
         memset(rep, 0, sizeof(rep));
-        int prc = mf_prepare_task_for_pid(pid, 1, rep, sizeof(rep));
-        NSLog(@"[MF][Kernel] proc csflags patch pid=%d → rc=%d\n%s", pid, prc, rep);
+        int tfp = mf_try_tf_platform(pid, 0, rep, sizeof(rep));
+        NSLog(@"[MF][Kernel][诊断] TF_PLATFORM 候选 pid=%d → rc=%d\n%s", pid, tfp, rep);
 
-        if (prc == 0) {
-            task2 = MACH_PORT_NULL;
-            kr2 = task_for_pid(mach_task_self(), pid, &task2);
-            if (kr2 == KERN_SUCCESS && task2 != MACH_PORT_NULL) {
-                NSLog(@"[MF][Kernel] ✓ proc patch 后拿端口成功 port=0x%x", task2);
-                return task2;
-            }
-            NSLog(@"[MF][Kernel] proc patch 后仍失败 kr=0x%x（继续走 processor_set）", kr2);
-        }
+        /* 闸①：目标 proc 的 cs_flags —— 同样只读 */
+        memset(rep, 0, sizeof(rep));
+        int prc = mf_prepare_task_for_pid(pid, 0, rep, sizeof(rep));
+        NSLog(@"[MF][Kernel][诊断] proc csflags 候选 pid=%d → rc=%d\n%s", pid, prc, rep);
+
+        NSLog(@"[MF][Kernel] 注意：M5.90 起 patch 段只诊断不写入 —— "
+              @"为避免再次内核 panic，等偏移确定后再定点修改");
     }
 
     // ── ② 回退：processor_set_tasks（不走 taskgated 的代码签名检查）──
