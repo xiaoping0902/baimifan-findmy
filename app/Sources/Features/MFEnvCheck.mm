@@ -276,9 +276,9 @@ static BOOL MFCanList(NSString *p) {
                                  r.targetTaskPort] : @"未绑定目标",
                       hasPort ? MFEnvStatusPass : MFEnvStatusInfo,
                       [NSString stringWithFormat:
-                       @"门=%s · 基址 root=0x%llx ent=0x%llx loot=0x%llx\n"
+                       @"门=%@ · 基址 root=0x%llx ent=0x%llx loot=0x%llx\n"
                        @"基址为 0 时绘制层整帧跳过（不崩，也画不出来）—— 去「基址校准」填",
-                       rb.gateOpen ? "开" : "关",
+                       rb.gateOpen ? @"开" : @"关",
                        (unsigned long long)r.rootObjectBase,
                        (unsigned long long)r.entityArrayBase,
                        (unsigned long long)r.lootArrayBase])];
