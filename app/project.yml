@@ -75,6 +75,9 @@ targets:
       #     iOS 上该符号由 libcompression 提供（libSystem 是否 re-export 依 SDK 版本
       #     而异，显式链接最稳；重复链接无害）。
       - sdk: libcompression.tbd
+      # M5.80：环境检测用 SecTaskCopyValueForEntitlement 读「系统实际生效」的权限
+      #       （只看 IPA 里声明的没用，要问系统认不认这份签名）
+      - sdk: Security.framework
     settings:
       base:
         PRODUCT_NAME: FindMy
