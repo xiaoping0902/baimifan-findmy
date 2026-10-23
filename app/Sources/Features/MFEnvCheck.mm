@@ -6,7 +6,6 @@
 #import "../Read/MFReadBackend.h"
 
 #import <UIKit/UIKit.h>
-#import <Security/SecTask.h>
 #import <mach/mach.h>
 #import <sys/utsname.h>
 #import <sys/sysctl.h>
@@ -22,6 +21,16 @@
 
 // csops 是私有符号，libSystem 里稳定存在；公开 SDK 没有 <sys/codesign.h>。
 extern "C" int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+// SecTask：符号在 Security.framework 里是公开的，但 <Security/SecTask.h> 是私有头，
+// 公开 SDK 不提供。所以自己声明原型（链接仍然需要 Security.framework，已在 project.yml 声明）。
+typedef struct __SecTask *SecTaskRef;
+extern "C" {
+    SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+    CFTypeRef  SecTaskCopyValueForEntitlement(SecTaskRef task,
+                                              CFStringRef entitlement,
+                                              CFErrorRef *error);
+}
 
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
