@@ -32,7 +32,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-source", type=Path,
                         default=ROOT / "app/Sources/HUD/MFHUDWindow.mm")
-    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay", "game-reader", "drawing"], default="windows")
+    parser.add_argument("--suite", choices=["windows", "input", "menu", "overlay", "game-reader", "drawing", "projection"], default="windows")
     args = parser.parse_args()
     sdk = run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path", capture=True).stdout.strip()
     devices = json.loads(run("xcrun", "simctl", "list", "devices", "available", "-j", capture=True).stdout)
@@ -89,6 +89,9 @@ def main():
                            ROOT / "app/Sources/HUD/MFHUDTouchRouter.mm"]
                 sources += [ROOT / f"app/Sources/Render/imgui/{name}.cpp"
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
+            elif args.suite == "projection":
+                sources = [ROOT / "tests/hud_projection_regressions.mm",
+                           ROOT / "app/Sources/Game/MFProjection.mm"]
             elif args.suite == "game-reader":
                 sources = [ROOT / "tests/game_reader_base_regressions.mm"]
                 sources += [ROOT / f"app/Sources/Game/{name}.mm"
@@ -145,7 +148,8 @@ def main():
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
                       "game-reader": "PASS: production game reader",
-                      "drawing": "PASS: production drawing consumes synthetic UDP"}[args.suite]
+                      "drawing": "PASS: production drawing consumes synthetic UDP",
+                      "projection": "PASS: production projection geometry and invalid-input rejection"}[args.suite]
             report = ""
             menu_captured = False
             launch_log = Path(directory) / "simctl-launch.log"

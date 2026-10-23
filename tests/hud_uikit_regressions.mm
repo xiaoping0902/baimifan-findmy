@@ -90,6 +90,8 @@ static void TestMenuUsesItsVisiblePanel(void) {
 
 @interface NSObject (CaptureShieldRegression)
 - (instancetype)initWithFrame:(CGRect)frame error:(NSString **)error;
+- (BOOL)captureProtectionEnabled;
+- (BOOL)setCaptureProtectionEnabled:(BOOL)enabled error:(NSString **)error;
 @end
 
 static UITextField *FindSecureField(UIView *view) {
@@ -107,8 +109,15 @@ static void TestCaptureShieldPreservesHitsAndResizing(void) {
     CHECK(shieldClass != Nil, "HUD surfaces require a secure content container");
     NSString *error = nil;
     UIView *shield = [[shieldClass alloc] initWithFrame:CGRectMake(0, 0, 348, 520) error:&error];
-    CHECK(shield != nil && error == nil, "the real UIKit secure canvas must be available");
+    CHECK(shield != nil && error == nil, "default HUD content must not require a private secure canvas");
     UIView *content = [shield valueForKey:@"contentView"];
+    CHECK(content.superview == shield && FindSecureField(shield) == nil,
+          "capture protection must default OFF so HUD content can be captured for debugging");
+    CHECK([shield respondsToSelector:@selector(setCaptureProtectionEnabled:error:)],
+          "capture protection needs an explicit opt-in switch");
+    CHECK(![shield captureProtectionEnabled], "new HUD surfaces must report capture protection OFF");
+    CHECK([shield setCaptureProtectionEnabled:YES error:&error] && error == nil,
+          "capture protection must be available when explicitly enabled");
     UITextField *field = FindSecureField(shield);
     CHECK(content && field && [content isDescendantOfView:field],
           "protected content must actually descend from the secure text canvas");
@@ -142,6 +151,13 @@ static void TestCaptureShieldPreservesHitsAndResizing(void) {
     CHECK([window hitTest:rotatedControl withEvent:nil] == control &&
           CGSizeEqualToSize(content.bounds.size, CGSizeMake(348, 520)) && FindSecureField(shield) == field,
           "rotation must preserve protected content coordinates without rebuilding the secure field");
+    CHECK([shield setCaptureProtectionEnabled:NO error:&error] && ![shield captureProtectionEnabled] &&
+          content.superview == shield && [window hitTest:rotatedControl withEvent:nil] == control,
+          "disabling protection must retain the same content and rotated control hit coordinates");
+    CHECK([shield setCaptureProtectionEnabled:YES error:&error] &&
+          FindSecureField(shield) == field && [content isDescendantOfView:field] &&
+          [window hitTest:rotatedControl withEvent:nil] == control,
+          "re-enabling protection must reuse the secure canvas without losing controls");
     window.hidden = YES;
 }
 

@@ -5,7 +5,7 @@ on:
       suite:
         description: Run all regressions or one focused suite
         type: choice
-        options: [all, native, input, windows, menu, overlay, game-reader, drawing]
+        options: [all, native, input, windows, menu, overlay, game-reader, drawing, projection]
         default: all
       baseline_renderer:
         description: Reproduce renderer wait failures using the pre-fix implementations
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ inputs.suite && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["input", "windows", "menu", "overlay", "game-reader", "drawing"]') }}
+        suite: ${{ inputs.suite && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["input", "windows", "menu", "overlay", "game-reader", "drawing", "projection"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Replay device touches through the production HID bridge
