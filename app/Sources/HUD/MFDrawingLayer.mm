@@ -8,6 +8,7 @@
 #import "../Game/MFSettings.h"
 #import "../Game/Offsets.h"
 #import "../Read/MFReadBackend.h"
+#import "../Read/MFExternalFeed.h"
 #import "MFHUDLog.h"
 
 #import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
@@ -40,6 +41,7 @@ typedef NS_ENUM(NSInteger, MFDrawSource) {
     MFDrawSourceNone = 0,
     MFDrawSourceUE4,          // 可自动建立
     MFDrawSourceCalibrated,   // 需要手工校准的三个绝对基址
+    MFDrawSourceExternal,     // Frida agent 通过 UDP 推来的（真机唯一可行的路）
 };
 
 /// Actor 的用途分类 —— 由类 ID 解析出的 UE 类名判定。
@@ -91,6 +93,14 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
                          source:(MFDrawSource *)outSource;
 /// UE4 链断在哪里（限流记录，不要每帧刷屏）
 - (void)noteUE4Issue:(NSString *)reason;
+/// 懒启动外部数据源（Frida agent → UDP）
+- (void)startExternalFeedIfNeeded;
+/// 用外部数据源组装一帧；数据过期/无相机时返回 NO，让上层回退到本地链
+- (BOOL)acquireExternalFrameWithSize:(CGSize)size
+                              camera:(MFCamera *)outCamera
+                            entities:(NSArray<MFEntity *> **)outEntities
+                                loot:(NSArray<MFEntity *> **)outLoot
+                              source:(MFDrawSource *)outSource;
 /// 本帧数据来自哪条链（诊断文本）
 - (NSString *)dataSourceText;
 /// 类 ID → UE 类名（GNames 解析，带缓存与可打印性校验）
@@ -367,6 +377,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                     entities:(NSArray<MFEntity *> **)outEntities
                         loot:(NSArray<MFEntity *> **)outLoot
                       source:(MFDrawSource *)outSource {
+    // ⓪ 外部数据源（Frida agent → UDP）—— 真机上唯一能通的路
+    [self startExternalFeedIfNeeded];
+    if ([self acquireExternalFrameWithSize:size camera:outCamera
+                                  entities:outEntities loot:outLoot source:outSource]) {
+        return YES;
+    }
+
     // ① 手工校准过的那条链优先：它能给出物资分级 / 队伍 / 血量这些字段。
     MFGameReader *calibrated = [MFGameReader shared];
     if (calibrated.ready && calibrated.rootObjectBase != 0) {
@@ -391,6 +408,91 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     // ② 回退到可自动建立的 UE4 链
     return [self acquireUE4FrameWithSize:size camera:outCamera
                                 entities:outEntities loot:outLoot source:outSource];
+}
+
+#pragma mark - 外部数据源（Frida agent → UDP，[M5.83]）
+
+/*
+ * 真机现状决定了必须有这条路：
+ *   task_for_pid 全线 kr=0x5（PPL 挡 csblob 里的私有 entitlements）
+ *   processor_set_tasks 全线 kr=0x4（没有 host_priv）
+ *   → 本进程永远拿不到游戏的 task port，mach_vm_remap 无从谈起
+ *
+ * 但设备是 Dopamine 3.0.12 越狱 + frida-server，Frida 用 ptrace 注入 agent
+ * 到游戏进程【内部】，agent 读内存不受任何限制。它把每帧的
+ * 坐标 / 人机标志 / 类名打包成 UDP 推给 HUD 进程，这里解码后照常投影绘制。
+ */
+- (void)startExternalFeedIfNeeded {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *err = nil;
+        if ([[MFExternalFeed shared] startOnPort:MFExternalFeedDefaultPort error:&err]) {
+            MFHUDLogLine(@"[Feed] 外部数据源监听 127.0.0.1:%u（等 Frida agent 推流）",
+                         (unsigned)MFExternalFeedDefaultPort);
+        } else {
+            MFHUDLogLine(@"[Feed] 监听失败：%@", err ?: @"?");
+        }
+    });
+}
+
+- (BOOL)acquireExternalFrameWithSize:(CGSize)size
+                              camera:(MFCamera *)outCamera
+                            entities:(NSArray<MFEntity *> **)outEntities
+                                loot:(NSArray<MFEntity *> **)outLoot
+                              source:(MFDrawSource *)outSource {
+    MFExternalFeed *feed = [MFExternalFeed shared];
+    if (!feed.running || !feed.fresh) return NO;
+
+    MFCamera cam = {0};
+    if (![feed snapshotCamera:&cam] || cam.fov < 1.0f) return NO;
+
+    NSArray<MFFeedEntity *> *raw = [feed snapshotEntities];
+    if (raw.count == 0) return NO;
+
+    const MFScreen screen = [MFProjection screenWithSize:size fov:cam.fov];
+    const float camPos[3] = {cam.x, cam.y, cam.z};
+    const float maxDraw = MAX([MFSettings shared].boxDrawDistance, 100.0f);
+    NSMutableArray<MFEntity *> *ents = [NSMutableArray arrayWithCapacity:raw.count];
+    NSMutableArray<MFEntity *> *lootOut = [NSMutableArray array];
+
+    for (MFFeedEntity *fe in raw) {
+        const float world[3] = {fe.worldX, fe.worldY, fe.worldZ};
+        MFEntity *e = [[MFEntity alloc] init];
+        // 外部数据没有稳定的对象地址；用坐标量化值当平滑缓存的 key
+        e.address = (uint64_t)(uint32_t)(int32_t)(fe.worldX * 8.0f) |
+                    ((uint64_t)(uint32_t)(int32_t)(fe.worldZ * 8.0f) << 32);
+        e.worldX = fe.worldX;
+        e.worldY = fe.worldY;
+        e.worldZ = fe.worldZ;
+        e.distanceMeters = [MFProjection distanceMetersFrom:world to:camPos];
+        if (e.distanceMeters > maxDraw) continue;
+        e.screen = [[MFProjection shared] projectTarget:world camera:cam screen:screen];
+        e.isVisible = e.screen.valid;
+        e.isBot = fe.isBot;
+
+        {   // 方位角：只由坐标 + 相机 yaw 算
+            float dx = fe.worldX - cam.x, dy = fe.worldY - cam.y;
+            float ty = atan2f(dy, dx) / kMF_Deg2Rad;
+            float d = ty - cam.yaw;
+            while (d >  180.0f) d -= 360.0f;
+            while (d < -180.0f) d += 360.0f;
+            e.bearingDeg = d;
+            e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
+        }
+
+        if (fe.kind == 2)      { e.isLoot = YES; [lootOut addObject:e]; }
+        else if (fe.kind == 3) { e.isBox  = YES; [lootOut addObject:e]; }
+        else                   { [ents addObject:e]; }
+    }
+
+    if (outCamera) *outCamera = cam;
+    if (outEntities) *outEntities = ents;
+    if (outLoot) *outLoot = lootOut;
+    if (outSource) *outSource = MFDrawSourceExternal;
+
+    // 数据新鲜、相机也有 —— 即使本帧没实体也算“取到了”，
+    // 否则会掉回读不到数据的本地链路
+    return YES;
 }
 
 - (BOOL)acquireUE4FrameWithSize:(CGSize)size
@@ -1050,6 +1152,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     switch (_source) {
         case MFDrawSourceUE4:        return @"UE4 链（模块基址 + GWorld 静态偏移，自动建立）";
         case MFDrawSourceCalibrated: return @"已校准的白米饭链（三个绝对基址）";
+        case MFDrawSourceExternal:   return @"外部数据源（Frida agent → UDP）";
         default:                     return @"未取到（见下面的断点说明）";
     }
 }
