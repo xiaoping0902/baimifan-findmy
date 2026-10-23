@@ -809,11 +809,9 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         return;
     }
 
-    if (!self.reader.ready && [MFUEReader shared].libBase == 0) {
-        [self noteDrawingActivity:NO];
-        return;
-    }
-
+    // Source selection must run even when local memory access is unavailable:
+    // acquireFrameWithSize starts/checks the independent external feed first.
+    // Each local source validates its own readiness before attempting reads.
     MFCamera cam = {0};
     NSArray<MFEntity *> *ents = nil;
     NSArray<MFEntity *> *loot = nil;
