@@ -435,6 +435,46 @@ extern char **environ;
     [self presentViewController:a animated:YES completion:nil];
 }
 
+#pragma mark task port 分项探测（[M5.78]）
+
+/*
+ * 一键开始 ② 失败时，光看一句 "task_for_pid kr=0x5" 没法判断原因。
+ * 这里对几个典型进程各试一次，用结果区分两种情况：
+ *   · 自己 ✓、游戏 ✗  → 游戏有反调试 / CS_HARD 签名保护，taskgated 拒绝
+ *   · 连自己都 ✗      → task_for_pid-allow entitlement 根本没生效
+ */
+- (NSString *)taskPortProbeReportForGamePid:(pid_t)gamePid {
+    NSMutableString *s = [NSMutableString string];
+    [s appendString:@"分项探测（每个进程都试一次 task_for_pid + processor_set 回退）：\n"];
+
+    NSMutableArray<NSArray *> *probes = [NSMutableArray array];
+    [probes addObject:@[@"自己", @(getpid())]];
+    [probes addObject:@[@"launchd", @1]];
+    pid_t sb = [MFModuleLocator pidForProcessName:@"SpringBoard"];
+    if (sb > 0) [probes addObject:@[@"SpringBoard", @(sb)]];
+    if (gamePid > 0) [probes addObject:@[@"游戏", @(gamePid)]];
+
+    for (NSArray *entry in probes) {
+        NSString *label = entry[0];
+        pid_t pid = (pid_t)[entry[1] intValue];
+        NSString *e = nil;
+        uint32_t port = [MFKernel acquireTaskPortForPid:(int)pid error:&e];
+        if (port != MACH_PORT_NULL) {
+            [s appendFormat:@"  ✓ %-12@ pid=%-6d task port = 0x%x\n", label, pid, port];
+        } else {
+            [s appendFormat:@"  ✗ %-12@ pid=%-6d %@\n", label, pid, e ?: @"失败"];
+        }
+    }
+
+    [s appendString:
+        @"\n怎么读：\n"
+        @"· 自己 ✓、游戏 ✗ → 游戏有反调试/CS_HARD 保护（ACE 反作弊），"
+        @"task_for_pid 被 taskgated 拒，这与 entitlement 无关\n"
+        @"· 连「自己」都 ✗ → task_for_pid-allow entitlement 没生效，检查安装方式\n"
+        @"· 普通 App ✓、游戏 ✗ → 同上，确认是游戏保护\n"];
+    return s;
+}
+
 #pragma mark 游戏模块扫描 / 导出（[M5.76]）
 
 /*
@@ -570,8 +610,8 @@ extern char **environ;
             NSString *perr = nil;
             uint32_t port = [MFKernel acquireTaskPortForPid:(int)gpid error:&perr];
             if (port == MACH_PORT_NULL) {
-                [rep appendFormat:@"✗ ② 拿不到 task port：%@\n\n"
-                    @"检查 task_for_pid-allow entitlement 是否生效\n", perr ?: @"?"];
+                [rep appendFormat:@"✗ ② 拿不到 task port：%@\n\n", perr ?: @"?"];
+                [rep appendString:[self taskPortProbeReportForGamePid:gpid]];
                 goto done;
             }
             [MFGameReader shared].targetTaskPort = port;

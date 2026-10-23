@@ -38,6 +38,82 @@ extern "C" {
 #ifndef HOST_PRIV_PORT
 #define HOST_PRIV_PORT 1
 #endif
+
+/*
+ * ★★★ [M5.78] 用 processor_set_tasks 拿 task port ★★★
+ *
+ * 为什么需要它：
+ *   task_for_pid 对 App Store 正版应用（尤其带反作弊的游戏）会返回
+ *   kr=0x5 KERN_FAILURE —— 这是 taskgated 按代码签名标志（CS_HARD/CS_RESTRICT）
+ *   拒绝，跟我们的 entitlement 无关。三角洲行动带 ACE 反作弊，实测就是 0x5。
+ *
+ *   processor_set_tasks 走的是另一条内核路径：先拿 processor_set 端口，
+ *   再让内核把**全系统 task 端口数组**一次性交出来，不经过 taskgated 的
+ *   code-signing 检查。白米饭的「内核端口 → 枚举 task → 端口缓存」就是这条路。
+ *
+ * 注意：拿到的端口要自己 mach_port_deallocate；数组本身用 vm_deallocate。
+ */
+static uint32_t MFGetTaskPortViaProcessorSet(int targetPid, NSString **errOut) {
+    #define MF_PS_FAIL(fmt, ...) do {                                        \
+        if (errOut) *errOut = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
+        return MACH_PORT_NULL;                                                \
+    } while (0)
+
+    // 先试免特权的 processor_set_default；失败再试 host_priv 那条
+    processor_set_t pset = MACH_PORT_NULL;
+    kern_return_t kr = processor_set_default(mach_host_self(), &pset);
+    NSString *firstFailure = nil;
+
+    if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
+        firstFailure = [NSString stringWithFormat:@"processor_set_default kr=0x%x", kr];
+
+        mach_port_t hostPriv = MACH_PORT_NULL;
+        host_get_special_port(mach_host_self(), HOST_NODENAME, HOST_PRIV_PORT, &hostPriv);
+        if (hostPriv != MACH_PORT_NULL) {
+            processor_set_name_array_t sets = NULL;
+            natural_t setCnt = 0;
+            if (host_processor_sets(mach_host_self(), &sets, &setCnt) == KERN_SUCCESS && sets) {
+                if (setCnt > 0) {
+                    kr = host_processor_set_priv(hostPriv, sets[0], &pset);
+                }
+                vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
+            }
+            mach_port_deallocate(mach_task_self(), hostPriv);
+            if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
+                MF_PS_FAIL(@"%@；host_priv 路也失败 kr=0x%x", firstFailure, kr);
+            }
+        } else {
+            MF_PS_FAIL(@"%@；且拿不到 host_priv", firstFailure);
+        }
+    }
+
+    mach_port_array_t tasks = NULL;
+    natural_t taskCnt = 0;
+    kr = processor_set_tasks(pset, &tasks, &taskCnt);
+    mach_port_deallocate(mach_task_self(), pset);
+    if (kr != KERN_SUCCESS || tasks == NULL) {
+        MF_PS_FAIL(@"processor_set_tasks kr=0x%x", kr);
+    }
+
+    uint32_t found = MACH_PORT_NULL;
+    for (natural_t i = 0; i < taskCnt; i++) {
+        if (tasks[i] == MACH_PORT_NULL) continue;
+        int tpid = 0;
+        if (pid_for_task(tasks[i], &tpid) == KERN_SUCCESS && tpid == targetPid) {
+            found = tasks[i];
+            tasks[i] = MACH_PORT_NULL;       // 归我们了，别在下面释放
+            continue;
+        }
+        mach_port_deallocate(mach_task_self(), tasks[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)tasks, taskCnt * sizeof(mach_port_t));
+
+    if (found == MACH_PORT_NULL) {
+        MF_PS_FAIL(@"枚举了 %u 个 task，里面没有 pid=%d", (unsigned)taskCnt, targetPid);
+    }
+    #undef MF_PS_FAIL
+    return found;
+}
 #ifndef HOST_NODENAME
 #define HOST_NODENAME 0
 #endif
@@ -492,18 +568,46 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
         if (err) *err = @"pid 非法";
         return MACH_PORT_NULL;
     }
+
+    // ── ① 首选 task_for_pid（有 entitlement 时最快、权限最全）──
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        if (err) {
-            *err = [NSString stringWithFormat:
-                    @"task_for_pid(%d) kr=0x%x —— 多半是 task_for_pid-allow "
-                    @"entitlement 没生效，或该进程受 SIP/平台保护", pid, kr];
-        }
-        return MACH_PORT_NULL;
+    if (kr == KERN_SUCCESS && task != MACH_PORT_NULL) {
+        NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x（task_for_pid）", pid, task);
+        return task;
     }
-    NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x", pid, task);
-    return task;
+    NSLog(@"[MF][Kernel] task_for_pid(%d) kr=0x%x → 改试 processor_set_tasks", pid, kr);
+
+    // ── ② 回退：processor_set_tasks（不走 taskgated 的代码签名检查）──
+    NSString *psError = nil;
+    uint32_t fallback = MFGetTaskPortViaProcessorSet(pid, &psError);
+    if (fallback != MACH_PORT_NULL) {
+        NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x（processor_set_tasks）", pid, fallback);
+        return fallback;
+    }
+
+    // ── ③ 两条都不通，给出能区分原因的诊断 ──
+    if (err) {
+        NSString *hint;
+        switch (kr) {
+            case KERN_FAILURE:
+                hint = @"kr=0x5 KERN_FAILURE —— 目标进程带反调试/CS_HARD 签名保护（ACE 反作弊），"
+                       @"taskgated 拒绝，与我们的 entitlement 无关";
+                break;
+            case KERN_PROTECTION_FAILURE:
+                hint = @"kr=0x2 KERN_PROTECTION_FAILURE —— 权限不足，检查 task_for_pid-allow 是否生效";
+                break;
+            case KERN_INVALID_ARGUMENT:
+                hint = @"kr=0x4 KERN_INVALID_ARGUMENT —— pid 不存在或无此 task";
+                break;
+            default:
+                hint = [NSString stringWithFormat:@"kr=0x%x", kr];
+                break;
+        }
+        *err = [NSString stringWithFormat:@"task_for_pid(%d)：%@；processor_set 回退也失败：%@",
+                pid, hint, psError ?: @"未知"];
+    }
+    return MACH_PORT_NULL;
 }
 
 - (void)probeCapabilitiesWithCompletion:(void (^)(NSString *))completion {
