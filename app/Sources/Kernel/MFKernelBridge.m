@@ -29,6 +29,11 @@
 /* ── 公共接口头（纯 C，不含 libkfd.h）────────────────────────────── */
 #include "MFKernelBridge.h"
 
+/* [M5.87] proc patch 段用到 snprintf / memcpy：显式带上，不指望 libkfd 间接引入 */
+#include <stdio.h>
+#include <string.h>
+#include <stddef.h>
+
 /* ── libkfd 宿主支撑层（ffi: MFLibkfdKRead4 原型）────────────────── */
 #include "MFLibkfdHost.h"
 
@@ -803,7 +808,295 @@ uint64_t mf_get_current_proc(void) { return mf_info_field(4); }
 uint64_t mf_get_current_task(void) { return mf_info_field(5); }
 
 /* ================================================================ */
-/* 5) 诊断                                                           */
+/* 5) proc patch：绕开 taskgated 的 CS_HARD 拒绝                      */
+/* ================================================================ */
+/*
+ * ── 为什么需要这一段 ──
+ *
+ * 真机实测（无越狱 / iPad14,4 / 16.1）：
+ *     task_for_pid(game)   → kr=0x5 KERN_FAILURE
+ *     task_for_pid(launchd)→ kr=0x5
+ *     processor_set_tasks  → kr=0x4
+ * 这是 taskgated 按**目标进程**的代码签名标志拒绝的（CS_HARD）。
+ * 我们的 entitlement 没问题（task_for_pid-allow 就在 plist 里）。
+ *
+ * 常规解法是拿了 tfp0 之后从内核拿 task port。但那需要 dimentio，
+ * 而本工程里 dimentio() 的实现是缺的（只有 patchfinder 部分）。
+ *
+ * ── 本段的做法：不需要 tfp0 ──
+ *
+ * 我们已经有内核读写（mf_kread / mf_kwrite，由 KFD 提供）。
+ * 那就直接改**目标进程**的 proc->p_csflags，把 CS_HARD 位清掉。
+ * 之后 taskgated 再看它就没有硬签名标志了，task_for_pid 自然放行。
+ *
+ * ── 唯一的难点：偏移 ──
+ *
+ * struct proc 的 p_pid / p_csflags 偏移是 iOS 版本相关的，
+ * 工程里没有现成值（patchfinder 只算了 KFD 自己要用的 cdevsw / gPhysBase 等）。
+ * 所以这里**运行时自适应扫描**，靠两个铁的已知事实自校准：
+ *     · kernel_proc 的 pid 一定是 0
+ *     · launchd    的 pid 一定是 1
+ * 对每个候选偏移同时校验这两条，都对才算找到 p_pid。
+ *
+ * ── 安全约定 ──
+ *
+ * 默认 **dry-run**：只扫描、只报告，不写内核。
+ * 必须显式传 apply=1 才真正改 p_csflags。
+ * 改的时候只清位（不会把整个字段写 0），最坏情况是没效果，不会炸内核。
+ */
+
+/* CS_HARD / CS_RESTRICT / CS_REQUIRE_LV（bsd/sys/codesign.h） */
+#define MF_CS_HARD        0x00000100u
+#define MF_CS_RESTRICT    0x00000800u
+#define MF_CS_REQUIRE_LV  0x00002000u
+
+/* proc 链表遍历上限（正常机器几百个进程，512 足够且能防成环） */
+#define MF_PROC_WALK_MAX  1024
+
+/* p_pid 扫描范围：struct proc 开头这一段里它一定在 */
+#define MF_PID_SCAN_START 0x10
+#define MF_PID_SCAN_END   0x400
+
+/* p_csflags 扫描范围 */
+#define MF_CS_SCAN_START  0x100
+#define MF_CS_SCAN_END    0x800
+
+/*
+ * 沿 p_list.le_next 把进程链表走一遍，把每个 proc 的地址收集出来。
+ * LIST_ENTRY(proc) p_list 是 struct proc 的第 0 个字段，le_next 在 +0x00。
+ *
+ * 返回实际收集到的数量；链表成环或读到非法值时提前停下（不报错，返回已有结果）。
+ */
+static int mf_collect_proc_chain(uint64_t *out, int max_out)
+{
+    uint64_t head = mf_get_kernel_proc();
+    if (head == 0) {
+        return 0;
+    }
+
+    int n = 0;
+    uint64_t cur = head;
+    for (int i = 0; i < MF_PROC_WALK_MAX && n < max_out; i++) {
+        out[n++] = cur;
+
+        uint64_t next = 0;
+        if (mf_kread64(cur, &next) != 0) {
+            break;                       /* 读不到就停，不要把错误值当指针用 */
+        }
+        if (next == 0 || next == cur) {
+            break;                       /* 空链 / 自环 */
+        }
+        if (next == head) {
+            break;                       /* 回到头，链表闭合 */
+        }
+        cur = next;
+    }
+    return n;
+}
+
+/*
+ * 自适应找出 struct proc 里 p_pid 的偏移。
+ *
+ * 判据（两条同时满足）：
+ *   ① 第 0 个 proc（kernel_proc）在该偏移上的值 == 0
+ *   ② 链表中存在某个 proc 在该偏移上的值 == 1（launchd）
+ *
+ * 同时要求：所有样本读出来的值都 < 100000（pid 的量级），
+ * 避免把一个恰好为 0/1 的无关字段误认成 pid。
+ *
+ * 返回偏移；找不到返回 0。
+ */
+static uint32_t mf_scan_p_pid_offset(const uint64_t *procs, int count,
+                                     int *out_launchd_index)
+{
+    if (count < 2) {
+        return 0;
+    }
+
+    /* 最多取前 64 个样本做校验，够用且快 */
+    int sample = (count < 64) ? count : 64;
+
+    for (uint32_t off = MF_PID_SCAN_START; off < MF_PID_SCAN_END; off += 4) {
+        uint32_t v0 = 0;
+        if (mf_kread32(procs[0] + off, &v0) != 0 || v0 != 0) {
+            continue;                    /* ① kernel_proc 的 pid 必须是 0 */
+        }
+
+        int launchd_idx = -1;
+        int plausible = 0;
+        int ok = 1;
+        for (int i = 1; i < sample; i++) {
+            uint32_t v = 0;
+            if (mf_kread32(procs[i] + off, &v) != 0) {
+                ok = 0;
+                break;
+            }
+            if (v > 100000) {            /* pid 不会这么大 → 这个偏移不是 pid */
+                ok = 0;
+                break;
+            }
+            if (v > 0) {
+                plausible++;
+            }
+            if (v == 1 && launchd_idx < 0) {
+                launchd_idx = i;         /* ② 找到 launchd */
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+        /* 绝大多数进程 pid 应该非零；且必须能找到 pid==1 */
+        if (launchd_idx > 0 && plausible >= sample / 2) {
+            if (out_launchd_index) {
+                *out_launchd_index = launchd_idx;
+            }
+            return off;
+        }
+    }
+    return 0;
+}
+
+uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
+{
+    if (g_kfd == NULL) {
+        if (report && report_len) {
+            snprintf(report, report_len, "KFD 未打开");
+        }
+        return 0;
+    }
+
+    static uint64_t procs[MF_PROC_WALK_MAX];
+    int count = mf_collect_proc_chain(procs, MF_PROC_WALK_MAX);
+    if (count <= 0) {
+        if (report && report_len) {
+            snprintf(report, report_len, "proc 链表为空（kernel_proc=0x%llx）",
+                     (unsigned long long)mf_get_kernel_proc());
+        }
+        return 0;
+    }
+
+    int launchd_idx = -1;
+    uint32_t pid_off = mf_scan_p_pid_offset(procs, count, &launchd_idx);
+    if (pid_off == 0) {
+        if (report && report_len) {
+            snprintf(report, report_len,
+                     "没能定出 p_pid 偏移（扫了 0x%X..0x%X，链表中 %d 个 proc）",
+                     MF_PID_SCAN_START, MF_PID_SCAN_END, count);
+        }
+        return 0;
+    }
+
+    for (int i = 0; i < count; i++) {
+        uint32_t v = 0;
+        if (mf_kread32(procs[i] + pid_off, &v) != 0) {
+            continue;
+        }
+        if ((int)v == pid) {
+            if (report && report_len) {
+                snprintf(report, report_len,
+                         "找到 pid=%d → proc=0x%llx（p_pid 偏移=0x%X，链表 %d 个）",
+                         pid, (unsigned long long)procs[i], pid_off, count);
+            }
+            return procs[i];
+        }
+    }
+
+    if (report && report_len) {
+        snprintf(report, report_len,
+                 "链表里没有 pid=%d（p_pid 偏移=0x%X，链表中 %d 个 proc）",
+                 pid, pid_off, count);
+    }
+    return 0;
+}
+
+/*
+ * 在目标 proc 里找 p_csflags 并清掉 CS_HARD / CS_RESTRICT / CS_REQUIRE_LV。
+ *
+ * scan_only != 0 时只报告、不写（默认走这条）。
+ *
+ * 为什么可以按"值里带 CS_HARD 位"来定位：目标进程是 App Store 装的游戏，
+ * 它的 codesign flags 一定带 CS_HARD；而同结构里恰好带这个位的字段很少。
+ * 命中多个候选时**逐个清除**并回报清了哪几个（每个都只清位，不整体写 0）。
+ */
+int mf_clear_proc_csflags(uint64_t proc, int scan_only, char *report, size_t report_len)
+{
+    if (g_kfd == NULL || proc == 0) {
+        if (report && report_len) {
+            snprintf(report, report_len, "参数非法（kfd=%p proc=0x%llx）", (void *)g_kfd,
+                     (unsigned long long)proc);
+        }
+        return -1;
+    }
+
+    char line[2048];
+    size_t used = 0;
+    int hits = 0;
+    int patched = 0;
+    line[0] = '\0';
+
+    for (uint32_t off = MF_CS_SCAN_START; off < MF_CS_SCAN_END; off += 4) {
+        uint32_t v = 0;
+        if (mf_kread32(proc + off, &v) != 0) {
+            continue;
+        }
+        if ((v & (MF_CS_HARD | MF_CS_RESTRICT | MF_CS_REQUIRE_LV)) == 0) {
+            continue;                     /* 没有我们要清的位，跳过 */
+        }
+
+        hits++;
+        uint32_t nv = v & ~(MF_CS_HARD | MF_CS_RESTRICT | MF_CS_REQUIRE_LV);
+
+        if (used < sizeof(line) - 160) {
+            used += snprintf(line + used, sizeof(line) - used,
+                             "  候选 +0x%X: 0x%08X → 0x%08X%s\n",
+                             off, v, nv, scan_only ? "（未写）" : "");
+        }
+
+        if (!scan_only) {
+            if (mf_kwrite32(proc + off, nv) == 0) {
+                uint32_t back = 0;
+                if (mf_kread32(proc + off, &back) == 0 && back == nv) {
+                    patched++;
+                }
+            }
+        }
+    }
+
+    if (report && report_len) {
+        snprintf(report, report_len,
+                 "csflags 扫描 0x%X..0x%X：%d 个候选，%d 个已写%s\n%s",
+                 MF_CS_SCAN_START, MF_CS_SCAN_END - 4, hits, patched,
+                 scan_only ? "（dry-run，未修改内核）" : "", line);
+    }
+    return (scan_only || patched > 0) ? 0 : -2;
+}
+
+/*
+ * 一步到位：找到 pid 的 proc → 清 csflags。
+ * 返回 0 表示"可以再试 task_for_pid 了"。
+ */
+int mf_prepare_task_for_pid(int pid, int apply, char *report, size_t report_len)
+{
+    char buf1[512] = {0};
+    char buf2[1024] = {0};
+
+    uint64_t proc = mf_find_proc_by_pid(pid, buf1, sizeof(buf1));
+    if (proc == 0) {
+        if (report && report_len) {
+            snprintf(report, report_len, "%s", buf1);
+        }
+        return -1;
+    }
+
+    int rc = mf_clear_proc_csflags(proc, !apply, buf2, sizeof(buf2));
+    if (report && report_len) {
+        snprintf(report, report_len, "%s\n%s", buf1, buf2);
+    }
+    return rc;
+}
+
+/* ================================================================ */
+/* 6) 诊断                                                           */
 /* ================================================================ */
 
 const char *mf_last_error(void)

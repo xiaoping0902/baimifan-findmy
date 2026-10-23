@@ -173,6 +173,48 @@ uint64_t mf_get_current_proc(void);   /* 本进程 struct proc *            */
 uint64_t mf_get_current_task(void);   /* 本进程 struct task *            */
 
 /* ------------------------------------------------------------------ */
+/* proc patch：不需要 tfp0 就绕开 taskgated 的 CS_HARD 拒绝            */
+/* ------------------------------------------------------------------ */
+/*
+ * 背景：真机上 task_for_pid(游戏) 恒 kr=0x5，processor_set_tasks 恒 kr=0x4。
+ * 这是 taskgated 按**目标进程**的 proc->p_csflags 里的 CS_HARD 拒绝的
+ * （我们的 task_for_pid-allow entitlement 本身是生效的）。
+ *
+ * 有了 KFD 的内核读写，就不必走 tfp0 那条路：直接把目标 proc 的
+ * CS_HARD / CS_RESTRICT / CS_REQUIRE_LV 位清掉，taskgated 就没有理由再拒。
+ *
+ * struct proc 的 p_pid / p_csflags 偏移是版本相关的，工程里没有现成值，
+ * 所以下面这两个函数都做**运行时自适应扫描**：
+ *     p_pid 用「kernel_proc pid==0 / launchd pid==1」自校准
+ *     p_csflags 用「值里带 CS_HARD 位」定位，命中多个就逐个清（只清位）
+ *
+ * 安全约定：所有函数默认**只诊断不写**，必须显式 apply/scan_only=0 才动内核。
+ * 最坏情况是没效果（偏移没扫到），不会把无关字段写坏。
+ */
+
+/*
+ * 按 pid 在 proc 链表里找 struct proc 地址。
+ * 返回 0 表示没找到；report 里会写清卡在哪（链表空 / p_pid 偏移没定出来 / pid 不在链里）。
+ */
+uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len);
+
+/*
+ * 清掉目标 proc 的代码签名硬标志位。
+ * scan_only != 0 → 只扫描并把候选报出来，不写内核（建议第一步用这个）。
+ * 返回 0 表示扫描成功；负值表示 KFD 没开或参数非法。
+ */
+int mf_clear_proc_csflags(uint64_t proc, int scan_only,
+                          char *report, size_t report_len);
+
+/*
+ * 一步到位：找 proc → 清 csflags。
+ * apply = 0 → 诊断模式（推荐第一次用）；apply = 1 → 真正写内核。
+ * 返回 0 表示"现在可以重新试 task_for_pid 了"。
+ */
+int mf_prepare_task_for_pid(int pid, int apply,
+                            char *report, size_t report_len);
+
+/* ------------------------------------------------------------------ */
 /* 诊断                                                                */
 /* ------------------------------------------------------------------ */
 

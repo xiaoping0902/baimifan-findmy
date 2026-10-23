@@ -583,6 +583,37 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
     }
     NSLog(@"[MF][Kernel] task_for_pid(%d) kr=0x%x → 改试 processor_set_tasks", pid, kr);
 
+    /*
+     * ── ①.5 [M5.87] 内核 patch 后再试一次 ──
+     *
+     * 为什么加这一步：
+     *   task_for_pid 被拒的根因是**目标进程**的 proc->p_csflags 带 CS_HARD，
+     *   taskgated 见到就拒（kr=0x5）。我们的 entitlement 本身没问题。
+     *   而 processor_set_tasks 那条路在真机上是 kr=0x4（也走不通）。
+     *
+     *   所以：既然 KFD 已经给了内核读写，就直接把目标 proc 的那几个硬标志位清掉，
+     *   然后重新 task_for_pid —— 此时 taskgated 没有理由再拒。
+     *
+     * 只有 KFD 已开（kbase != 0）才走这一步；否则会白跑一遍扫描。
+     * patch 失败不影响后续的 processor_set 回退，只是白花一点时间。
+     */
+    if ([MFKernel shared].kbase != 0) {
+        char rep[2048] = {0};
+        int prc = mf_prepare_task_for_pid(pid, 1, rep, sizeof(rep));
+        NSLog(@"[MF][Kernel] 内核 patch pid=%d → rc=%d\n%s", pid, prc, rep);
+
+        if (prc == 0) {
+            mach_port_t task2 = MACH_PORT_NULL;
+            kern_return_t kr2 = task_for_pid(mach_task_self(), pid, &task2);
+            if (kr2 == KERN_SUCCESS && task2 != MACH_PORT_NULL) {
+                NSLog(@"[MF][Kernel] ✓ 内核 patch 后 task_for_pid(%d) 成功 port=0x%x",
+                      pid, task2);
+                return task2;
+            }
+            NSLog(@"[MF][Kernel] 内核 patch 后仍失败 kr=0x%x（继续走 processor_set）", kr2);
+        }
+    }
+
     // ── ② 回退：processor_set_tasks（不走 taskgated 的代码签名检查）──
     NSString *psError = nil;
     uint32_t fallback = MFGetTaskPortViaProcessorSet(pid, &psError);
