@@ -61,9 +61,14 @@ static const uint64_t kMFUE_DefaultGWorld   = 0x178B44E0ULL;   // = 395003104
 static const uint64_t kMFUE_GNamesDecLiteral = 389510848ULL;
 static const uint64_t kMFUE_DefaultGNames   = 0x173776C0ULL;   // = 389510848
 
-/// AActor → 类 ID（int）。反编译原文：v85 = Read<int>(v21 + 28);
-/// 这个 ID 就是 UClass 的名字索引，用它把 Actor 分成人物/物资/盒子。
-static const uint32_t kMFUE_Actor_ClassID = 28;               // 0x1C
+/// Actor → FName 索引（int）。反编译原文：v85 = Read<int>(v21 + 28);
+///
+/// ⚠ [M5.82] 这个字段**不是类 ID**。按 dump 工具的 UObject 布局（Name@0x1C），
+///    +28 读到的是 **UObject.Name** —— 这个对象自己的名字（"XXX_C_7" 这种），
+///    不是它的 UClass。所以拿它去比 "Character" 后缀会因为 "_C_7" 而失配。
+///    真正的类名路径：Read<u64>(actor + kMFUE_UObject_Class) → 再 +kMFUE_UObject_Name。
+///    MFUEGNames 的 classNameForActorClass: 已封装；常量名保留是为了不改动旧调用点。
+static const uint32_t kMFUE_Actor_ClassID = 28;               // 0x1C = UObject.Name
 
 /*
  * ★★★ [M5.77] 角色字段 —— 来源：Dumper-7 完整 SDK（游戏 1.201.37117）★★★
@@ -96,11 +101,89 @@ static const uint32_t kMFUE_Character_IsDead = 0x0E35;
 static const uint32_t kMFUE_Loot_LevelOffset = 0x68;
 static const uint32_t kMFUE_Loot_ValueOffset = 0xDC;
 
-/// GNames 解引用用的常量（来自 mingyun GetEnemyThread 的 GName 分支）
-///     entry = Read<u64>(gnamesBase + ((id >> 15) & 0xFFF8) + 200)
-///     chars = entry + 2 * (id & 0x3FFFF)
-static const uint32_t kMFUE_GNamesEntryBias = 200;            // +0xC8
-static const uint64_t kMFUE_GNamesChunkMask = 0xFFF8ULL;
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ *  GNames / FName —— [M5.82] 布局已核实，结论与旧注释完全不同，务必读完
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ *  【旧注释（已作废）】
+ *      entry = Read<u64>(gnamesBase + ((id >> 15) & 0xFFF8) + 200)
+ *      chars = entry + 2 * (id & 0x3FFFF)
+ *  这两行是 mingyun 反编译的照抄，本身自相矛盾：块号切 15 位、块内却取 18 位，
+ *  两段加起来 33 位 > 32 位 id 空间，数学上不可能同时成立。而且它把 FNameEntry
+ *  的 2 字节头也一起当成字符串读了 —— 从第一个字符起就整体错位。
+ *
+ *  【权威证据：游戏 1.201.37117 的 MobileDumper-7 自检日志】
+ *      …\三角洲\DeltaForce-iOS-SDK\MobileDumper7.log
+ *
+ *      第 70-77 行：
+ *          GNames pointer: 0x117AA76C0
+ *          GNames offset:  0x1173776C0      ← 与 kMFUE_DefaultGNames 完全一致
+ *          GNames layout type: FNamePool    ← 是 FNamePool，不是 TNameEntryArray
+ *          FNamePool::BlocksBit: 0x12
+ *          FNamePool::Blocks: 0xC8 -> 0x12CB54000
+ *          FNameEntry::Stride: 0x2
+ *          FNameEntry::Header: 0x0
+ *          FNameEntry::String: 0x2
+ *      第 67 行：Entry 0 reads "None"; decoded 50 of 50 sampled names,
+ *                8 matched known engine names.        ← 布局被工具自验证过
+ *      第 318/320 行：bUseNamePool = true，bUseCasePreservingName = false
+ *      第 87 行：General::MaxFNameLen = 512              ← 名字长度上限的出处
+ *
+ *  【由此确定的三件事】
+ *    ① GNames 池是 FNamePool（块指针数组 + 块内偏移），取址公式：
+ *           block = Read<u64>(gnamesBase + bias + 8 * (id >> offsetBits))
+ *           entry = block + (id & ((1 << offsetBits) - 1)) * stride
+ *    ② FNameEntry 头部 2 字节，字符串从 +0x2 开始（Header/Stride 双证）
+ *    ③ bias = 200 (0xC8) 就是 **Blocks[] 指针数组在池内的成员偏移**
+ *       —— 这正好解释 mingyun 那个「+200」魔法数，不是随手偏置。
+ *
+ *  【还没定死的一件事：offsetBits（块内位宽）】
+ *    · mingyun：块号 >>15（15 位）／块内 &0x3FFFF（18 位）—— 自相矛盾
+ *    · UE 标准 FNamePool：>>16 / &0xFFFF（16 位）
+ *    · 本作 dump 日志：FNamePool::BlocksBit = 0x12 = 18
+ *    静态资料裁决不了（GObjects dump 里只有地址和名字，没有 FName id），
+ *    所以 MFUEGNames 在**运行时实测块间距**来定 offsetBits，并用高位 id 交叉验证。
+ *    这里不给死值 —— 谁把 15/16/18 写死，谁就是在赌。
+ *
+ *  【⚠ 另一个坑：+0x1C 是对象名，不是类名】
+ *    dump 日志第 210-215 行的 UObject 布局（本作引擎被改造过，字段顺序与 UE 标准不同）：
+ *        UObject::Vft  = 0x00     UObject::Class = 0x08
+ *        UObject::Outer= 0x10     UObject::Flags = 0x18
+ *        UObject::Name = 0x1C     UObject::Index = 0x24
+ *    所以下面 kMFUE_Actor_ClassID(28/0x1C) 读到的其实是 **UObject.Name**（对象自己的名字，
+ *    形如 "DFMPlayerCharacter_C_7"），不是它的类。要拿类名必须走：
+ *        cls = Read<u64>(actor + kMFUE_UObject_Class);  id = Read<int32>(cls + kMFUE_UObject_Name)
+ *    MFUEGNames 的 classNameForActorClass: 就是这条路径。
+ * ══════════════════════════════════════════════════════════════════════════
+ */
+
+/// ⚠ 仅保留给旧实现（MFDrawingLayer.mm 里还没换掉的那段），**新代码不要用**。
+/// 语义已被上面的核实推翻，改用 MFUEGNames 模块。
+static const uint32_t kMFUE_GNamesEntryBias = 200;            // = Blocks[] 的池内偏移 0xC8
+static const uint64_t kMFUE_GNamesChunkMask = 0xFFF8ULL;      // 旧公式残留，勿用
+
+/// FNamePool 布局的实测常量（来源：MobileDumper7.log 第 73-77 行）
+static const uint32_t kMFUE_FNameEntryHeaderBytes = 2;        // Header@0x0，String@0x2
+static const uint32_t kMFUE_FNameEntryStride      = 2;        // FNameEntry::Stride
+static const uint32_t kMFUE_FNameMaxChars         = 512;      // General::MaxFNameLen
+static const uint32_t kMFUE_FNameBlocksBias       = 200;      // Blocks[] 在池内 +0xC8
+
+/*
+ * UObject 关键字段（本作改造后的布局，来源：dump 日志第 210-215 行）
+ * 注意字段顺序与 UE4 标准（Flags@0x08 / Class@0x10 / Name@0x18 / Outer@0x20）不同。
+ */
+static const uint32_t kMFUE_UObject_Vft   = 0x00;
+static const uint32_t kMFUE_UObject_Class = 0x08;   // UClass*
+static const uint32_t kMFUE_UObject_Outer = 0x10;
+static const uint32_t kMFUE_UObject_Flags = 0x18;
+static const uint32_t kMFUE_UObject_Name  = 0x1C;   // FName（ComparisonIndex 就在 +0x1C）
+static const uint32_t kMFUE_UObject_Index = 0x24;
+
+/// FName 内部：ComparisonIndex(uint32) 在 +0x0，Number(uint32) 在 +0x4，共 8 字节
+static const uint32_t kMFUE_FName_ComparisonIndex = 0x00;
+static const uint32_t kMFUE_FName_Number          = 0x04;
+static const uint32_t kMFUE_FName_Size            = 0x08;
 
 /// UWorld → GameInstance（UE4: UWorld::OwningGameInstance）
 /// 原文：Read<u64>(GWorld + 400)

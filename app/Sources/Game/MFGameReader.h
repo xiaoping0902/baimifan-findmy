@@ -28,6 +28,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) int value;        // 物资价值（读失败/0 → 跳过）
 @property (nonatomic, assign) BOOL isLoot;
 @property (nonatomic, assign) BOOL isBox;
+
+#pragma mark 物资 / 装备（[M5.85] 装备对接新增）
+/// 一堆的数量（容器内 ItemCount / 地面 StackCount）。0 = 未知
+@property (nonatomic, assign) int count;
+/// 装备主类型，取值等于 MFGearItemMainType（= 游戏 EEItemMainType）。
+/// 这里用 uint32_t 而不是那个枚举，是为了让本头文件不必 import MFGearReader.h —— 
+/// 绘制层需要时自己转。0 = 未知。
+@property (nonatomic, assign) uint32_t gearCategory;
 @property (nonatomic, assign) BOOL isVisible;   // 投影成功
 
 #pragma mark 人物属性（[M5.2] 为「开关接线」新增）

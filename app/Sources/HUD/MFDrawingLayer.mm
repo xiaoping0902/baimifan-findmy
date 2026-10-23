@@ -6,6 +6,10 @@
 #import "../Game/MFGameReader.h"
 #import "../Game/MFUEReader.h"
 #import "../Game/MFSettings.h"
+#import "../Game/MFUEGNames.h"       /* [M5.85] 类名解析（FNamePool，已核实布局） */
+#import "../Game/MFGearCatalog.h"    /* [M5.85] 物资/装备类名分类目录 */
+#import "../Game/MFGearReader.h"     /* [M5.85] 物资属性读取（真实偏移） */
+#import "../Game/MFItemTable.h"      /* [M5.86] 物品定义表（等级/价值/名字） */
 #import "../Game/Offsets.h"
 #import "../Read/MFReadBackend.h"
 #import "../Read/MFExternalFeed.h"
@@ -14,6 +18,7 @@
 #import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
 
 #include "imgui.h"
+#include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
 
 static BOOL gDrawEnabled = YES;
 
@@ -197,6 +202,20 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         _ueActorAddrs = [NSMutableArray array];
         _classNameByID = [NSMutableDictionary dictionary];
         _kindHistogram = [NSMutableDictionary dictionary];
+
+        /*
+         * [M5.85] 把「名字索引 → 字符串」接给物资读取器。
+         *
+         * 为什么用回调注入而不是让 MFGearReader 直接 import MFUEGNames：
+         *   FName 池解析和物资字段读取是两个独立关注点，
+         *   物资模块只该关心"字段在哪"，名字怎么解是 GNames 模块的事。
+         *   这样两条也能各自单独测试/替换。
+         *
+         * block 只捕获类（不捕获 self），所以不会造成循环引用。
+         */
+        [MFGearReader shared].nameLookup = ^NSString *(uint32_t nameIndex) {
+            return [[MFUEGNames shared] classNameForID:(int32_t)nameIndex];
+        };
     }
     return self;
 }
@@ -204,16 +223,20 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 #pragma mark - 类名解析与分类（[M5.75]）
 
 /*
- * ★ 把 UE 的 FName 索引解成类名 ★
+ * ★ [M5.85] 类名解析已改为委托 MFUEGNames ★
  *
- * 公式来自 mingyun 反编译的 GName 分支（GetEnemyThread）：
+ * 原来这里照抄 mingyun 的两行公式：
  *     entry = Read<u64>(sGName + ((id >> 15) & 0xFFF8) + 200)
  *     chars = entry + 2 * (id & 0x3FFFF)          ← UTF-16
- * 其中 sGName = libBase + 389510848 = libBase + 0x173776C0。
  *
- * 这个公式是**照搬**的，没有独立验证过语义。所以这里做两层保护：
- *   · 解不出可打印字符串就判失败，绝不把垃圾当类名
- *   · 失败率过高时上层会退回「不分类、全画」的保守模式
+ * 那两行有三个硬伤（详见 MFUEOffsets.h 的 GNames 段与 MFUEGNames.h 文件头）：
+ *   ① 块号切 15 位、块内却取 18 位 —— 加起来 33 位 > 32 位 id 空间，数学上不可能
+ *   ② FNameEntry 头部 2 字节被当成第一个字符读了，整条从首字符起错位
+ *   ③ 写死 UTF-16，而本作 bUseCasePreservingName = false，绝大多数条目是 ANSI
+ *
+ * 现在的真值来自 MobileDumper7.log 的自检输出：
+ *   FNamePool / Blocks@池内+0xC8 / Header@0x0 / String@0x2 / Stride=2 / Entry0="None"
+ * 具体取址与编码判断都在 MFUEGNames 里，本层只负责计数和缓存。
  */
 - (NSString *)classNameForID:(int32_t)classID {
     if (classID <= 0) return nil;
@@ -221,40 +244,10 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     id cached = _classNameByID[key];
     if (cached) return (cached == [NSNull null]) ? nil : cached;
 
-    MFUEReader *ue = [MFUEReader shared];
-    MFUEProfile *p = ue.profile;
-    uint64_t gnames = ue.libBase + p.gnamesStaticOffset;
-    if (!MFUEIsValidPtr(gnames)) { _classFailed++; return nil; }
+    // MFUEGNames 自己做指针合法性判断、可打印性校验、按 id 缓存、失败节流。
+    NSString *name = [[MFUEGNames shared] classNameForID:classID];
 
-    MFReadBackend *rb = [MFReadBackend shared];
-    uint64_t entry = [rb readU64:gnames +
-                          (((uint64_t)classID >> 15) & kMFUE_GNamesChunkMask) +
-                          kMFUE_GNamesEntryBias];
-    if (!MFUEIsValidPtr(entry)) {
-        _classFailed++;
-        _classNameByID[key] = [NSNull null];
-        return nil;
-    }
-    uint64_t chars = entry + 2 * ((uint64_t)classID & 0x3FFFF);
-
-    uint16_t buf[80] = {0};
-    if (![rb readRemote:chars into:buf size:sizeof(buf)]) {
-        _classFailed++;
-        _classNameByID[key] = [NSNull null];
-        return nil;
-    }
-    NSUInteger len = 0;
-    while (len < 80 && buf[len] != 0) len++;
-    if (len == 0) {
-        _classFailed++;
-        _classNameByID[key] = [NSNull null];
-        return nil;
-    }
-    NSString *name = [NSString stringWithCharacters:buf length:len];
-    // 类名必须是纯标识符 —— 读到垃圾内存时这一关会把它拦下来
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
-        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
-    if (name.length > 64 || [name rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) {
+    if (name.length == 0) {
         _classFailed++;
         _classNameByID[key] = [NSNull null];
         return nil;
@@ -266,34 +259,30 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
 /// 类名 → 用途。
 ///
-/// ★ [M5.77] 角色判定改成「类名以 Character 结尾」★
+/// ★ [M5.85] 改为委托 MFGearCatalog 的真实类名表 ★
 ///
-/// Dumper-7 完整 SDK（游戏 1.201.37117）里，所有可打角色都是 XXXCharacter：
-///     DFMCharacter / DFMPlayerCharacter / DFMAICharacter / DFMVirtualAICharacter
-///     DFMNPCCharacter / BattleFieldCharacter / SOLCharacter / GPSafeHouseCharacter
-/// 而它们在场景里的组件、动画、能力类都不是（CharacterMovementComponent、
-/// CharacterAnimSnapshotManager、GameplayAbility_CharacterJump……），
-/// 所以用**后缀**而不是**包含**，才不会把组件误判成角色。
+/// 原实现是「类名包含某关键词就当物资/盒子」，两个方向都有问题：
+///   漏：真物资的类名不一定含 Item / Pickup / Weapon
+///   脏：下面这些全都含 "Pickup"，全都不是场景 Actor ——
+///       PickupManager / PickupFactoryComponent / PickupStaticMeshComponent /
+///       NearbyPickupItem（UI）/ DFMAITask_Pickup（AI 任务）/
+///       DFMAIDecorator_NearbyPickupCheck / PickupOpenBoxAnimInstance
+///       它们一旦被当成物资，屏幕上就是整批"有坐标有距离"的假目标。
+///
+/// 现在 MFGearCatalog 依据 SDK 里的真实继承链判（PickupBase / InventoryPickup /
+/// PlunderPickup / 各 InventoryPickup_* 子类），并带一张显式忽略表；
+/// 同时支持剥模块前缀（DFMGameplay.）和蓝图后缀（BP_xxx_C）。
+/// 角色仍用「类名以 Character 结尾」——CharacterMovementComponent 这类
+/// 组件已经在目录内部被忽略表拦掉了。
 - (MFActorKind)kindForClassName:(NSString *)name {
     if (name.length == 0) return MFActorKindUnknown;
 
-    if ([name hasSuffix:kMFUE_CharacterSuffixName] || [name isEqualToString:@"CHARACTER"]) {
-        return MFActorKindPerson;
+    switch ([[MFGearCatalog shared] actorKindForClassName:name]) {
+        case MFGearActorKindCharacter: return MFActorKindPerson;
+        case MFGearActorKindLoot:      return MFActorKindLoot;
+        case MFGearActorKindContainer: return MFActorKindBox;
+        default:                       return MFActorKindUnknown;
     }
-
-    static NSArray<NSString *> *lootKeys = nil;
-    static NSArray<NSString *> *boxKeys = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        lootKeys   = @[@"Item", @"Pickup", @"Loot", @"Weapon", @"Ammo",
-                       @"Aid", @"Medicine", @"Attachment", @"Backpack"];
-        boxKeys    = @[@"Box", @"Crate", @"Container", @"DeadBody", @"Corpse",
-                       @"Bag", @"Supply", @"Cache"];
-    });
-
-    for (NSString *k in boxKeys)  if ([name rangeOfString:k].location != NSNotFound) return MFActorKindBox;
-    for (NSString *k in lootKeys) if ([name rangeOfString:k].location != NSNotFound) return MFActorKindLoot;
-    return MFActorKindUnknown;
 }
 
 /// 分类是否已经可信到可以用来过滤。
@@ -533,7 +522,12 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     MFReadBackend *rb = [MFReadBackend shared];
     const uint32_t posOffset = ue.profile.actor_worldPos;
+    // [M5.85] 注意：ue.profile.actor_classID（0x1C）已经**不再用于分类**。
+    // 按 dump 日志，本作 UObject::Name 就在 0x1C，读它得到的是对象名（"XXX_C_7"）
+    // 而不是类名；类名要两跳（+0x08 → UClass，再 +0x1C → 类名索引）。
+    // 下面这一行保留只是为了诊断时能和旧日志对照，实际分类不再引用它。
     const uint32_t classIDOffset = ue.profile.actor_classID;
+    (void)classIDOffset;
 
     // ── Actor 指针数组：定期重读（一次批量读，几十 KB）──
     if (_ueActorAddrs.count == 0 || now - _ueAddrsAt > kMFUEAddressTTL) {
@@ -572,11 +566,33 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             }
             cached.x = pos[0]; cached.y = pos[1]; cached.z = pos[2];
             cached.seenAt = now;
-            // 类 ID 只读一次：这是「这是人是物」的唯一依据
-            if (cached.classID == 0) {
-                cached.classID = [rb readInt32:addr + classIDOffset];
-                cached.className = [self classNameForID:cached.classID];
+            /*
+             * ★ [M5.85] 类名必须走两跳 —— 这是分类恒失败的真正根因 ★
+             *
+             * 本作 UObject 布局（MobileDumper7.log 第 210-215 行，运行时实测）：
+             *     UObject::Class = 0x08    UObject::Outer = 0x10
+             *     UObject::Flags = 0x18    UObject::Name  = 0x1C    UObject::Index = 0x24
+             * 与 UE 标准（Flags@0x08 / Class@0x10 / Name@0x18 / Outer@0x20）**顺序不同**。
+             *
+             * 所以原来的 actor + 0x1C 读到的是 **UObject.Name** ——
+             * 这个对象自己的名字，形如 "DFMPlayerCharacter_C_7"，不是它的类名。
+             * 拿它去 hasSuffix:@"Character"，被 "_C_7" 一挡就永远不匹配 →
+             * 所有 Actor 都落进 Unknown → 分类不可用 → 物资/人物全都画不出来。
+             *
+             * 类名的正确路径是两跳：
+             *     cls = Read<u64>(actor + 0x08)      → UClass*
+             *     id  = Read<u32>(cls   + 0x1C)      → UClass 自己的名字索引
+             * MFUEGNames 的 classNameForActorClass: 就是这条路径，并且内部对每一步
+             * 都做了指针合法性判断。
+             */
+            if (cached.classID == 0) {          // 0 = 还没试过
+                cached.classID = -1;            // -1 = 试过了（成功与否都别每帧重试）
+                cached.className = [[MFUEGNames shared] classNameForActorClass:addr];
                 cached.kind = [self kindForClassName:cached.className];
+                // 解析成功率决定「分类能不能用来过滤」；这里要自己维护计数，
+                // 因为分类已经不再经过 classNameForID: 了。
+                if (cached.className.length > 0) _classResolved++;
+                else                             _classFailed++;
             }
         }
         _ueCursor = (_ueCursor + budget) % total;
@@ -627,12 +643,60 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             e.bearingDeg = d;
             e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
         }
-        // 物资走独立的绘制路径（等级配色 + 价值强调 + 名字），盒子跟人物一起画框
-        if (a.kind == MFActorKindLoot) {
+        // 物资 / 容器走独立的绘制路径（等级配色 + 价值强调 + 名字）
+        if (a.kind == MFActorKindLoot || a.kind == MFActorKindBox) {
             e.isLoot = YES;
-            e.name = a.className;
-            e.level = [rb readInt32:a.address + ue.profile.loot_level];
-            e.value = [rb readInt32:a.address + ue.profile.loot_value];
+            e.isBox  = (a.kind == MFActorKindBox);
+
+            /*
+             * ★ [M5.85] 物资字段换成真实来源 ★
+             *
+             * 原来这两行读的是白米饭的候选偏移：
+             *     e.level = Read<u32>(actor + 0x68);
+             *     e.value = Read<u32>(actor + 0xDC);
+             * sdk-gear 核对后确认：0x68 / 0xDC 确实是 Quality / InitialGuidePrice，
+             * 但它们属于**物品配置行 FDFMCommonItemRow**，不是 Actor 字段。
+             * 落在 AActor 区间里读到的是 PrimaryActorTick / InitialLifeSpan 附近的无关数据 ——
+             * 所以之前屏幕上那些"等级/价值"是垃圾。
+             *
+             * 现在走 MFGearReader，字段来源（Dumper-7 SDK 1.201.37117）：
+             *   PickupBase  +0x0FF0  InventoryIdName      物品 ID（FName，靠 GNames 解）
+             *   PickupBase  +0x0FE0  SourceType           来源（EEPickupSourceType）
+             *   PickupItemInfo +0x10 ItemID.Category      物品主类型（EEItemMainType）
+             *   PickupItemInfo +0x38 ItemCount            数量
+             *   PickupItemInfo +0x564 StarNum             星级
+             *   ArchiveInfo +0x240   EquipmentValue       价值（仅尸体/掉落可信，见头文件）
+             */
+            MFGearInfo *gear = [[MFGearReader shared] readGearForActor:a.address
+                                                             className:a.className
+                                                               isActor:NULL];
+            if (gear) {
+                // 名字：优先物品 ID 名；拿不到就用目录的可读标签（"尸体盒"/"武器箱"），
+                // 绝不把 "InventoryPickup_DeadBody" 这种原始类名当物品名显示
+                e.name = gear.itemIdName.length
+                       ? gear.itemIdName
+                       : [[MFGearCatalog shared] fallbackLabelForClassName:a.className];
+
+                if (gear.count > 0) e.count = gear.count;
+
+                // 价值：只有通过值域校验才采信
+                if (gear.hasValue && gear.value > 0) {
+                    e.value = (gear.value > (long long)INT_MAX) ? INT_MAX : (int)gear.value;
+                }
+
+                /*
+                 * 等级：优先用**物品定义表**里的 Quality（真·品质，0–6 级）。
+                 * 查不到（表没加载 / 这行不在表里）才退回 Actor 上的 StarNum。
+                 * 两者不是一回事：Quality 是品质分级，StarNum 是星级，别混用。
+                 */
+                if (gear.hasQuality)   e.level = gear.quality;
+                else if (gear.hasStar) e.level = gear.starNum;
+
+                e.gearCategory = (uint32_t)gear.mainType;
+            } else {
+                // 连 PickupBase 头都没读到：至少给个可读标签，别显示类名
+                e.name = [[MFGearCatalog shared] fallbackLabelForClassName:a.className];
+            }
             [lootOut addObject:e];
         } else if (a.kind == MFActorKindPerson) {
             /*
@@ -685,6 +749,45 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                  (unsigned long)_classResolved, (unsigned long)_classFailed,
                  [self classificationUsable] ? @"分类生效" : @"退回全画",
                  sample.length ? sample : @"（一个类名都没解出来）");
+
+    /*
+     * ★ [M5.85] 装备对接的观测点 ★
+     *
+     * 装备 ESP 牵涉三环，任何一环不对屏幕上就是空白。这三行日志就是为了
+     * 让真机上"一眼看出断在哪"，不用再回头翻代码：
+     *
+     *   ① GNames 探测结论 —— 类名能不能解出来（layout/bias/bits/ok-fail）
+     *      若 layout=Unknown 或 ok 恒 0：FNamePool 没探出来，
+     *      看 MFUEGNames 的 probeReport，那里有 4 组候选的命中情况。
+     *
+     *   ② 物资读取器自检 —— 偏移表本身有没有写错（纯本地计算，不依赖游戏内存）
+     *      只在第一次打，避免刷屏。
+     *
+     *   ③ 分类计数 —— 物资/盒子各命中多少。若物资=0 而角色有值，
+     *      说明类名表需要按真机关卡的实际类名补条目。
+     */
+    MFHUDLogLine(@"[装备] %@", [[MFUEGNames shared] statsText]);
+
+    static BOOL gearSelfCheckLogged = NO;
+    if (!gearSelfCheckLogged) {
+        gearSelfCheckLogged = YES;
+        MFHUDLogLine(@"[装备] %@", [[MFGearReader shared] selfCheckReport]);
+        MFHUDLogLine(@"[装备] %@", [[MFGearCatalog shared] selfCheckReport]);
+    }
+
+    /*
+     * 物品定义表一旦就绪，立刻打 8 行样例。
+     *
+     * 这是「等级到底有没有真的读到」最直接的证据：
+     * 表就会显示真实物品 ID + 品质 + 价值；
+     * 表没读到就一直是"未就绪"，同时 probeReport 会说明断在哪一步
+     * （GObjects 偏移 → 下标 → RowStruct 校验 → TMap 布局 → 索引）。
+     */
+    static BOOL itemTableLogged = NO;
+    if (!itemTableLogged && [MFItemTable shared].ready) {
+        itemTableLogged = YES;
+        MFHUDLogLine(@"[装备] %@", [[MFItemTable shared] sampleReport:8]);
+    }
 }
 
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
