@@ -6,6 +6,8 @@
 #import "../Read/MFReadBackend.h"
 
 #import <UIKit/UIKit.h>
+#import <Security/SecTask.h>
+#import <mach/mach.h>
 #import <sys/utsname.h>
 #import <sys/sysctl.h>
 #import <sys/resource.h>
@@ -17,6 +19,20 @@
 #import <dlfcn.h>
 #import <string.h>
 #import <stdlib.h>
+
+// csops 是私有符号，libSystem 里稳定存在；公开 SDK 没有 <sys/codesign.h>。
+extern "C" int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+#ifndef CS_OPS_STATUS
+#define CS_OPS_STATUS 0
+#endif
+// 代码签名标志位（XNU bsd/sys/codesign.h）
+#define MF_CS_VALID            0x00000001
+#define MF_CS_GET_TASK_ALLOW   0x00000004
+#define MF_CS_HARD             0x00000100
+#define MF_CS_RESTRICT         0x00000800
+#define MF_CS_DEBUGGED         0x10000000
+#define MF_CS_PLATFORM_BINARY  0x04000000
 
 @implementation MFEnvItem
 - (NSString *)symbol {
@@ -109,6 +125,69 @@ static BOOL MFCanList(NSString *p) {
                       [NSString stringWithFormat:
                        @"%@\n依据：com.apple.private.security.no-sandbox 是否真生效。"
                        @"这条不通，清理/防封/读 Keychain 全部不可用。", sbDetail])];
+
+    // ── ③-B 代码签名 / 权限实测（[M5.80]）──
+    //
+    // 真机实测：一键开始 ② 对 launchd(1) / SpringBoard(32) / 游戏 全部 kr=0x5，
+    // 只有对「自己」成功 —— 而 task_for_pid 对自己根本不需要任何权限，
+    // 所以「自己 ✓」什么都证明不了。光看 kr 分不清是权限没生效还是目标有保护，
+    // 这里直接查三样：本进程 cs_flags、系统实际认的 entitlements、实测 launchd。
+    {
+        NSMutableString *d = [NSMutableString string];
+
+        uint32_t csFlags = 0;
+        int csRet = csops(getpid(), CS_OPS_STATUS, &csFlags, sizeof(csFlags));
+        [d appendFormat:@"csops(status) ret=%d cs_flags=0x%08X\n", csRet, csFlags];
+        if (csFlags & MF_CS_PLATFORM_BINARY) [d appendString:@"  ✓ CS_PLATFORM_BINARY\n"];
+        if (csFlags & MF_CS_GET_TASK_ALLOW)  [d appendString:@"  ✓ CS_GET_TASK_ALLOW\n"];
+        if (csFlags & MF_CS_DEBUGGED)        [d appendString:@"  ✓ CS_DEBUGGED\n"];
+        if (csFlags & MF_CS_HARD)            [d appendString:@"  ! CS_HARD\n"];
+        if (csFlags & MF_CS_RESTRICT)        [d appendString:@"  ! CS_RESTRICT\n"];
+        if (!(csFlags & MF_CS_PLATFORM_BINARY) && !(csFlags & MF_CS_DEBUGGED)) {
+            [d appendString:@"  → 既不是平台二进制、也没被调试挂上 → 内核不会给跨进程特权\n"];
+        }
+
+        // SecTask 读的是「系统实际生效」的那份 entitlement
+        BOOL tfpAllow = NO;
+        NSArray<NSString *> *keys = @[@"task_for_pid-allow", @"platform-application",
+                                      @"com.apple.system-task-ports",
+                                      @"com.apple.private.security.no-sandbox"];
+        SecTaskRef secTask = SecTaskCreateFromSelf(kCFAllocatorDefault);
+        if (secTask) {
+            for (NSString *k in keys) {
+                CFTypeRef v = SecTaskCopyValueForEntitlement(secTask,
+                                                             (__bridge CFStringRef)k, NULL);
+                [d appendFormat:@"  %@ = %@\n", k, v ? (__bridge id)v : @"✗ 缺失"];
+                if ([k isEqualToString:@"task_for_pid-allow"] && v &&
+                    CFGetTypeID(v) == CFBooleanGetTypeID()) {
+                    tfpAllow = CFBooleanGetValue((CFBooleanRef)v);
+                }
+                if (v) CFRelease(v);
+            }
+            CFRelease(secTask);
+        } else {
+            [d appendString:@"  SecTaskCreateFromSelf 失败\n"];
+        }
+
+        mach_port_t probe = MACH_PORT_NULL;
+        kern_return_t pkr = task_for_pid(mach_task_self(), 1, &probe);
+        BOOL probeOK = (pkr == KERN_SUCCESS && probe != MACH_PORT_NULL);
+        if (probeOK) mach_port_deallocate(mach_task_self(), probe);
+        [d appendFormat:@"  实测 task_for_pid(launchd=1) → kr=0x%x %@\n",
+         pkr, probeOK ? @"✓ 可用" : @"✗ 不可用"];
+
+        [out addObject:MK(@"代码签名 / 权限",
+                          [NSString stringWithFormat:@"cs=0x%X allow=%@ tfp(1)=0x%x",
+                           csFlags, tfpAllow ? @"✓" : @"✗", pkr],
+                          probeOK ? MFEnvStatusPass : MFEnvStatusFail,
+                          [NSString stringWithFormat:
+                           @"这一项决定「能不能读别的进程」。\n%@"
+                           @"依据：XNU 的 task_for_pid 会看调用进程的 CS_PLATFORM_BINARY / "
+                           @"CS_DEBUGGED，以及 task_for_pid-allow entitlement。\n"
+                           @"· cs 没有 CS_PLATFORM_BINARY、SecTask 也读不到 task_for_pid-allow\n"
+                           @"  → 这份签名没被内核认可，task_for_pid 必然失败\n"
+                           @"· SecTask 能读到、实测仍失败 → 目标进程自身有保护", d])];
+    }
 
     // ── ④ fd 上限（KFD 的硬门槛）──
     struct rlimit rl = {0,0};
