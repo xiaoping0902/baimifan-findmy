@@ -347,7 +347,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 
 - (BOOL)lookupComparisonIndex:(uint32_t)comparisonIndex
                        number:(uint32_t)number
-                         row:(MFItemRow **)outRow {
+                         row:(MFItemRow *_Nullable *_Nullable)outRow {
     if (!_ready || comparisonIndex == 0) return NO;
 
     // 主键：先只按 comparisonIndex 找（大多数物品 number 都是 0）
@@ -402,7 +402,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
     return YES;
 }
 
-- (BOOL)lookupItemIdString:(NSString *)itemId row:(MFItemRow **)outRow {
+- (BOOL)lookupItemIdString:(NSString *)itemId row:(MFItemRow *_Nullable *_Nullable)outRow {
     if (!_ready || itemId.length == 0 || !self.nameLookup) return NO;
 
     // 反向遍历成本高，这里只在诊断时用：逐行解名比对

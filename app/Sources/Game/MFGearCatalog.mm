@@ -208,7 +208,7 @@ static BOOL MFGearLooksLikeNonActor(NSString *cls) {
     return s;
 }
 
-- (MFGearActorKind)actorKindForClassName:(NSString *)className {
+- (MFGearActorKind)actorKindForClassName:(NSString *_Nullable)className {
     if (className.length == 0) return MFGearActorKindIgnored;
 
     // ⓪ 带模块前缀时，先看模块本身是不是界面层（DFMGameHud.* 一律不画）
@@ -252,7 +252,7 @@ static BOOL MFGearLooksLikeNonActor(NSString *cls) {
     return MFGearActorKindIgnored;
 }
 
-- (MFGearCategory)categoryForClassName:(NSString *)className {
+- (MFGearCategory)categoryForClassName:(NSString *_Nullable)className {
     NSString *cls = MFGearNormalizedClassName(className);
     if (cls.length == 0) return MFGearCategoryUnknown;
 
@@ -270,7 +270,7 @@ static BOOL MFGearLooksLikeNonActor(NSString *cls) {
     return MFGearCategoryUnknown;
 }
 
-- (BOOL)isPickupLineageClassName:(NSString *)className {
+- (BOOL)isPickupLineageClassName:(NSString *_Nullable)className {
     NSString *cls = MFGearNormalizedClassName(className);
     if (cls.length == 0) return NO;
     if (MFGearLooksLikeNonActor(cls)) return NO;
@@ -305,7 +305,7 @@ static BOOL MFGearLooksLikeNonActor(NSString *cls) {
     }
 }
 
-- (NSString *)fallbackLabelForClassName:(NSString *)className {
+- (NSString *_Nullable)fallbackLabelForClassName:(NSString *_Nullable)className {
     NSString *cls = MFGearNormalizedClassName(className);
     if (cls.length == 0) return nil;
 

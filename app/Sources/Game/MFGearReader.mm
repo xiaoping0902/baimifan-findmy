@@ -50,6 +50,7 @@
 #import "MFItemTable.h"      /* [M5.86] 物品定义表：等级/价值/名字的真实来源 */
 #import "MFUEOffsets.h"
 #import "../Read/MFReadBackend.h"
+#import <QuartzCore/QuartzCore.h>   /* CACurrentMediaTime（缓存 TTL 计时） */
 #import <string.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -234,9 +235,9 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
 
 #pragma mark 主读取
 
-- (MFGearInfo *)readGearForActor:(uint64_t)actor
-                       className:(NSString *)className
-                         isActor:(BOOL *)outIsActor {
+- (MFGearInfo *_Nullable)readGearForActor:(uint64_t)actor
+                                className:(NSString *_Nullable)className
+                                  isActor:(BOOL *)outIsActor {
     if (outIsActor) *outIsActor = NO;
     if (!MFUEIsValidPtr(actor)) return nil;
 
