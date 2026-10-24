@@ -196,6 +196,26 @@ int mf_ttbr_snapshot(uint64_t *ttbr0_pa, uint64_t *ttbr0_va,
 int      mf_ptov_snapshot(uint64_t *pa, uint64_t *va, uint64_t *len);
 uint64_t mf_phys_to_kv(uint64_t pa);
 
+/*
+ * [M5.108] pid -> 目标进程的页表根（跨进程读的入口）。
+ *
+ *     pid --allproc--> proc --[+0x18]--> proc_ro --[+0x08]--> task
+ *          --[+0x28]--> vm_map --[+0x40]--> pmap --[+0x00]--> tte(root)
+ *
+ * 这五个偏移在 M5.103 就在自己进程上逐项校验过（== libkfd 的 current_*），
+ * M5.107 又把 pmap+0 与 ttbr0.va 逐位比对过。这里只是把它套到别的 pid 上。
+ *
+ * 目标进程没有 current_* 可对照，所以用两条自证代替：
+ *   ① 每一跳都必须是内核地址；
+ *   ② pmap+0x00(tte) 必须等于 mf_phys_to_kv(pmap+0x08(ttep)) —— 这正是
+ *      libkfd 在 kopen 时对自己断言的不变量（perf.h:168），对任何 pmap 都成立。
+ *
+ * 返回 0 成功；-1 内核未打开；-2 找不到该 pid；-3..-8 某一跳失败。
+ * 任一输出指针可为 NULL。report 给出中文原因。
+ */
+int mf_pid_chain(int pid, uint64_t *proc, uint64_t *task, uint64_t *map,
+                 uint64_t *pmap, uint64_t *root, char *report, size_t report_len);
+
 /* 被地址闸拒绝的次数与最近一个被拒地址（用于诊断，不参与逻辑）。 */
 int      mf_kaddr_denied_count(void);
 uint64_t mf_kaddr_denied_last(void);

