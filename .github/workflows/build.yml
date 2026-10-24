@@ -29,12 +29,12 @@ jobs:
         run: brew install xcodegen ldid
 
       - name: Check source and entitlement regression tests
-        working-directory: app
+        # 注意：必须在仓库根目录跑 —— tests/ 与 scripts/ 都在根下，
+        # 不能加 working-directory: app（加了就会 ImportError: 'tests' 不可导入）
         run: |
           set -o pipefail
-          # 全程 tee 到 build.log：任何一步挂掉，日志都能被外部读到
           ( python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
-            python3 scripts/preflight.py ) 2>&1 | tee build.log
+            python3 scripts/preflight.py ) 2>&1 | tee app/build.log
 
       - name: Generate Xcode project
         working-directory: app
