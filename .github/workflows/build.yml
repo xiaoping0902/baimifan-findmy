@@ -29,18 +29,22 @@ jobs:
         run: brew install xcodegen ldid
 
       - name: Check source and entitlement regression tests
+        working-directory: app
         run: |
-          python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
-          python3 scripts/preflight.py
+          set -o pipefail
+          # 全程 tee 到 build.log：任何一步挂掉，日志都能被外部读到
+          ( python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
+            python3 scripts/preflight.py ) 2>&1 | tee build.log
 
       - name: Generate Xcode project
         working-directory: app
-        run: xcodegen generate
+        run: xcodegen generate 2>&1 | tee -a build.log
 
       - name: Build (unsigned)
         working-directory: app
         run: |
           set -o pipefail
+          # 全量日志落到 build.log：失败时会被挂到 Release，供外部读取编译报错
           xcodebuild \
             -project FindMy.xcodeproj \
             -scheme FindMy \
@@ -48,7 +52,7 @@ jobs:
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tail -120
+            build 2>&1 | tee build.log
 
       - name: Locate .app
         id: locate
@@ -199,9 +203,17 @@ jobs:
           path: app/out/FindMy-unsigned.ipa
           if-no-files-found: error
 
-      # 把 IPA 挂到公开 Release：下载 URL 不需要任何 token，
-      # 方便本机（Windows、无 gh CLI）直接 curl 下来装。
-      - name: Publish IPA to public release
+      # 把「IPA + 构建日志」一起挂到公开 Release。
+      #
+      # 为什么这么做：
+      #   artifact 下载强制要登录；Release 资产是【匿名可下载】的。
+      #   而构建失败时没有 IPA，但 build.log 在 —— 外部（Windows、无 gh）只要
+      #   拉 releases.atom 拿到 tag，就能拼出确定性 URL：
+      #     https://github.com/OWNER/REPO/releases/download/<tag>/build.log
+      #     https://github.com/OWNER/REPO/releases/download/<tag>/FindMy-unsigned.ipa
+      #   if: always() 保证失败时也会发布，从而能远程看到编译报错原文。
+      - name: Publish IPA and build log to public release
+        if: always()
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
@@ -211,26 +223,8 @@ jobs:
             自动构建产物（未签名，用 Sideloadly / TrollStore 安装）。
             commit: ${{ github.sha }}
             branch: ${{ github.ref_name }}
-          files: app/out/FindMy-unsigned.ipa
-          fail_on_unmatched_files: true
-
-      # Release 需要 contents:write（可能被仓库策略挡成 403），
-      # 这里再走一条零权限的兜底：传到匿名文件托管，把链接写进构建摘要。
-      # 摘要页面是公开可读的，所以外部无需 token 就能拿到下载地址。
-      - name: Publish IPA to anonymous host
-        continue-on-error: true
-        run: |
-          set -u
-          IPA=app/out/FindMy-unsigned.ipa
-          ls -la "$IPA" || exit 0
-          echo "## IPA download links" >> "$GITHUB_STEP_SUMMARY"
-          if U=$(curl -fsS -F "file=@$IPA" -F "expires=72h" https://0x0.st); then
-            echo "- 0x0: $U" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if U2=$(curl -fsS --upload-file "$IPA" "https://temp.sh/FindMy-unsigned.ipa"); then
-            echo "- temp.sh: $U2" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if U3=$(curl -fsS -F "file=@$IPA" "https://file.io"); then
-            echo "- file.io: $U3" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          true
+            result: ${{ job.status }}
+          files: |
+            app/out/FindMy-unsigned.ipa
+            app/build.log
+          fail_on_unmatched_files: false
