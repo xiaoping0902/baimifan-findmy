@@ -648,6 +648,13 @@ static NSString *run_locked(NSMutableDictionary *json)
     return log;
 }
 
+static BOOL g_keep_kernel = NO;
+
+void MFCalibrateSetKeepKernel(BOOL keep)
+{
+    g_keep_kernel = keep;
+}
+
 NSString *MFCalibrateRun(NSString *jsonPath)
 {
     if (!mf_is_open()) {
@@ -663,8 +670,15 @@ NSString *MFCalibrateRun(NSString *jsonPath)
     @try {
         report = run_locked(json);
     } @finally {
-        mf_kclose();
+        /*
+         * [M5.115] 默认关会话（一次性诊断）；主线（启动内核 -> 自动找进程 -> 读内存）
+         * 会先 MFCalibrateSetKeepKernel(YES)，让会话一直留到用户点「关闭内核」。
+         */
+        if (!g_keep_kernel) {
+            mf_kclose();
+        }
         json[@"closed"] = @(!mf_is_open());
+        json[@"kept_open"] = @(g_keep_kernel && mf_is_open());
     }
 
     mf_calib_write(report ?: @"FAIL: unknown", json);

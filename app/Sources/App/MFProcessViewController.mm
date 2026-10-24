@@ -360,6 +360,31 @@
 
 - (void)startKernel {
     /*
+     * ★ [M5.115] 同一个按钮兼作「关闭内核」。
+     *
+     * 主线是：用户点「启动内核」→ 内核保持开启 → 自动找进程 → 读内存。
+     * 会话开着时按钮变成"关闭"，点一下正常释放（而不是让用户去强杀 App ——
+     * 强杀带 KFD 的进程会让 perfmon 脏掉，只能重启设备）。
+     */
+    if ([MFKernel shared].isOpen) {
+        [[MFKernel shared] stop];
+        self.autoAttachedPid = 0;
+        self.autoTryCount = 0;
+        [self reload];
+        UIAlertController *a = [UIAlertController
+            alertControllerWithTitle:@"内核已关闭"
+                             message:@"KFD 会话已正常释放（悬空页不再存在）。\n"
+                                     @"现在可以安全地杀掉 App。\n\n"
+                                     @"要重新读内存，再点一次「启动内核」。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+        return;
+    }
+
+    /*
      * ⛔️ [M5.19] 加一道确认闸门 —— 因为这个按钮会让【整台 iPad 内核 panic 重启】。
      *
      * 真机证据（设备 /Panics 目录，2026-10-15 一晚）：
@@ -530,6 +555,12 @@
 - (void)runCalibrationAfterKernel:(NSString *)kernelMessage {
     self.headerLabel.text = @"内核已起，正在校准偏移…";
     [self.spinner startAnimating];
+
+    /*
+     * ★ [M5.115] 主线要一直读内存，所以校准结束后不要关会话 ——
+     * 关掉的话自动挂载还得再 kopen 一次，而 kopen 是概率性的（多开多风险）。
+     */
+    MFCalibrateSetKeepKernel(YES);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mf-calibration.json"];

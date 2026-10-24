@@ -32,6 +32,19 @@ extern "C" {
 /// @return 人类可读报告；失败时也返回报告（里面写明卡在哪一步）
 NSString *MFCalibrateRun(NSString *_Nullable jsonPath);
 
+/*
+ * [M5.115] 校准结束后要不要把内核会话关掉。
+ *
+ * 默认 NO：校准是一次性诊断，关掉不留悬空页。
+ * 但"启动内核 → 自动找进程 → 读内存"这条主线上，内核必须一直开着 ——
+ * 否则每次读都要重新 kopen（而 kopen 是概率性的，多开一次就多一次失败/脏页）。
+ * 进程页在启动内核后调一次 MFCalibrateSetKeepKernel(YES)，让会话留到
+ * 用户主动点「关闭内核」为止。
+ *
+ * 注意：会话开着的时候【不要上滑强杀 App】——那会让 perfmon 脏掉，只能重启设备。
+ */
+void MFCalibrateSetKeepKernel(BOOL keep);
+
 #ifdef __cplusplus
 }
 #endif
