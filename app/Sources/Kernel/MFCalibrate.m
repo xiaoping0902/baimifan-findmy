@@ -1,16 +1,17 @@
 //
 //  MFCalibrate.m -- KFD page-table direct read: offset calibration + self-verification
 //
-//  Offsets below come from the kfdmemdump project (kfd_bridge.c / offsets.m),
-//  which implements the same cross-process read on this exact SoC family:
+//  Offsets come from the kfdmemdump project (kfd_bridge.c / offsets.m), which
+//  implements the same cross-process read on this SoC family:
 //
 //      proc --[+0x18]--> proc_ro --[+0x8]--> task
 //      task --[+0x28]--> vm_map --[+0x40]--> pmap
 //      pmap --[+0x00]--> root table VA (TTBR0, 16 KB granule, T0SZ=17)
 //
-//  They are still *verified* here against the values libkfd already knows
+//  Every step is verified against the values libkfd already knows
 //  (current_proc / current_task / current_map / current_pmap), so a wrong
-//  offset fails loudly instead of silently reading garbage.
+//  offset fails loudly instead of silently reading garbage. The final check
+//  walks the page tables and reads our own Mach-O header (0xfeedfacf).
 //
 //  Safety rules kept from earlier iterations:
 //    1. every kernel read is checked against the kernel VA window first
@@ -24,13 +25,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <unistd.h>
 
 /* ---------------- kernel address window ---------------- */
 /*
- * arm64 内核地址的判据是「高 16 位全 1」，不是固定的 0xfffffe 前缀：
- *   0xfffffe00_...  kbase / proc / task / vm_map
- *   0xfffffdf0_...  pmap 等 zone 对象   ← 先前把下限写成 0xfffffe00 误杀了这个
+ * On arm64 a kernel address is "top 16 bits all ones", not a fixed 0xfffffe
+ * prefix:
+ *     0xfffffe00_...  kbase / proc / task / vm_map
+ *     0xfffffdf0_...  pmap and other zone objects
+ * An earlier build used 0xfffffe0000000000 as the lower bound and wrongly
+ * rejected such a pmap (M5.100 shipped: cpmap = 0xfffffdf0d63d1cb0).
  */
 #define MF_KADDR_MIN 0xffff000000000000ULL
 #define MF_KADDR_MAX 0xffffffffffffffffULL
@@ -40,26 +43,28 @@ static inline bool mf_is_kaddr(uint64_t a)
     return a >= MF_KADDR_MIN && a <= MF_KADDR_MAX;
 }
 
-/* ---------------- struct offsets (verified below) ---------------- */
-#define MF_OFF_PROC_RO      0x18ULL   /* proc     -> proc_ro          */
-#define MF_OFF_PROC_RO_TASK 0x08ULL   /* proc_ro  -> task             */
-#define MF_OFF_TASK_MAP     0x28ULL   /* task     -> vm_map           */
-#define MF_OFF_VM_MAP_PMAP  0x40ULL   /* vm_map   -> pmap             */
-#define MF_OFF_PMAP_TTE     0x00ULL   /* pmap     -> root table VA    */
+/* ---------------- struct offsets (verified at runtime) ---------------- */
+#define MF_OFF_PROC_LIST_PREV 0x08ULL  /* proc    -> list link used to walk      */
+#define MF_OFF_PROC_PID       0x60ULL  /* proc    -> p_pid                       */
+#define MF_OFF_PROC_RO        0x18ULL  /* proc    -> proc_ro                     */
+#define MF_OFF_PROC_RO_TASK   0x08ULL  /* proc_ro -> task                        */
+#define MF_OFF_TASK_MAP       0x28ULL  /* task    -> vm_map                      */
+#define MF_OFF_VM_MAP_PMAP    0x40ULL  /* vm_map  -> pmap                        */
+#define MF_OFF_PMAP_TTE       0x00ULL  /* pmap    -> root table VA               */
 
-/* ---------------- 16 KB page geometry (T1SZ=17) ---------------- */
+/* ---------------- 16 KB page geometry (T1SZ = 17) ---------------- */
 #define MF_T1SZ        17ULL
 #define MF_PG_SHIFT    14ULL
 #define MF_PG_SIZE     (1ULL << MF_PG_SHIFT)
 #define MF_PG_OFF(v)   ((uint64_t)(v) & (MF_PG_SIZE - 1ULL))
 
-/* Apple XNU pmap macros (same values kfd_bridge.c uses) */
-#define MF_TTE_VALID       0x1ULL
-#define MF_PTE_TYPE_VALID  0x3ULL
-#define MF_TTE_TYPE_MASK   0x2ULL
-#define MF_TTE_TYPE_TABLE  0x2ULL
-#define MF_TTE_TYPE_BLOCK  0x0ULL
-#define MF_PA_MASK         0x0000fffffffff000ULL
+/* Apple XNU pmap macros (same values kfdmemdump uses) */
+#define MF_TTE_VALID           0x1ULL
+#define MF_PTE_TYPE_VALID      0x3ULL
+#define MF_TTE_TYPE_MASK       0x2ULL
+#define MF_TTE_TYPE_TABLE      0x2ULL
+#define MF_TTE_TYPE_BLOCK      0x0ULL
+#define MF_PA_MASK             0x0000fffffffff000ULL
 #define MF_PTE_COMPRESSED      0x8000000000000000ULL
 #define MF_PTE_COMPRESSED_ALT  0x4000000000000000ULL
 
@@ -161,7 +166,7 @@ static bool va_to_pa(uint64_t tt, uint64_t va, uint64_t *pa_out)
     return pa_in_range(*pa_out, 1);
 }
 
-/* read user memory through the target pmap's page tables */
+/* read user memory through a target pmap's page tables */
 static bool kread_user(uint64_t tt, uint64_t uva, void *dst, size_t n)
 {
     uint8_t *p = (uint8_t *)dst;
@@ -210,45 +215,53 @@ static NSString *run_locked(NSMutableDictionary *json)
     [log appendFormat:@"phys base=%#llx size=%#llx\n",
         (unsigned long long)g_k.gPhysBase, (unsigned long long)g_k.gPhysSize];
 
-    /* 1) allproc: le_next at +0, p_pid at +0x60 */
-    uint64_t self_proc = 0, cur = g_k.kernel_proc;
+    /*
+     * 1) Our own proc comes straight from libkfd's info_run(); no list walk needed.
+     *    Walking allproc with the link at proc+0x0 stops after one hop (M5.102:
+     *    walked=1). kfdmemdump advances with proc+0x8 (off_p_list_le_prev), so the
+     *    loop below follows that field purely to report how many procs we see --
+     *    we will need it when looking up the game process by pid.
+     */
+    uint64_t self_proc = g_k.current_proc;
+    uint64_t cur = g_k.kernel_proc;
     int walked = 0;
-    for (int i = 0; i < 4000 && cur; i++) {
-        uint32_t pid = 0;
-        if (!k32(cur + 0x60, &pid)) break;
+    for (int i = 0; i < 4000 && mf_is_kaddr(cur); i++) {
         walked++;
-        if (pid == (uint32_t)getpid()) { self_proc = cur; break; }
+        if (cur == self_proc) break;
         uint64_t next = 0;
-        if (!k64(cur, &next) || next == 0) break;
+        if (!k64(cur + MF_OFF_PROC_LIST_PREV, &next)) break;
+        next = mf_unsign(next);
+        if (next == 0 || next == cur || !mf_is_kaddr(next)) break;
         cur = next;
     }
-    [log appendFormat:@"allproc walked=%d self_proc=%#llx\n",
-        walked, (unsigned long long)self_proc];
-    if (!self_proc) return [log stringByAppendingString:@"FAIL: self not in allproc"];
+    [log appendFormat:@"self_proc=%#llx (walked=%d)\n",
+        (unsigned long long)self_proc, walked];
+    if (!self_proc) return [log stringByAppendingString:@"FAIL: no self proc"];
 
-    /* 2) proc -> proc_ro -> task, verified against current_task */
+    /* 2) proc -> proc_ro -> task */
     uint64_t proc_ro = 0, task = 0;
     if (!k64(self_proc + MF_OFF_PROC_RO, &proc_ro)) {
         return [log stringByAppendingString:@"FAIL: read proc_ro"];
     }
+    proc_ro = mf_unsign(proc_ro);
     uint64_t task_raw = 0;
-    if (!k64(mf_unsign(proc_ro) + MF_OFF_PROC_RO_TASK, &task_raw)) {
+    if (!k64(proc_ro + MF_OFF_PROC_RO_TASK, &task_raw)) {
         return [log stringByAppendingString:@"FAIL: read pr_task"];
     }
     task = mf_unsign(task_raw);
-    bool task_ok = (task == g_k.current_task);
+    bool task_ok = (task == mf_unsign(g_k.current_task));
     [log appendFormat:@"proc_ro=%#llx task=%#llx %s\n",
         (unsigned long long)proc_ro, (unsigned long long)task,
         task_ok ? "OK == current_task" : "MISMATCH"];
     if (!task_ok) return [log stringByAppendingString:@"FAIL: proc_ro/pr_task offsets wrong"];
 
-    /* 3) task -> vm_map, verify */
+    /* 3) task -> vm_map */
     uint64_t map = 0;
     if (!k64(task + MF_OFF_TASK_MAP, &map)) {
         return [log stringByAppendingString:@"FAIL: read task->map"];
     }
     map = mf_unsign(map);
-    bool map_ok = (map == g_k.current_map);
+    bool map_ok = (map == mf_unsign(g_k.current_map));
     [log appendFormat:@"map=%#llx %s\n", (unsigned long long)map,
         map_ok ? "OK == current_map" : "MISMATCH"];
     if (!map_ok) return [log stringByAppendingString:@"FAIL: task->map offset wrong"];
@@ -273,7 +286,7 @@ static NSString *run_locked(NSMutableDictionary *json)
         mf_is_kaddr(tt) ? "" : "  (NOT a kernel pointer)"];
     if (!mf_is_kaddr(tt)) return [log stringByAppendingString:@"FAIL: pmap->tte not a kernel VA"];
 
-    /* 5) end-to-end self test: walk to our own Mach-O header */
+    /* 5) end-to-end self test: walk the tables and read our own Mach-O header */
     const uint64_t self_macho = (uint64_t)(uintptr_t)_dyld_get_image_header(0);
     uint32_t magic = 0;
     bool ok = kread_user(tt, self_macho, &magic, sizeof(magic));
