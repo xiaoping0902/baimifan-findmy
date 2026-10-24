@@ -23,7 +23,17 @@
 @property (nonatomic, strong) NSMutableArray<MFProcessInfo *> *shown;
 @property (nonatomic, copy) NSString *filter;
 
+/* [M5.112] 自动挂载：不需要用户去列表里找进程 */
+@property (nonatomic, strong) NSTimer *autoTimer;
+@property (nonatomic, assign) int  autoAttachedPid;   /* 已经连上的 pid，0=未连 */
+@property (nonatomic, assign) BOOL autoBusy;          /* 正在连，别再进 */
+@property (nonatomic, assign) NSInteger lastSignature; /* 列表指纹，用来判断要不要刷 UI */
+
 - (BOOL)isGameCandidate:(MFProcessInfo *)p;
+- (void)autoTick;
+- (void)startAuto;
+- (void)stopAuto;
+- (void)attachToProcess:(MFProcessInfo *)cand;
 
 @end
 
@@ -166,6 +176,135 @@
         }
     }
     [self.tableView reloadData];
+}
+
+#pragma mark - 自动挂载（M5.112）
+
+/*
+ * 用户不需要在列表里找进程。
+ *
+ * 每 2 秒用 sysctl 看一眼游戏还在不在（不碰内核，零风险）：
+ *   · 没找到   → 头部显示「等待游戏启动」，同时把 autoAttachedPid 清零，
+ *                等用户下次开游戏时重新连
+ *   · 找到新的 → 自动跑一次跨进程自检（它自己 kopen/kclose），成功后把 pid
+ *                写进 NSUserDefaults，后续绘制层直接用
+ *   · 同一个   → 什么都不做，避免反复 kopen 把 PUAF 页搞脏
+ *
+ * 列表本身保留，但只当调试/兜底入口。
+ */
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self startAuto];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopAuto];
+}
+
+- (void)startAuto {
+    [self stopAuto];
+    self.autoTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                     target:self
+                                                   selector:@selector(autoTick)
+                                                   userInfo:nil
+                                                    repeats:YES];
+    [self autoTick];
+}
+
+- (void)stopAuto {
+    if (self.autoTimer) {
+        [self.autoTimer invalidate];
+        self.autoTimer = nil;
+    }
+}
+
+- (void)autoTick {
+    if (self.autoBusy) {
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        MFKernel *k = [MFKernel shared];
+        NSString *err = nil;
+        NSArray<MFProcessInfo *> *list =
+            [k enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
+
+        MFProcessInfo *cand = nil;
+        for (MFProcessInfo *p in list) {
+            if ([self isGameCandidate:p]) {
+                cand = p;
+                break;
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            /* 列表变了才刷 UI，避免每 2 秒跳一次 */
+            NSInteger sig = (NSInteger)list.count * 1000003;
+            for (MFProcessInfo *p in list) {
+                sig = (sig * 31 + p.pid) % 1000000007;
+            }
+            if (sig != self.lastSignature) {
+                self.lastSignature = sig;
+                [self.all removeAllObjects];
+                [self.all addObjectsFromArray:list];
+                [self applyFilter];
+            }
+
+            if (cand == nil) {
+                self.autoAttachedPid = 0;      /* 游戏没了：等他再开 */
+                self.headerLabel.text = [NSString stringWithFormat:
+                    @"⏳ 等待游戏启动…（%lu 个进程，每 2 秒自动检测）",
+                    (unsigned long)list.count];
+                return;
+            }
+
+            if (cand.pid == self.autoAttachedPid) {
+                return;                        /* 已连上，不重复开内核 */
+            }
+
+            [self attachToProcess:cand];
+        });
+    });
+}
+
+- (void)attachToProcess:(MFProcessInfo *)cand {
+    self.autoBusy = YES;
+    const int pid = cand.pid;
+    NSString *name = cand.name ?: @"game";
+    self.headerLabel.text = [NSString stringWithFormat:
+        @"🎯 发现 %@ (pid %d)，正在连接…", name, pid];
+    [self.spinner startAnimating];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *report = MFCrossProcRun(pid);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.spinner stopAnimating];
+            self.autoBusy = NO;
+            self.autoAttachedPid = pid;
+
+            [[NSUserDefaults standardUserDefaults] setInteger:pid forKey:@"mf.target.pid"];
+            [[NSUserDefaults standardUserDefaults] setObject:name forKey:@"mf.target.name"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+
+            BOOL ok = [report containsString:@"RESULT OK"];
+            self.headerLabel.text = [NSString stringWithFormat:
+                @"%@ %@ (pid %d) · %@",
+                ok ? @"✅ 已连接" : @"⚠️ 连接失败",
+                name, pid,
+                ok ? @"跨进程读已自证" : @"明细见 /mf-debug/mf-crossproc.txt"];
+
+            if (!ok) {
+                UIAlertController *a = [UIAlertController
+                    alertControllerWithTitle:@"自动连接失败"
+                                     message:report
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+                [self presentViewController:a animated:YES completion:nil];
+            }
+        });
+    });
 }
 
 #pragma mark - 动作
