@@ -1,8 +1,9 @@
 name: Build Unsigned IPA
 
 on:
+  # 任何分支推送都构建：分支太多、又装不了 gh CLI，
+  # 每次都要人去网页点 Run workflow 太慢。main 仍然会被包含。
   push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
