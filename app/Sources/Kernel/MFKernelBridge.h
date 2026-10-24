@@ -161,6 +161,22 @@ int mf_kaddr_snapshot(uint64_t *kernel_proc, uint64_t *kernel_task,
                       uint64_t *gVirtBase, uint64_t *gPhysBase,
                       uint64_t *gPhysSize);
 
+/*
+ * 当前 pmap 的 TTBR 快照（kfd 在 perf_run 里存下来的）。
+ *
+ * 这是【可信】的页表根：它由内核给出，不是我们在堆里猜的字段。
+ * 用它当根去翻译自己的用户地址，读通后再用「值相等」把 pmap 结构里
+ * 对应字段对出来 —— 全程只比较，不拿未知地址去读。
+ *
+ * 返回 0 成功；-1 未打开内核。
+ */
+int mf_ttbr_snapshot(uint64_t *ttbr0_pa, uint64_t *ttbr0_va,
+                     uint64_t *ttbr1_pa, uint64_t *ttbr1_va);
+
+/* 被地址闸拒绝的次数与最近一个被拒地址（用于诊断，不参与逻辑）。 */
+int      mf_kaddr_denied_count(void);
+uint64_t mf_kaddr_denied_last(void);
+
 /* ------------------------------------------------------------------ */
 /* 地址信息                                                            */
 /* ------------------------------------------------------------------ */

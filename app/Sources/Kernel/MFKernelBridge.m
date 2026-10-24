@@ -457,10 +457,72 @@ int mf_is_open(void)
  * 所以这两个入口做兜底：把非 8 倍数的情况显式处理掉，绝不静默。
  */
 
+/*
+ * [M5.105] 内核地址硬闸 —— 放在唯一入口，而不是指望每个调用方自觉。
+ *
+ * arm64 内核地址的判据是「高 16 位全 1」。任何低于 0xffff000000000000 的地址
+ * 一旦送进 kread/kwrite，内核会在 copyio.c:184 的 copy_validate 里直接 panic，
+ * 整机重启。这个坑已经踩了两次：
+ *     panic-full-2026-10-24-200013.ips   copy_validate(0x16b8bcfb8, -1, 8)
+ *     panic-full-2026-10-24-235009.ips   copy_validate(0x16d882c68, -1, 8)
+ * 两次都是 8 字节读、kaddr 是用户地址。
+ *
+ * 所以：非法地址不发 syscall，只记账 + 返回错误。
+ */
+static uint64_t g_mf_denied_kaddr;
+static int      g_mf_denied_count;
+
+static int mf_addr_guard(uint64_t kaddr, uint64_t size, const char *who)
+{
+    if (kaddr < 0xffff000000000000ULL ||
+        size > (1ULL << 28) ||
+        kaddr > 0xffffffffffffffffULL - size) {
+        g_mf_denied_kaddr = kaddr;
+        g_mf_denied_count++;
+        snprintf(g_err, sizeof(g_err),
+                 "%s: refused non-kernel address %#llx (size %llu, denied=%d)",
+                 who, (unsigned long long)kaddr,
+                 (unsigned long long)size, g_mf_denied_count);
+        return -1;
+    }
+    return 0;
+}
+
+int mf_kaddr_denied_count(void)
+{
+    return g_mf_denied_count;
+}
+
+uint64_t mf_kaddr_denied_last(void)
+{
+    return g_mf_denied_kaddr;
+}
+
+/*
+ * 当前 pmap 的 TTBR 快照。kfd 的 perf_run() 会把 TTBR0/TTBR1 的 (pa, va)
+ * 都存进 kfd->perf.ttbr[]，这是内核给的【可信】页表根；用它翻译自己的
+ * 用户地址，才能验证页表遍历本身是对的，而不是拿堆里的随机字段去试。
+ */
+int mf_ttbr_snapshot(uint64_t *ttbr0_pa, uint64_t *ttbr0_va,
+                     uint64_t *ttbr1_pa, uint64_t *ttbr1_va)
+{
+    if (g_kfd == NULL) {
+        return -1;
+    }
+    if (ttbr0_pa) *ttbr0_pa = (uint64_t)g_kfd->perf.ttbr[0].pa;
+    if (ttbr0_va) *ttbr0_va = (uint64_t)g_kfd->perf.ttbr[0].va;
+    if (ttbr1_pa) *ttbr1_pa = (uint64_t)g_kfd->perf.ttbr[1].pa;
+    if (ttbr1_va) *ttbr1_va = (uint64_t)g_kfd->perf.ttbr[1].va;
+    return 0;
+}
+
 int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
 {
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kread: not open");
+        return -1;
+    }
+    if (mf_addr_guard(kaddr, size, "mf_kread") != 0) {
         return -1;
     }
     if (uaddr == NULL) {
@@ -523,6 +585,9 @@ int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
 
 int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
 {
+    if (mf_addr_guard(kaddr, size, "mf_kwrite") != 0) {
+        return -1;
+    }
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kwrite: not open");
         return -1;
@@ -634,6 +699,9 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
  */
 int mf_kread32(uint64_t kaddr, uint32_t *out)
 {
+    if (mf_addr_guard(kaddr, 4, "mf_kread32") != 0) {
+        return -1;
+    }
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kread32: not open");
         return -1;
@@ -666,6 +734,9 @@ int mf_kread32(uint64_t kaddr, uint32_t *out)
 
 int mf_kread64(uint64_t kaddr, uint64_t *out)
 {
+    if (mf_addr_guard(kaddr, 8, "mf_kread64") != 0) {
+        return -1;
+    }
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kread64: not open");
         return -1;
@@ -691,6 +762,9 @@ int mf_kread64(uint64_t kaddr, uint64_t *out)
  */
 int mf_kwrite32(uint64_t kaddr, uint32_t value)
 {
+    if (mf_addr_guard(kaddr, 4, "mf_kwrite32") != 0) {
+        return -1;
+    }
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kwrite32: not open");
         return -1;
@@ -718,6 +792,9 @@ int mf_kwrite32(uint64_t kaddr, uint32_t value)
 
 int mf_kwrite64(uint64_t kaddr, uint64_t value)
 {
+    if (mf_addr_guard(kaddr, 8, "mf_kwrite64") != 0) {
+        return -1;
+    }
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kwrite64: not open");
         return -1;
