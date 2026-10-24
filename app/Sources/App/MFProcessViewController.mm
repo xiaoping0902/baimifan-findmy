@@ -434,50 +434,43 @@
     uint32_t port = [MFKernel acquireTaskPortForPid:p.pid error:(NSString **)&err];
     if (port == MACH_PORT_NULL) {
         /*
-         * ★ [M5.108] task_for_pid 对 App Store 正版（自带反作弊的）游戏必然
+         * ★ [M5.108/109] task_for_pid 对 App Store 正版（自带反作弊的）游戏必然
          *   回 kr=0x5 —— 这条路是 PPL 封死的，不是 entitlement 的问题。
-         *   现在改成：内核已打开时，直接走 KFD 的页表直读去读这个进程，
-         *   并用「它的 Mach-O 头 == 0xfeedfacf」自证读通了。
+         *   这里改成走 KFD 的页表直读，并用「它的 Mach-O 头 == 0xfeedfacf」自证。
+         *
+         *   不要用 [MFKernel shared].isOpen 当门：校准结束时会 mf_kclose()，
+         *   那个属性就是 mf_is_open()，此时必然为 NO。MFCrossProcRun 自己负责
+         *   kopen/kclose，所以直接交给它。
          */
-        if ([MFKernel shared].isOpen) {
-            [[NSUserDefaults standardUserDefaults] setInteger:p.pid forKey:@"mf.target.pid"];
-            [[NSUserDefaults standardUserDefaults] setObject:p.name forKey:@"mf.target.name"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+        [[NSUserDefaults standardUserDefaults] setInteger:p.pid forKey:@"mf.target.pid"];
+        [[NSUserDefaults standardUserDefaults] setObject:p.name forKey:@"mf.target.name"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
 
-            /*
-             * 只弹一个框：先弹「正在验证」再弹「结果」会撞 present，第二个框
-             * 被 UIKit 丢掉，报告就只能从 mf-debug 文件里看。这里后台算完
-             * 一次性显示（同时落盘 /mf-debug/mf-crossproc.txt）。
-             */
-            self.headerLabel.text = [NSString stringWithFormat:
-                                     @"task port 不可用，正在用 KFD 读 %@ (pid %d)…",
-                                     p.name, p.pid];
-            [self.spinner startAnimating];
+        /*
+         * 只弹一个框：先弹「正在验证」再弹「结果」会撞 present，第二个框
+         * 被 UIKit 丢掉，报告就只能从 mf-debug 文件里看。这里后台算完
+         * 一次性显示（同时落盘 /mf-debug/mf-crossproc.txt）。
+         */
+        self.headerLabel.text = [NSString stringWithFormat:
+                                 @"task port 不可用，正在用 KFD 读 %@ (pid %d)…",
+                                 p.name, p.pid];
+        [self.spinner startAnimating];
 
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                NSString *report = MFCrossProcRun(p.pid);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self.spinner stopAnimating];
-                    [self reload];
-                    UIAlertController *a = [UIAlertController
-                        alertControllerWithTitle:@"跨进程直读自检"
-                                         message:report
-                                  preferredStyle:UIAlertControllerStyleAlert];
-                    [a addAction:[UIAlertAction actionWithTitle:@"好"
-                                                          style:UIAlertActionStyleCancel
-                                                        handler:nil]];
-                    [self presentViewController:a animated:YES completion:nil];
-                });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *report = MFCrossProcRun(p.pid);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.spinner stopAnimating];
+                [self reload];
+                UIAlertController *a = [UIAlertController
+                    alertControllerWithTitle:@"跨进程直读自检"
+                                     message:report
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+                [self presentViewController:a animated:YES completion:nil];
             });
-            return;
-        }
-
-        [self alert:@"无法绑定"
-             message:[NSString stringWithFormat:
-                      @"为 %@ (pid %d) 取 task port 失败。\n\n%@\n\n"
-                      @"先确认：「启动内核」页的能力探测里 "
-                      @"task_for_pid(self) 那一行是不是成功。",
-                      p.name, p.pid, err.localizedDescription ?: @"(无错误信息)"]];
+        });
         return;
     }
 
