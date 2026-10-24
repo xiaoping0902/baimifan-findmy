@@ -1526,6 +1526,24 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
     size_t written = 0;
 
     for (uint64_t cur = kaddr; written < size; cur += 4) {
+        /*
+         * [M5.106] 这里以前是裸 kread，绕过了 mf_kread* 的地址闸。
+         * 补丁器在 kopen 阶段扫内核，一旦算错基址就会拿用户地址去读 8 字节，
+         * 内核在 copy_validate 里直接 panic 重启：
+         *     panic-full-2026-10-24-235936  copy_validate(0x16bf0ec68, -1, 8)
+         * 现在越界一律填 0 并返回：patchfinder 会看到 magic 不对而正常失败，
+         * 而不是把整机带走。
+         */
+        if (cur < 0xffff000000000000ULL ||
+            cur > 0xffffffffffffffffULL - sizeof(uint64_t)) {
+            g_mf_denied_kaddr = cur;
+            g_mf_denied_count++;
+            if (written < size) {
+                memset(out + written, 0, size - written);
+            }
+            return;
+        }
+
         /* 读 8 字节（必须），只取低 4 字节用 —— 与上游 early_kread32 等价 */
         uint64_t chunk64 = 0;
         kread((u64)kfd, cur, &chunk64, sizeof(chunk64));
