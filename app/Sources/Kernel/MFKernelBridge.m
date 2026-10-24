@@ -516,6 +516,61 @@ int mf_ttbr_snapshot(uint64_t *ttbr0_pa, uint64_t *ttbr0_va,
     return 0;
 }
 
+/*
+ * [M5.107] ptov_table 快照 + PA→KVA。
+ *
+ * libkfd 的 phystokv()（kfd/libkfd/perf.h:232-248）是唯一权威：
+ *     先按 ptov_table[] 逐段匹配（pa..pa+len），命中就 pa-pa_ent+va_ent；
+ *     全部不命中才断言 pa 落在 [gPhysBase, gPhysBase+gPhysSize) 并用
+ *     gVirtBase 平移。
+ * 只做后半段（我们 M5.106 之前的做法）会让某些物理页落到错误的窗口里：
+ * M5.106 实测 ttbr0 页 pa=0x9aacb8000，正确 VA 是 0xfffffdf1ccd10000，
+ * 而单窗口公式给的是 0xfffffe01bacb8000 —— 两个地址指向不同的映射，
+ * 从这一页读出来的"页表项"自然全是垃圾。
+ */
+int mf_ptov_snapshot(uint64_t *pa, uint64_t *va, uint64_t *len)
+{
+    if (g_kfd == NULL) {
+        return -1;
+    }
+    int count = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t p = (uint64_t)g_kfd->perf.ptov_table[i].pa;
+        uint64_t v = (uint64_t)g_kfd->perf.ptov_table[i].va;
+        uint64_t l = (uint64_t)g_kfd->perf.ptov_table[i].len;
+        if (pa)  pa[i]  = p;
+        if (va)  va[i]  = v;
+        if (len) len[i] = l;
+        if (l != 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint64_t mf_phys_to_kv(uint64_t pa)
+{
+    if (g_kfd == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < 8; i++) {
+        uint64_t p = (uint64_t)g_kfd->perf.ptov_table[i].pa;
+        uint64_t l = (uint64_t)g_kfd->perf.ptov_table[i].len;
+        if (l == 0) {
+            break;
+        }
+        if (pa >= p && pa < p + l) {
+            return pa - p + (uint64_t)g_kfd->perf.ptov_table[i].va;
+        }
+    }
+    uint64_t base = (uint64_t)g_kfd->perf.gPhysBase;
+    uint64_t size = (uint64_t)g_kfd->perf.gPhysSize;
+    if (size != 0 && pa >= base && pa < base + size) {
+        return pa - base + (uint64_t)g_kfd->perf.gVirtBase;
+    }
+    return 0;
+}
+
 int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
 {
     if (g_kfd == NULL) {

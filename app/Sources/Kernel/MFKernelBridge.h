@@ -173,6 +173,29 @@ int mf_kaddr_snapshot(uint64_t *kernel_proc, uint64_t *kernel_task,
 int mf_ttbr_snapshot(uint64_t *ttbr0_pa, uint64_t *ttbr0_va,
                      uint64_t *ttbr1_pa, uint64_t *ttbr1_va);
 
+/*
+ * [M5.107] physmap 不是单一线性窗口 —— ptov_table 快照 + 正确的 PA→KVA。
+ *
+ * 真机证据（M5.106 校准输出）：
+ *      ttbr0 pa = 0x9aacb8000      （页表页的物理地址）
+ *      ttbr0 va = 0xfffffdf1ccd10000（同一个页的内核虚拟地址）
+ *      gVirtBase= 0xfffffe001261c000 / gPhysBase = 0x80261c000
+ * 用 gVirtBase+(pa-gPhysBase) 换算得到 0xfffffe01bacb8000，与 libkfd 记下的
+ * va 完全不是一个地址 —— 说明这一页不在主 physmap 窗口里，而在 ptov_table
+ * 的另一段。libkfd 的 phystokv()（kfd/libkfd/perf.h:232-248）正是先查这张表，
+ * 查不到才退回 gVirtBase/gPhysBase。
+ *
+ * 我们这个函数照抄那个顺序。**所有从页表描述符里取出来的表基址，都必须走它**，
+ * 否则第二级开始就在读另一个窗口，返回的 descriptor 是别的物理页的内容 →
+ * 遍历"看起来在跑"，实际每一步都是垃圾。
+ *
+ * mf_ptov_snapshot: 拷出 8 项 {pa, va, len}，len==0 表示后面没内容了。
+ *                   pa/va/len 任一可为 NULL。返回有效项数；-1 表示内核未打开。
+ * mf_phys_to_kv:    PA → 内核 VA。返回 0 表示这个 PA 不在任何已知窗口内。
+ */
+int      mf_ptov_snapshot(uint64_t *pa, uint64_t *va, uint64_t *len);
+uint64_t mf_phys_to_kv(uint64_t pa);
+
 /* 被地址闸拒绝的次数与最近一个被拒地址（用于诊断，不参与逻辑）。 */
 int      mf_kaddr_denied_count(void);
 uint64_t mf_kaddr_denied_last(void);
