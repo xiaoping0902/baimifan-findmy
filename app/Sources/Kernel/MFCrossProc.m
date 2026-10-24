@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>   /* usleep：physpuppet 重试间隔 */
 
 #define MF_XP_SCAN_START  0x100000000ULL
 #define MF_XP_PAGE        0x4000ULL
@@ -59,19 +60,34 @@ NSString *MFCrossProcRun(int pid)
          * landa + 3072（按 16.6.1 写的），在 16.1 上直接
          * `assertion failed: (false) at krkw.h:412`。
          * 这里显式用真机验证过的 physpuppet + 1024 + sem_open(1/1)。
+         *
+         * ★ [M5.114] physpuppet 本身是概率性的：
+         *     assertion failed: (kret == KERN_SUCCESS) at physpuppet.h:113
+         * 台账里就写着"它失败不重试，重试放调用侧"。所以这里在调用侧重试
+         * 3 次（每次隔 300 ms）—— 实测第二次通常就过。
          */
-        int krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
+        int krc = -1;
+        int attempt = 0;
+        for (attempt = 1; attempt <= 3; attempt++) {
+            krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
                            MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
+            if (krc == 0) {
+                break;
+            }
+            usleep(300 * 1000);
+        }
         if (krc != 0) {
             const char *e = mf_last_error();
             NSString *errStr = (e && e[0]) ? [NSString stringWithUTF8String:e] : @"(no detail)";
-            [log appendFormat:@"FAIL: 内核未打开，自动 kopen(physpuppet/1024) 也失败 (rc=%d)\n  %@\n",
-             krc, errStr ?: @"(undecodable)"];
+            [log appendFormat:
+                @"FAIL: 内核未打开，自动 kopen(physpuppet/1024) 连续 %d 次失败 (rc=%d)\n  %@\n"
+                @"  → 杀掉 App 重开可清掉 PUAF 脏页，再试一次\n",
+             attempt - 1, krc, errStr ?: @"(undecodable)"];
             mfxp_write(log);
             return log;
         }
         ownSession = YES;
-        [log appendString:@"[session] 自己 kopen 了一次（physpuppet/1024，校准已 kclose）\n"];
+        [log appendFormat:@"[session] 自己 kopen 成功（physpuppet/1024，第 %d 次尝试）\n", attempt];
     } else {
         [log appendString:@"[session] 复用已打开的内核\n"];
     }

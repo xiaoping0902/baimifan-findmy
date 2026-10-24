@@ -26,6 +26,8 @@
 /* [M5.112] 自动挂载：不需要用户去列表里找进程 */
 @property (nonatomic, strong) NSTimer *autoTimer;
 @property (nonatomic, assign) int  autoAttachedPid;   /* 已经连上的 pid，0=未连 */
+@property (nonatomic, assign) int  autoTryPid;        /* 正在重试的 pid */
+@property (nonatomic, assign) int  autoTryCount;      /* 该 pid 连续失败次数 */
 @property (nonatomic, assign) BOOL autoBusy;          /* 正在连，别再进 */
 @property (nonatomic, assign) NSInteger lastSignature; /* 列表指纹，用来判断要不要刷 UI */
 
@@ -204,6 +206,10 @@
 
 - (void)startAuto {
     [self stopAuto];
+    /* 立刻给一行可见的状态，别让用户以为页面没反应 */
+    if (self.autoAttachedPid == 0) {
+        self.headerLabel.text = @"🔍 正在检测进程…（每 2 秒自动扫描）";
+    }
     self.autoTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
                                                      target:self
                                                    selector:@selector(autoTick)
@@ -258,8 +264,24 @@
                 return;
             }
 
+            if (cand.pid != self.autoTryPid) {
+                self.autoTryPid = cand.pid;
+                self.autoTryCount = 0;
+            }
+
             if (cand.pid == self.autoAttachedPid) {
                 return;                        /* 已连上，不重复开内核 */
+            }
+
+            /*
+             * physpuppet 是概率性的，失败一次很常见。这里让它每 2 秒自动重试，
+             * 连续 5 次才认输（再多就是 PUAF 页脏了，重试也没用，要杀 App）。
+             */
+            if (self.autoTryCount >= 5) {
+                self.headerLabel.text = [NSString stringWithFormat:
+                    @"❌ %@ (pid %d) 连续 %d 次连接失败\n上滑杀掉 App 重开（清脏页）后再进本页",
+                    cand.name, cand.pid, self.autoTryCount];
+                return;
             }
 
             [self attachToProcess:cand];
@@ -280,22 +302,32 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimating];
             self.autoBusy = NO;
-            self.autoAttachedPid = pid;
-
-            [[NSUserDefaults standardUserDefaults] setInteger:pid forKey:@"mf.target.pid"];
-            [[NSUserDefaults standardUserDefaults] setObject:name forKey:@"mf.target.name"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
 
             BOOL ok = [report containsString:@"RESULT OK"];
+            if (ok) {
+                self.autoAttachedPid = pid;
+                self.autoTryCount = 0;
+                [[NSUserDefaults standardUserDefaults] setInteger:pid forKey:@"mf.target.pid"];
+                [[NSUserDefaults standardUserDefaults] setObject:name forKey:@"mf.target.name"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            } else {
+                /* 不锁死 pid：下一 tick 会自动再试；连错 5 次才认输（见 autoTick） */
+                self.autoAttachedPid = 0;
+                self.autoTryPid = pid;
+                self.autoTryCount += 1;
+            }
+
             self.headerLabel.text = [NSString stringWithFormat:
                 @"%@ %@ (pid %d) · %@",
                 ok ? @"✅ 已连接" : @"⚠️ 连接失败",
                 name, pid,
-                ok ? @"跨进程读已自证" : @"明细见 /mf-debug/mf-crossproc.txt"];
+                ok ? @"跨进程读已自证"
+                   : [NSString stringWithFormat:@"第 %d 次，2 秒后自动重试", self.autoTryCount]];
 
-            if (!ok) {
+            /* 只在第一次失败时弹窗，避免每 2 秒糊一脸 */
+            if (!ok && self.autoTryCount == 1) {
                 UIAlertController *a = [UIAlertController
-                    alertControllerWithTitle:@"自动连接失败"
+                    alertControllerWithTitle:@"自动连接失败（会自动重试）"
                                      message:report
                               preferredStyle:UIAlertControllerStyleAlert];
                 [a addAction:[UIAlertAction actionWithTitle:@"好"
