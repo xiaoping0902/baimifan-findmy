@@ -1021,6 +1021,19 @@ uint64_t mf_get_current_task(void) { return mf_info_field(5); }
 /* proc 链表遍历上限（正常机器几百个进程，512 足够且能防成环） */
 #define MF_PROC_WALK_MAX  1024
 
+/*
+ * ★ [M5.111] p_list 链接字段偏移。
+ *
+ * MFCalibrate 的诊断用 +0x08 走这条链，M5.107 实测 walked=315（正好走到本进程），
+ * kfdmemdump 的 off_p_list_le_prev 也是 0x8（kfd_bridge.c:222）。
+ * 之前这里写成 +0x00，真机上链表只走出 1 个节点。
+ */
+#define MF_OFF_PROC_LIST_PREV 0x08ULL
+
+/* 下面这两个 helper 的定义在 5b 段；这里先声明，供链表遍历使用。 */
+static uint64_t mf_bridge_unsign(uint64_t p);
+static int mf_bridge_is_kaddr(uint64_t a);
+
 /* p_pid 扫描范围：struct proc 开头这一段里它一定在 */
 #define MF_PID_SCAN_START 0x10
 #define MF_PID_SCAN_END   0x400
@@ -1030,10 +1043,17 @@ uint64_t mf_get_current_task(void) { return mf_info_field(5); }
 #define MF_CS_SCAN_END    0x800
 
 /*
- * 沿 p_list.le_next 把进程链表走一遍，把每个 proc 的地址收集出来。
- * LIST_ENTRY(proc) p_list 是 struct proc 的第 0 个字段，le_next 在 +0x00。
+ * 沿 p_list 把进程链表走一遍，把每个 proc 的地址收集出来。
  *
- * 返回实际收集到的数量；链表成环或读到非法值时提前停下（不报错，返回已有结果）。
+ * ★ [M5.111] 链接字段在 +0x08，不是 +0x00。
+ *
+ * 这里原来写的是"le_next 在 +0x00"，结果真机上链表只走了 1 个就停，
+ * 导致 p_pid 自适应扫描失败（要 ≥2 个样本），跨进程读第一步就报
+ * "没能定出 p_pid 偏移（链表中 1 个 proc）"。
+ *
+ * 证据：MFCalibrate 的诊断用 +0x08 走同一条链，M5.107 实测 walked=315
+ * （第 315 个正好是本进程），所以 +0x08 才是这台机器上的有效链接；
+ * kfdmemdump 的 off_p_list_le_prev = 0x8 也是同一个结论（kfd_bridge.c:222）。
  */
 static int mf_collect_proc_chain(uint64_t *out, int max_out)
 {
@@ -1044,13 +1064,17 @@ static int mf_collect_proc_chain(uint64_t *out, int max_out)
 
     int n = 0;
     uint64_t cur = head;
-    for (int i = 0; i < MF_PROC_WALK_MAX && n < max_out; i++) {
+    for (int i = 0; i < 4000 && n < max_out; i++) {
+        if (!mf_bridge_is_kaddr(cur)) {
+            break;
+        }
         out[n++] = cur;
 
         uint64_t next = 0;
-        if (mf_kread64(cur, &next) != 0) {
+        if (mf_kread64(cur + MF_OFF_PROC_LIST_PREV, &next) != 0) {
             break;                       /* 读不到就停，不要把错误值当指针用 */
         }
+        next = mf_bridge_unsign(next);
         if (next == 0 || next == cur) {
             break;                       /* 空链 / 自环 */
         }
@@ -1143,13 +1167,37 @@ uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
         return 0;
     }
 
+    /*
+     * ★ [M5.111] 先用已验证的固定偏移 0x60 走一遍。
+     *
+     * p_pid = 0x60 是 M5.107 真机确认过的（kernel_proc 读出 0），
+     * kfdmemdump 的 off_p_pid 也是 0x60。原来的做法是"先猜偏移再找 pid"，
+     * 一旦链表节点数不足就直接放弃 —— 现在反过来了：先按已知偏移找，
+     * 找不到才退回到自适应扫描。
+     */
+    for (int i = 0; i < count; i++) {
+        uint32_t v = 0;
+        if (mf_kread32(procs[i] + 0x60, &v) != 0) {
+            continue;
+        }
+        if ((int)v == pid) {
+            if (report && report_len) {
+                snprintf(report, report_len,
+                         "找到 pid=%d -> proc=0x%llx (p_pid 偏移=0x60, 链表 %d 个)",
+                         pid, (unsigned long long)procs[i], count);
+            }
+            return procs[i];
+        }
+    }
+
     int launchd_idx = -1;
     uint32_t pid_off = mf_scan_p_pid_offset(procs, count, &launchd_idx);
     if (pid_off == 0) {
         if (report && report_len) {
             snprintf(report, report_len,
-                     "没能定出 p_pid 偏移（扫了 0x%X..0x%X，链表中 %d 个 proc）",
-                     MF_PID_SCAN_START, MF_PID_SCAN_END, count);
+                     "链表中没有 pid=%d，且没能定出 p_pid 偏移"
+                     "(扫了 0x%X..0x%X，链表中 %d 个 proc)",
+                     pid, MF_PID_SCAN_START, MF_PID_SCAN_END, count);
         }
         return 0;
     }
@@ -1307,19 +1355,24 @@ int mf_pid_chain(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_
     ttep_kva = mf_phys_to_kv(ttep);
 
     /*
-     * 自证：任何 pmap 都满足 phystokv(ttep) == tte。
-     * 这一条错了说明中间某一跳读到了别的东西，宁可不读也不继续往下走。
+     * 自证：任何 pmap 都满足 phystokv(ttep) == tte（libkfd 在 kopen 时也是这么断言的）。
+     *
+     * ★ [M5.111] 这一条改成"警告"而不是"否决"：
+     * kfdmemdump 的注释里明确写了 —— 在某些 16.x arm64e 上，靠 tte/ttep 反推
+     * 会得到未映射的指针，所以他们干脆不做这层校验，直接用 kread64(pmap) 当根，
+     * 真正的判据是"能不能读回目标的 Mach-O 头"。我们照这个顺序：
+     * 根必须是内核地址（硬要求），ttep 对不上只记一笔，让后面的 0xfeedfacf 说话。
      */
-    if (root == 0 || !mf_bridge_is_kaddr(root) || ttep_kva != root) {
+    if (root == 0 || !mf_bridge_is_kaddr(root)) {
         rc = -8;
         if (report && report_len) {
             snprintf(report, report_len,
-                     "pmap 自证失败：tte=0x%llx ttep=0x%llx phystokv(ttep)=0x%llx",
-                     (unsigned long long)root, (unsigned long long)ttep,
-                     (unsigned long long)ttep_kva);
+                     "pmap 根表不是内核地址：tte=0x%llx ttep=0x%llx",
+                     (unsigned long long)root, (unsigned long long)ttep);
         }
         goto out;
     }
+    int root_warn = (ttep_kva != root);
 
     if (proc_out) *proc_out = proc;
     if (task_out) *task_out = task;
@@ -1328,10 +1381,11 @@ int mf_pid_chain(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_
     if (root_out) *root_out = root;
     if (report && report_len) {
         snprintf(report, report_len,
-                 "pid=%d proc=0x%llx proc_ro=0x%llx task=0x%llx map=0x%llx pmap=0x%llx root=0x%llx",
+                 "pid=%d proc=0x%llx proc_ro=0x%llx task=0x%llx map=0x%llx pmap=0x%llx root=0x%llx%s",
                  pid, (unsigned long long)proc, (unsigned long long)proc_ro,
                  (unsigned long long)task, (unsigned long long)map,
-                 (unsigned long long)pmap, (unsigned long long)root);
+                 (unsigned long long)pmap, (unsigned long long)root,
+                 root_warn ? " [WARN ttep!=tte]" : "");
     }
     return 0;
 

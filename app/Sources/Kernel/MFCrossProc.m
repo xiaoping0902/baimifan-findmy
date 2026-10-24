@@ -56,8 +56,10 @@ NSString *MFCrossProcRun(int pid)
     if (!mf_is_open()) {
         int krc = mf_kopen_default();
         if (krc != 0) {
-            [log appendFormat:@"FAIL: 内核未打开，自动 kopen 也失败 (rc=%d)\n  %s\n",
-             krc, mf_last_error()];
+            const char *e = mf_last_error();
+            NSString *errStr = (e && e[0]) ? [NSString stringWithUTF8String:e] : @"(no detail)";
+            [log appendFormat:@"FAIL: 内核未打开，自动 kopen 也失败 (rc=%d)\n  %@\n",
+             krc, errStr ?: @"(undecodable)"];
             mfxp_write(log);
             return log;
         }
@@ -71,7 +73,15 @@ NSString *MFCrossProcRun(int pid)
 
     /* ---------- 2) 地址链 ---------- */
     rc = mf_pid_chain(pid, &proc, &task, &map, &pmap, &root, why, sizeof(why));
-    [log appendFormat:@"[chain] pid=%d rc=%d\n  %s\n", pid, rc, why];
+    /*
+     * ★ [M5.111] 这里原来用 %s 直接塞 why —— NSString 的 %s 是按系统编码解释
+     * 的，中文会被二次编码成 "Ê≤°ËÉΩ…"，AFC 拉回来根本没法读。
+     * 必须先转成 NSString 再用 %@。
+     */
+    {
+        NSString *whyStr = (why[0] != '\0') ? [NSString stringWithUTF8String:why] : @"(no detail)";
+        [log appendFormat:@"[chain] pid=%d rc=%d\n  %@\n", pid, rc, whyStr ?: @"(undecodable)"];
+    }
     if (rc != 0) {
         [log appendString:@"\nFAIL: 地址链没走通（见上一行原因）\n"];
         goto done;
