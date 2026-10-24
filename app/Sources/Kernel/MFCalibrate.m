@@ -1,16 +1,22 @@
 //
-//  MFCalibrate.m -- KFD page-table direct read: offset calibration (runs in-app)
+//  MFCalibrate.m -- KFD page-table direct read: offset calibration + self-verification
 //
-//  Hard-earned rules baked into this file:
-//    1. Every kernel read is validated against the kernel VA window first.
-//       (A previous version passed a user address as kaddr -> copy_validate panic.)
-//    2. All 64-bit values are assembled from two 32-bit reads, because the
-//       sem_open primitive only guarantees 4 bytes per read.
-//    3. Structure scans stay inside the object window (0x200 for proc/vm_map).
-//    4. Candidates are only *compared* against known pointers, never dereferenced.
-//    5. The pmap root field is verified by walking to our own Mach-O header and
-//       checking for 0xfeedfacf -- a self-verifying test, not a guess.
-//    6. mf_kclose() always runs, even on failure.
+//  Offsets below come from the kfdmemdump project (kfd_bridge.c / offsets.m),
+//  which implements the same cross-process read on this exact SoC family:
+//
+//      proc --[+0x18]--> proc_ro --[+0x8]--> task
+//      task --[+0x28]--> vm_map --[+0x40]--> pmap
+//      pmap --[+0x00]--> root table VA (TTBR0, 16 KB granule, T0SZ=17)
+//
+//  They are still *verified* here against the values libkfd already knows
+//  (current_proc / current_task / current_map / current_pmap), so a wrong
+//  offset fails loudly instead of silently reading garbage.
+//
+//  Safety rules kept from earlier iterations:
+//    1. every kernel read is checked against the kernel VA window first
+//       (a user address once reached copy_validate -> panic -> reboot)
+//    2. 64-bit values are assembled from two 32-bit reads (sem_open gives 4 bytes)
+//    3. mf_kclose() always runs, even on failure
 //
 #import "MFCalibrate.h"
 #import "MFKernelBridge.h"
@@ -20,37 +26,53 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ---------------- address guards ---------------- */
-
+/* ---------------- kernel address window ---------------- */
 /*
- * Kernel VA window.
- *
  * arm64 内核地址的判据是「高 16 位全 1」，不是固定的 0xfffffe 前缀：
- *   0xfffffe00_xxxxxxxx  kbase / proc / task / vm_map   （内核镜像 + 其 zone）
- *   0xfffffdf0_xxxxxxxx  pmap 等 zone 对象                ← 实测就落在这一段
- * 上一版把下限写成 0xfffffe0000000000，把这个 pmap 误判成"越界"，
- * 校准在第 0 步就放弃了（M5.100 实机日志：cpmap=0xfffffdf0d63d1cb0）。
+ *   0xfffffe00_...  kbase / proc / task / vm_map
+ *   0xfffffdf0_...  pmap 等 zone 对象   ← 先前把下限写成 0xfffffe00 误杀了这个
  */
 #define MF_KADDR_MIN 0xffff000000000000ULL
 #define MF_KADDR_MAX 0xffffffffffffffffULL
 
-
 static inline bool mf_is_kaddr(uint64_t a)
 {
-    return a >= MF_KADDR_MIN && a < MF_KADDR_MAX;
+    return a >= MF_KADDR_MIN && a <= MF_KADDR_MAX;
 }
 
-/* 16 KB page geometry (T8112 / T1SZ_BOOT = 17) */
-#define MF_PG_SHIFT  14ULL
-#define MF_PG_SIZE   (1ULL << MF_PG_SHIFT)
-#define MF_PG_OFF(v) ((uint64_t)(v) & (MF_PG_SIZE - 1ULL))
-#define MF_PA_MASK   0x0000FFFFFFFFC000ULL
-#define MF_L1_IDX(v) (((uint64_t)(v) >> 36) & 0x7FFULL)
-#define MF_L2_IDX(v) (((uint64_t)(v) >> 25) & 0x7FFULL)
-#define MF_L3_IDX(v) (((uint64_t)(v) >> 14) & 0x7FFULL)
-#define MF_DESC_T(d) ((uint64_t)(d) & 0x3ULL)
-#define MF_L1_BLOCK  (1ULL << 36)
-#define MF_L2_BLOCK  (1ULL << 25)
+/* ---------------- struct offsets (verified below) ---------------- */
+#define MF_OFF_PROC_RO      0x18ULL   /* proc     -> proc_ro          */
+#define MF_OFF_PROC_RO_TASK 0x08ULL   /* proc_ro  -> task             */
+#define MF_OFF_TASK_MAP     0x28ULL   /* task     -> vm_map           */
+#define MF_OFF_VM_MAP_PMAP  0x40ULL   /* vm_map   -> pmap             */
+#define MF_OFF_PMAP_TTE     0x00ULL   /* pmap     -> root table VA    */
+
+/* ---------------- 16 KB page geometry (T1SZ=17) ---------------- */
+#define MF_T1SZ        17ULL
+#define MF_PG_SHIFT    14ULL
+#define MF_PG_SIZE     (1ULL << MF_PG_SHIFT)
+#define MF_PG_OFF(v)   ((uint64_t)(v) & (MF_PG_SIZE - 1ULL))
+
+/* Apple XNU pmap macros (same values kfd_bridge.c uses) */
+#define MF_TTE_VALID       0x1ULL
+#define MF_PTE_TYPE_VALID  0x3ULL
+#define MF_TTE_TYPE_MASK   0x2ULL
+#define MF_TTE_TYPE_TABLE  0x2ULL
+#define MF_TTE_TYPE_BLOCK  0x0ULL
+#define MF_PA_MASK         0x0000fffffffff000ULL
+#define MF_PTE_COMPRESSED      0x8000000000000000ULL
+#define MF_PTE_COMPRESSED_ALT  0x4000000000000000ULL
+
+#define MF_L1_OFFMASK  0x0000000fffffffffULL
+#define MF_L1_INDEX    0x00007ff000000000ULL
+#define MF_L2_OFFMASK  0x0000000001ffffffULL
+#define MF_L2_INDEX    0x0000000ffe000000ULL
+#define MF_L3_OFFMASK  0x0000000000003fffULL
+#define MF_L3_INDEX    0x0000000001ffc000ULL
+
+#define MF_L1_SHIFT 36ULL
+#define MF_L2_SHIFT 25ULL
+#define MF_L3_SHIFT 14ULL
 
 typedef struct {
     uint64_t kernel_proc, kernel_task;
@@ -61,8 +83,17 @@ typedef struct {
 
 static mf_kaddr_t g_k;
 
-/* ---------------- safe reads ---------------- */
+/* ---------------- PAC strip ---------------- */
+static uint64_t mf_unsign(uint64_t p)
+{
+    if (p == 0) return 0;
+    uint64_t ptr_mask = (1ULL << (64 - MF_T1SZ)) - 1ULL;
+    uint64_t pac_mask = ~ptr_mask;
+    if (p & (1ULL << 55)) return p | pac_mask;
+    return p & ~pac_mask;
+}
 
+/* ---------------- safe reads ---------------- */
 static bool k32(uint64_t a, uint32_t *out)
 {
     if (!out || !mf_is_kaddr(a)) return false;
@@ -86,6 +117,7 @@ static bool pa_in_range(uint64_t pa, uint64_t len)
     return off < g_k.gPhysSize && len <= g_k.gPhysSize - off;
 }
 
+/* physical -> kernel VA (physmap alias) */
 static bool pa_to_kva(uint64_t pa, uint64_t *kva)
 {
     if (!kva || !pa_in_range(pa, 1)) return false;
@@ -93,62 +125,50 @@ static bool pa_to_kva(uint64_t pa, uint64_t *kva)
     return mf_is_kaddr(*kva);
 }
 
-/* ---------------- page-table walk ---------------- */
-
-static bool read_pte(uint64_t table_pa, uint64_t idx, uint64_t *pte)
+/* ---------------- page-table walk (root table is a kernel VA) ---------------- */
+static bool va_to_pa(uint64_t tt, uint64_t va, uint64_t *pa_out)
 {
-    if (table_pa & (MF_PG_SIZE - 1ULL)) return false;
-    if (idx >= (MF_PG_SIZE / sizeof(uint64_t))) return false;
-    uint64_t pa = table_pa + idx * sizeof(uint64_t);
-    uint64_t kva = 0;
-    if (!pa_to_kva(pa, &kva)) return false;
-    return k64(kva, pte);
-}
-
-/* root is always passed as a PHYSICAL address, so there is no PA/KVA ambiguity */
-static bool va_to_pa(uint64_t root_pa, uint64_t va, uint64_t *pa_out)
-{
-    uint64_t d = 0;
-    if (!pa_out) return false;
+    uint64_t tte = 0;
+    if (!pa_out || !mf_is_kaddr(tt)) return false;
     *pa_out = 0;
 
-    if (!read_pte(root_pa, MF_L1_IDX(va), &d)) return false;
-    switch (MF_DESC_T(d)) {
-        case 0x1:  /* L1 block: 64 GiB */
-            *pa_out = (d & MF_PA_MASK & ~(MF_L1_BLOCK - 1ULL)) + (va & (MF_L1_BLOCK - 1ULL));
-            return pa_in_range(*pa_out, 1);
-        case 0x3:
-            break;
-        default:
-            return false;
+    uint64_t idx = (va & MF_L1_INDEX) >> MF_L1_SHIFT;
+    if (!k64(tt + idx * 8, &tte)) return false;
+    if ((tte & MF_TTE_VALID) != MF_TTE_VALID) return false;
+    if ((tte & MF_TTE_TYPE_MASK) == MF_TTE_TYPE_BLOCK) {
+        *pa_out = ((tte & MF_PA_MASK & ~MF_L1_OFFMASK) | (va & MF_L1_OFFMASK));
+        return pa_in_range(*pa_out, 1);
     }
+    if (!pa_to_kva(tte & MF_PA_MASK, &tt)) return false;
 
-    if (!read_pte(d & MF_PA_MASK, MF_L2_IDX(va), &d)) return false;
-    switch (MF_DESC_T(d)) {
-        case 0x1:  /* L2 block: 32 MiB */
-            *pa_out = (d & MF_PA_MASK & ~(MF_L2_BLOCK - 1ULL)) + (va & (MF_L2_BLOCK - 1ULL));
-            return pa_in_range(*pa_out, 1);
-        case 0x3:
-            break;
-        default:
-            return false;
+    idx = (va & MF_L2_INDEX) >> MF_L2_SHIFT;
+    if (!k64(tt + idx * 8, &tte)) return false;
+    if ((tte & MF_TTE_VALID) != MF_TTE_VALID) return false;
+    if ((tte & MF_TTE_TYPE_MASK) == MF_TTE_TYPE_BLOCK) {
+        *pa_out = ((tte & MF_PA_MASK & ~MF_L2_OFFMASK) | (va & MF_L2_OFFMASK));
+        return pa_in_range(*pa_out, 1);
     }
+    if (!pa_to_kva(tte & MF_PA_MASK, &tt)) return false;
 
-    if (!read_pte(d & MF_PA_MASK, MF_L3_IDX(va), &d)) return false;
-    if (MF_DESC_T(d) != 0x3) return false;   /* L3 must be a page descriptor */
+    idx = (va & MF_L3_INDEX) >> MF_L3_SHIFT;
+    uint64_t pte = 0;
+    if (!k64(tt + idx * 8, &pte)) return false;
+    if ((pte & MF_PTE_TYPE_VALID) != MF_PTE_TYPE_VALID) return false;
+    if ((pte & MF_TTE_TYPE_MASK) != MF_TTE_TYPE_TABLE) return false;
+    if (pte & (MF_PTE_COMPRESSED | MF_PTE_COMPRESSED_ALT)) return false;
 
-    *pa_out = (d & MF_PA_MASK) + MF_PG_OFF(va);
+    *pa_out = ((pte & MF_PA_MASK) | (va & MF_L3_OFFMASK));
     return pa_in_range(*pa_out, 1);
 }
 
-/* walk-based user read; used only for the self-verification step */
-static bool kread_user(uint64_t root_pa, uint64_t uva, void *dst, size_t n)
+/* read user memory through the target pmap's page tables */
+static bool kread_user(uint64_t tt, uint64_t uva, void *dst, size_t n)
 {
     uint8_t *p = (uint8_t *)dst;
     size_t done = 0;
     while (done < n) {
         uint64_t pa = 0;
-        if (!va_to_pa(root_pa, uva + done, &pa)) return false;
+        if (!va_to_pa(tt, uva + done, &pa)) return false;
         uint64_t kva = 0;
         if (!pa_to_kva(pa, &kva)) return false;
         uint32_t v = 0;
@@ -160,61 +180,38 @@ static bool kread_user(uint64_t root_pa, uint64_t uva, void *dst, size_t n)
     return true;
 }
 
-/* ---------------- scan helper ---------------- */
-
-static int scan_u64(uint64_t base, uint64_t size, uint64_t target, uint64_t *hits, int max_hits)
-{
-    int n = 0;
-    for (uint64_t off = 0; off + 8 <= size; off += 8) {
-        uint64_t v = 0;
-        if (!k64(base + off, &v)) break;
-        if (v == target) {
-            if (n < max_hits) hits[n] = off;
-            n++;
-        }
-    }
-    return n;
-}
-
 /* ---------------- main ---------------- */
-
 static NSString *run_locked(NSMutableDictionary *json)
 {
     NSMutableString *log = [NSMutableString string];
 
-    /* 0) snapshot of g_kfd */
     if (mf_kaddr_snapshot(&g_k.kernel_proc, &g_k.kernel_task, &g_k.current_proc,
                           &g_k.current_task, &g_k.current_map, &g_k.current_pmap,
                           &g_k.gVirtBase, &g_k.gPhysBase, &g_k.gPhysSize) != 0) {
-        return @"FAIL: no g_kfd snapshot (kernel not open, or bridge patch missing)";
+        return @"FAIL: no g_kfd snapshot (kernel not open)";
     }
-    [log appendFormat:@"kaddr kproc=%#llx ktask=%#llx\n", (unsigned long long)g_k.kernel_proc, (unsigned long long)g_k.kernel_task];
-    [log appendFormat:@"      cproc=%#llx ctask=%#llx\n", (unsigned long long)g_k.current_proc, (unsigned long long)g_k.current_task];
-    [log appendFormat:@"      cmap=%#llx cpmap=%#llx\n", (unsigned long long)g_k.current_map, (unsigned long long)g_k.current_pmap];
-    [log appendFormat:@"perf  vbase=%#llx pbase=%#llx psize=%#llx\n", (unsigned long long)g_k.gVirtBase, (unsigned long long)g_k.gPhysBase, (unsigned long long)g_k.gPhysSize];
 
-    {
-        struct { const char *name; uint64_t v; } checks[] = {
-            {"kernel_proc",  g_k.kernel_proc},
-            {"kernel_task",  g_k.kernel_task},
-            {"current_proc", g_k.current_proc},
-            {"current_task", g_k.current_task},
-            {"current_map",  g_k.current_map},
-            {"current_pmap", g_k.current_pmap},
-            {"gVirtBase",    g_k.gVirtBase},
-        };
-        for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
-            if (!mf_is_kaddr(checks[i].v)) {
-                [log appendFormat:@"FAIL: %s = %#llx is outside the kernel VA window\n",
-                    checks[i].name, (unsigned long long)checks[i].v];
-                return log;
-            }
+    struct { const char *name; uint64_t v; } checks[] = {
+        {"kernel_proc",  g_k.kernel_proc},
+        {"kernel_task",  g_k.kernel_task},
+        {"current_proc", g_k.current_proc},
+        {"current_task", g_k.current_task},
+        {"current_map",  g_k.current_map},
+        {"current_pmap", g_k.current_pmap},
+        {"gVirtBase",    g_k.gVirtBase},
+    };
+    for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+        [log appendFormat:@"%-12s = %#llx\n", checks[i].name, (unsigned long long)checks[i].v];
+        if (!mf_is_kaddr(checks[i].v)) {
+            [log appendFormat:@"FAIL: %s outside kernel VA window\n", checks[i].name];
+            return log;
         }
     }
+    [log appendFormat:@"phys base=%#llx size=%#llx\n",
+        (unsigned long long)g_k.gPhysBase, (unsigned long long)g_k.gPhysSize];
 
-    /* 1) allproc: p_list.le_next at +0x0, p_pid at +0x60 */
-    uint64_t self_proc = 0;
-    uint64_t cur = g_k.kernel_proc;
+    /* 1) allproc: le_next at +0, p_pid at +0x60 */
+    uint64_t self_proc = 0, cur = g_k.kernel_proc;
     int walked = 0;
     for (int i = 0; i < 4000 && cur; i++) {
         uint32_t pid = 0;
@@ -225,85 +222,85 @@ static NSString *run_locked(NSMutableDictionary *json)
         if (!k64(cur, &next) || next == 0) break;
         cur = next;
     }
-    [log appendFormat:@"allproc walked=%d self_proc=%#llx (current_proc=%#llx)\n",
-        walked, (unsigned long long)self_proc, (unsigned long long)g_k.current_proc];
-    if (!self_proc) return [log stringByAppendingString:@"FAIL: self not found in allproc"];
+    [log appendFormat:@"allproc walked=%d self_proc=%#llx\n",
+        walked, (unsigned long long)self_proc];
+    if (!self_proc) return [log stringByAppendingString:@"FAIL: self not in allproc"];
+
+    /* 2) proc -> proc_ro -> task, verified against current_task */
+    uint64_t proc_ro = 0, task = 0;
+    if (!k64(self_proc + MF_OFF_PROC_RO, &proc_ro)) {
+        return [log stringByAppendingString:@"FAIL: read proc_ro"];
+    }
+    uint64_t task_raw = 0;
+    if (!k64(mf_unsign(proc_ro) + MF_OFF_PROC_RO_TASK, &task_raw)) {
+        return [log stringByAppendingString:@"FAIL: read pr_task"];
+    }
+    task = mf_unsign(task_raw);
+    bool task_ok = (task == g_k.current_task);
+    [log appendFormat:@"proc_ro=%#llx task=%#llx %s\n",
+        (unsigned long long)proc_ro, (unsigned long long)task,
+        task_ok ? "OK == current_task" : "MISMATCH"];
+    if (!task_ok) return [log stringByAppendingString:@"FAIL: proc_ro/pr_task offsets wrong"];
+
+    /* 3) task -> vm_map, verify */
+    uint64_t map = 0;
+    if (!k64(task + MF_OFF_TASK_MAP, &map)) {
+        return [log stringByAppendingString:@"FAIL: read task->map"];
+    }
+    map = mf_unsign(map);
+    bool map_ok = (map == g_k.current_map);
+    [log appendFormat:@"map=%#llx %s\n", (unsigned long long)map,
+        map_ok ? "OK == current_map" : "MISMATCH"];
+    if (!map_ok) return [log stringByAppendingString:@"FAIL: task->map offset wrong"];
+
+    /* 4) vm_map -> pmap -> root table */
+    uint64_t pmap_raw = 0;
+    if (!k64(map + MF_OFF_VM_MAP_PMAP, &pmap_raw)) {
+        return [log stringByAppendingString:@"FAIL: read vm_map->pmap"];
+    }
+    uint64_t pmap = mf_unsign(pmap_raw);
+    bool pmap_ok = (pmap == mf_unsign(g_k.current_pmap));
+    [log appendFormat:@"pmap raw=%#llx unsign=%#llx %s\n",
+        (unsigned long long)pmap_raw, (unsigned long long)pmap,
+        pmap_ok ? "OK == current_pmap" : "MISMATCH"];
+
+    uint64_t tt = 0;
+    if (!k64(pmap + MF_OFF_PMAP_TTE, &tt)) {
+        return [log stringByAppendingString:@"FAIL: read pmap->tte"];
+    }
+    tt = mf_unsign(tt);
+    [log appendFormat:@"root table tt=%#llx%s\n", (unsigned long long)tt,
+        mf_is_kaddr(tt) ? "" : "  (NOT a kernel pointer)"];
+    if (!mf_is_kaddr(tt)) return [log stringByAppendingString:@"FAIL: pmap->tte not a kernel VA"];
+
+    /* 5) end-to-end self test: walk to our own Mach-O header */
+    const uint64_t self_macho = (uint64_t)(uintptr_t)_dyld_get_image_header(0);
+    uint32_t magic = 0;
+    bool ok = kread_user(tt, self_macho, &magic, sizeof(magic));
+    [log appendFormat:@"self Mach-O @ %#llx -> %s %#x\n",
+        (unsigned long long)self_macho,
+        ok ? "read" : "FAILED",
+        ok ? magic : 0];
+    if (!ok || magic != 0xfeedfacfU) {
+        return [log stringByAppendingString:@"FAIL: page-table walk self-test did not return 0xfeedfacf"];
+    }
 
     json[@"self_proc"] = @(self_proc);
-    json[@"proc_walk_count"] = @(walked);
-
-    /* 2) proc->task: unique field in the first 0x200 bytes equal to current_task */
-    uint64_t hits[16] = {0};
-    int n = scan_u64(self_proc, 0x200, g_k.current_task, hits, 16);
-    [log appendString:@"proc->task candidates:"];
-    for (int i = 0; i < n && i < 16; i++) [log appendFormat:@" %#llx", (unsigned long long)hits[i]];
-    [log appendFormat:@"  (count=%d)\n", n];
-    if (n <= 0) return [log stringByAppendingString:@"FAIL: proc->task not found"];
-
-    uint64_t proc_task_off = hits[0];
-
-    /* 3) verify task->map == current_map */
-    uint64_t mapv = 0;
-    bool map_ok = k64(g_k.current_task + 0x28, &mapv) && (mapv == g_k.current_map);
-    [log appendFormat:@"task+0x28 -> %#llx  %s\n", (unsigned long long)mapv, map_ok ? "OK == current_map" : "MISMATCH"];
-    if (!map_ok) return [log stringByAppendingString:@"FAIL: task->map offset 0x28 wrong"];
-
-    /* 4) vm_map->pmap */
-    n = scan_u64(g_k.current_map, 0x200, g_k.current_pmap, hits, 16);
-    [log appendString:@"vm_map->pmap candidates:"];
-    for (int i = 0; i < n && i < 16; i++) [log appendFormat:@" %#llx", (unsigned long long)hits[i]];
-    [log appendFormat:@"  (count=%d)\n", n];
-    if (n <= 0) return [log stringByAppendingString:@"FAIL: vm_map->pmap not found"];
-    uint64_t vm_map_pmap_off = hits[0];
-
-    /* 5) pmap root field: self-verify against our own Mach-O header */
-    const uint64_t self_macho = (uint64_t)(uintptr_t)_dyld_get_image_header(0);
-    [log appendFormat:@"self Mach-O @ %#llx (expect 0xfeedfacf)\n", (unsigned long long)self_macho];
-
-    uint64_t root_off = 0, root_pa = 0;
-    const char *semantics = "";
-    for (uint64_t off = 0; off + 8 <= 0x400 && !root_pa; off += 8) {
-        uint64_t cand = 0;
-        if (!k64(g_k.current_pmap + off, &cand) || cand == 0) continue;
-
-        uint64_t cand_pa[2] = { cand, 0 };
-        if (mf_is_kaddr(cand) && cand >= g_k.gVirtBase) {
-            cand_pa[1] = cand - g_k.gVirtBase + g_k.gPhysBase;
-        }
-
-        for (int k = 0; k < 2; k++) {
-            uint64_t pa = cand_pa[k];
-            if (pa == 0 || (pa & (MF_PG_SIZE - 1ULL)) != 0) continue;
-            if (!pa_in_range(pa, MF_PG_SIZE)) continue;
-
-            uint32_t magic = 0;
-            if (!kread_user(pa, self_macho, &magic, sizeof(magic))) continue;
-            if (magic == 0xfeedfacfU) {
-                root_off = off;
-                root_pa = pa;
-                semantics = (k == 0) ? "PA" : "physmap KVA";
-                [log appendFormat:@"pmap root field: pmap+%#llx = %#llx (%s)\n",
-                    (unsigned long long)off, (unsigned long long)cand, semantics];
-                break;
-            }
-        }
-    }
-    if (!root_pa) return [log stringByAppendingString:@"FAIL: no pmap root field passed the self-verification"];
-
-    /* 6) results */
-    json[@"proc_task_off"] = @(proc_task_off);
-    json[@"task_map_off"] = @((uint64_t)0x28);
-    json[@"vm_map_pmap_off"] = @(vm_map_pmap_off);
-    json[@"pmap_root_off"] = @(root_off);
-    json[@"pmap_root_pa"] = @(root_pa);
+    json[@"proc_ro"] = @(proc_ro);
+    json[@"task"] = @(task);
+    json[@"vm_map"] = @(map);
+    json[@"pmap"] = @(pmap);
+    json[@"pmap_tte"] = @(tt);
     json[@"self_macho"] = @(self_macho);
-    json[@"self_check"] = @"0xfeedfacf";
+    json[@"ok"] = @YES;
 
-    [log appendFormat:@"\nRESULT\n  proc->task      = %#llx\n  task->map       = %#llx\n"
-                       "  vm_map->pmap    = %#llx\n  pmap root field = %#llx\n  root PA         = %#llx\n",
-        (unsigned long long)proc_task_off, (unsigned long long)0x28,
-        (unsigned long long)vm_map_pmap_off, (unsigned long long)root_off,
-        (unsigned long long)root_pa];
+    [log appendString:@"\nRESULT OK\n"
+                       "  proc->proc_ro   = 0x18\n"
+                       "  proc_ro->task   = 0x08\n"
+                       "  task->map       = 0x28\n"
+                       "  vm_map->pmap    = 0x40\n"
+                       "  pmap->tte       = 0x00\n"
+                       "  page-table walk verified (0xfeedfacf)\n"];
     return log;
 }
 
@@ -319,7 +316,6 @@ NSString *MFCalibrateRun(NSString *jsonPath)
     @try {
         report = run_locked(json);
     } @finally {
-        /* Always release: dangling PUAF pages panic the kernel when the process exits */
         mf_kclose();
         json[@"closed"] = @(!mf_is_open());
     }
