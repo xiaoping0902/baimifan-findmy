@@ -13,9 +13,27 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/*
+ * 必须写 extern "C"：
+ *   调用方 MFProcessViewController.mm 是 Objective-C++（.mm），会把函数名按
+ *   C++ 规则 mangle；实现 MFCalibrate.m 是纯 ObjC，导出的是 C 符号
+ *   _MFCalibrateRun。不加这层，链接期报：
+ *     "MFCalibrateRun(NSString*)", referenced from: …
+ *     NOTE: found '_MFCalibrateRun' in MFCalibrate.o,
+ *           declaration possibly missing 'extern "C"'
+ *   这是构建 #ipa-99 实际踩过的。
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// 跑一次校准：反推 proc->task、vm_map->pmap、pmap 根页表字段
 /// @param jsonPath 结果落盘路径（传 nil 则不写文件）
 /// @return 人类可读报告；失败时也返回报告（里面写明卡在哪一步）
 NSString *MFCalibrateRun(NSString *_Nullable jsonPath);
+
+#ifdef __cplusplus
+}
+#endif
 
 NS_ASSUME_NONNULL_END
