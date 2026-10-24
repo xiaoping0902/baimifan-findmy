@@ -23,6 +23,8 @@
 @property (nonatomic, strong) NSMutableArray<MFProcessInfo *> *shown;
 @property (nonatomic, copy) NSString *filter;
 
+- (BOOL)isGameCandidate:(MFProcessInfo *)p;
+
 @end
 
 @implementation MFProcessViewController
@@ -102,13 +104,51 @@
             [self.all removeAllObjects];
             [self.all addObjectsFromArray:list];
             [self applyFilter];
+
+            /*
+             * [M5.110] 把整张进程表落盘。
+             *
+             * 起因：用户报"列表里没有绿色高亮的那一行"，但远在电脑这端看不到
+             * 列表长什么样，也没法区分「游戏被系统杀了」和「高亮判据不匹配」。
+             * 现在每次枚举都写一份，AFC 直接拉，一眼就知道是哪一种。
+             */
+            {
+                NSString *dir = @"/var/mobile/Media/mf-debug";
+                [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                          withIntermediateDirectories:YES
+                                                           attributes:nil
+                                                                error:NULL];
+                NSMutableString *dump = [NSMutableString string];
+                [dump appendFormat:@"# procs=%lu enumRoute=%d\n",
+                 (unsigned long)list.count, (int)route];
+                for (MFProcessInfo *p in list) {
+                    [dump appendFormat:@"%d\t%@\t%@\n", p.pid,
+                     p.name ?: @"", p.path ?: @""];
+                }
+                [dump writeToFile:[dir stringByAppendingPathComponent:@"proclist.txt"]
+                        atomically:YES
+                          encoding:NSUTF8StringEncoding
+                             error:NULL];
+            }
+
+            MFProcessInfo *cand = nil;
+            for (MFProcessInfo *p in list) {
+                if ([self isGameCandidate:p]) {
+                    cand = p;
+                    break;
+                }
+            }
+
             NSString *routeName = route == MFEnumRoutePrivileged ? @"路A host_priv"
                                : (route == MFEnumRouteDefault ? @"路B 免特权" : @"未知");
-            self.headerLabel.text = list.count
+            NSString *base = list.count
                 ? [NSString stringWithFormat:@"✓ %lu 个进程 · 枚举路由：%@\n内核：%@",
                    (unsigned long)list.count, routeName, k.statusText]
                 : [NSString stringWithFormat:@"× 枚举失败（%@）\n内核：%@",
                    err ?: @"未知", k.statusText];
+            self.headerLabel.text = cand
+                ? [base stringByAppendingFormat:@"\n🎯 目标候选：%@ (pid %d)", cand.name, cand.pid]
+                : [base stringByAppendingString:@"\n（列表里没有 dfm/tmgp 类进程）"];
         });
     });
 }
@@ -410,8 +450,7 @@
     if ([MFGameReader shared].targetTaskPort == p.taskPort && p.taskPort != 0) {
         c.accessoryType = UITableViewCellAccessoryCheckmark;
         c.textLabel.textColor = [UIColor systemBlueColor];
-    } else if ([p.name hasPrefix:@"ShadowTracker"] || [p.path containsString:@"DeltaForce"] ||
-        [p.path containsString:@"dfm"] || [p.path containsString:@"pubgm"]) {
+    } else if ([self isGameCandidate:p]) {
         c.accessoryType = UITableViewCellAccessoryNone;
         c.textLabel.textColor = [UIColor systemGreenColor];   // 防封目标游戏
     } else {
@@ -419,6 +458,26 @@
         c.textLabel.textColor = [UIColor labelColor];
     }
     return c;
+}
+
+/*
+ * [M5.110] 判定"这是不是那个游戏"。
+ *
+ * 原来的判据只看 path（containsString:@"dfm"），而 iOS 上 KERN_PROCARGS 常常
+ * 拿不到完整路径（path 为空），于是绿色高亮永远不出现 —— 这不是"游戏没跑"，
+ * 是判据本身漏了 name。名字（p_comm，16 字节）里就有 dfm，必须一起看。
+ */
+- (BOOL)isGameCandidate:(MFProcessInfo *)p {
+    NSString *blob = [NSString stringWithFormat:@"%@ %@",
+                      p.name ?: @"", p.path ?: @""].lowercaseString;
+    if (blob.length == 0) return NO;
+    if ([blob containsString:@"dfm"])     return YES;   // 三角洲 action: com.tencent.tmgp.dfm
+    if ([blob containsString:@"tmgp"])    return YES;
+    if ([blob containsString:@"delta"])   return YES;
+    if ([blob containsString:@"shadow"])  return YES;   // 和平精英/暗区类
+    if ([blob containsString:@"pubgm"])   return YES;
+    if ([blob containsString:@"三角洲"])   return YES;
+    return NO;
 }
 
 /// 点进程 = 绑定为读取目标（按需取 task port → 写进读取后端 → 开门条件）
