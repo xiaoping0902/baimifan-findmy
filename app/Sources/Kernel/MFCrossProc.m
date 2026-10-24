@@ -54,17 +54,24 @@ NSString *MFCrossProcRun(int pid)
 
     /* ---------- 1) 会话 ---------- */
     if (!mf_is_open()) {
-        int krc = mf_kopen_default();
+        /*
+         * ★ [M5.113] 不能再用 mf_kopen_default()：它的默认值是
+         * landa + 3072（按 16.6.1 写的），在 16.1 上直接
+         * `assertion failed: (false) at krkw.h:412`。
+         * 这里显式用真机验证过的 physpuppet + 1024 + sem_open(1/1)。
+         */
+        int krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
+                           MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
         if (krc != 0) {
             const char *e = mf_last_error();
             NSString *errStr = (e && e[0]) ? [NSString stringWithUTF8String:e] : @"(no detail)";
-            [log appendFormat:@"FAIL: 内核未打开，自动 kopen 也失败 (rc=%d)\n  %@\n",
+            [log appendFormat:@"FAIL: 内核未打开，自动 kopen(physpuppet/1024) 也失败 (rc=%d)\n  %@\n",
              krc, errStr ?: @"(undecodable)"];
             mfxp_write(log);
             return log;
         }
         ownSession = YES;
-        [log appendString:@"[session] 自己 kopen 了一次（校准已 kclose）\n"];
+        [log appendString:@"[session] 自己 kopen 了一次（physpuppet/1024，校准已 kclose）\n"];
     } else {
         [log appendString:@"[session] 复用已打开的内核\n"];
     }

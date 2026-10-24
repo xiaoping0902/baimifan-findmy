@@ -48,18 +48,22 @@ extern "C" {
 #define MF_KWRITE_SEM_OPEN             1
 
 /*
- * 目标机默认参数：
- *   landa + kread_sem_open + kwrite_sem_open，3072 页
+ * 目标机默认参数。
  *
- * 依据：
- *   · physpuppet 修复于 iOS 16.4、smith 修复于 iOS 16.5.1
- *     → 16.6.1 上只剩 landa（CVE-2023-41974，修复于 17.0）
- *   · kread_sem_open 必须与 kwrite_sem_open 成对（krkw.h 里有 assert 拦截）
- *   · 3072 页来自 Dopamine：它对 ≥5GB 设备的原话是
- *     "remarkably more reliable with 3072"
+ * ★ [M5.113] 改回 physpuppet + 1024。
+ *
+ * 这里原来按"iPad Pro M2 / 16.6.1"写的 landa + 3072，但真机是
+ * iPad14,4 / **iPadOS 16.1 (20B82)** —— 在 16.1 上：
+ *     landa + 3072   → 卡在 grab_free_pages（历史最好 0/256，12 分钟不返回）
+ *     physpuppet + 1024 → 235~261 ms 成功（M5.95 起三种版本反复验证）
+ * M5.112 的自动挂载走的就是 mf_kopen_default()，于是第一次自动连接直接
+ * 报 `assertion failed: (false) at krkw.h:412`。
+ *
+ * 依据：physpuppet = CVE-2023-23536，iOS 16.4 才修复 → 16.1 在范围内。
+ * kread/kwrite 仍必须是 sem_open（成对，krkw.h 里有 assert 拦）。
  */
-#define MF_DEFAULT_PUAF_PAGES          3072
-#define MF_DEFAULT_PUAF_METHOD         MF_PUAF_LANDA
+#define MF_DEFAULT_PUAF_PAGES          1024
+#define MF_DEFAULT_PUAF_METHOD         MF_PUAF_PHYSPUPPET
 #define MF_DEFAULT_KREAD_METHOD        MF_KREAD_SEM_OPEN
 #define MF_DEFAULT_KWRITE_METHOD       MF_KWRITE_SEM_OPEN
 
