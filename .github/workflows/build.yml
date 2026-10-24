@@ -10,6 +10,12 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 45
+    # 需要写权限：构建完成后把 IPA 附到 Release 上，
+    # 这样下载链接是【匿名可用】的（artifact 下载必须要 token，
+    # 而我们这台 Windows 机器没有 gh、API 额度也常被共享 IP 用光）。
+    permissions:
+      contents: write
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -192,3 +198,17 @@ jobs:
           name: FindMy-unsigned-ipa
           path: app/out/FindMy-unsigned.ipa
           if-no-files-found: error
+
+      # 把 IPA 挂到公开 Release：下载 URL 不需要任何 token，
+      # 方便本机（Windows、无 gh CLI）直接 curl 下来装。
+      - name: Publish IPA to public release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ipa-${{ github.run_number }}
+          name: IPA build #${{ github.run_number }} (${{ github.sha }})
+          body: |
+            自动构建产物（未签名，用 Sideloadly / TrollStore 安装）。
+            commit: ${{ github.sha }}
+            branch: ${{ github.ref_name }}
+          files: app/out/FindMy-unsigned.ipa
+          fail_on_unmatched_files: true
