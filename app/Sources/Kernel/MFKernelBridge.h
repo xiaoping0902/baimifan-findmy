@@ -145,6 +145,22 @@ int      mf_kread64(uint64_t kaddr, uint64_t *out);
 int      mf_kwrite32(uint64_t kaddr, uint32_t value);
 int      mf_kwrite64(uint64_t kaddr, uint64_t value);
 
+/*
+ * 内核关键地址快照（给 MFCalibrate 用）。
+ *
+ * 为什么要有这个：校准需要 kernel_proc / current_task / current_map / current_pmap
+ * 这些只在 struct kfd 里存在的地址。以前是从外部脚本扫内存找 struct kfd 句柄，
+ * 结果把用户地址当成 kaddr 送进内核 → copy_validate panic。
+ * 现在由桥接层在自己模块里直接取，外部拿不到错的东西。
+ *
+ * 任一指针传 NULL 表示不关心。返回 0 成功，-1 表示内核未打开。
+ */
+int mf_kaddr_snapshot(uint64_t *kernel_proc, uint64_t *kernel_task,
+                      uint64_t *current_proc, uint64_t *current_task,
+                      uint64_t *current_map, uint64_t *current_pmap,
+                      uint64_t *gVirtBase, uint64_t *gPhysBase,
+                      uint64_t *gPhysSize);
+
 /* ------------------------------------------------------------------ */
 /* 地址信息                                                            */
 /* ------------------------------------------------------------------ */

@@ -751,6 +751,34 @@ uint64_t mf_get_kbase(void)
     return ARM64_LINK_ADDR + (uint64_t)g_kfd->perf.kernel_slide;
 }
 
+/*
+ * 内核关键地址快照 —— 给 MFCalibrate 用。
+ *
+ * 只做「哪个字段」，不做任何推断；地址语义（是 proc/task/map/pmap）
+ * 由 libkfd 的 info_run() 在打开内核时填好，这里原样交出。
+ * 外部（校准代码）会先校验每个地址落在内核 VA 域再使用。
+ */
+int mf_kaddr_snapshot(uint64_t *kernel_proc, uint64_t *kernel_task,
+                      uint64_t *current_proc, uint64_t *current_task,
+                      uint64_t *current_map, uint64_t *current_pmap,
+                      uint64_t *gVirtBase, uint64_t *gPhysBase,
+                      uint64_t *gPhysSize)
+{
+    if (g_kfd == NULL) {
+        return -1;
+    }
+    if (kernel_proc)  *kernel_proc  = (uint64_t)g_kfd->info.kaddr.kernel_proc;
+    if (kernel_task)  *kernel_task  = (uint64_t)g_kfd->info.kaddr.kernel_task;
+    if (current_proc) *current_proc = (uint64_t)g_kfd->info.kaddr.current_proc;
+    if (current_task) *current_task = (uint64_t)g_kfd->info.kaddr.current_task;
+    if (current_map)  *current_map  = (uint64_t)g_kfd->info.kaddr.current_map;
+    if (current_pmap) *current_pmap = (uint64_t)g_kfd->info.kaddr.current_pmap;
+    if (gVirtBase)    *gVirtBase    = (uint64_t)g_kfd->perf.gVirtBase;
+    if (gPhysBase)    *gPhysBase    = (uint64_t)g_kfd->perf.gPhysBase;
+    if (gPhysSize)    *gPhysSize    = (uint64_t)g_kfd->perf.gPhysSize;
+    return 0;
+}
+
 uint64_t mf_get_kslide(void)
 {
     if (g_kfd == NULL) {

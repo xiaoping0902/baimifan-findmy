@@ -5,6 +5,7 @@
 //
 #import "MFProcessViewController.h"
 #import "../Kernel/MFKernel.h"
+#import "../Kernel/MFCalibrate.h"
 #import "../Game/MFGameReader.h"
 #import "../Read/MFReadBackend.h"
 #import "../Game/Offsets.h"
@@ -245,8 +246,22 @@
      *
      * 想手动改参数的话在「环境检测」下面的调试入口里，普通流程不需要。
      */
-    NSInteger pm = 2;                                        // landa
-    uint64_t pages = [MFKernel recommendedPuafPages];        // 3072（6GB 设备）
+    /*
+     * ★ [M5.95 · 2026-10-24] 参数改了：landa/3072 → physpuppet/1024
+     *
+     * 真机实测（iPad14,4 / iPadOS 16.1 / Darwin 22.1.0 / T8112）：
+     *     landa + 3072 + sem_open  → kopen 卡在内部循环，12 分钟不返回
+     *     physpuppet + 1024 + sem_open → 235~261 ms 成功，连续三次
+     *
+     * 另外 libkfd.h 里的重试只对 landa 生效：
+     *     if (fail && (puaf_method == puaf_landa)) { …重试… }
+     * physpuppet 失败不重试，所以调用侧要允许用户再点一次。
+     *
+     * physpuppet 对应 CVE-2023-23536，iOS 16.4 才修复 → 16.1 在范围内。
+     * kread/kwrite 仍必须是 sem_open（16.3+ kqueue 被 krkw.h assert 拦）。
+     */
+    NSInteger pm = 0;                                        // 0 = physpuppet
+    uint64_t pages = 1024;                                   // physpuppet 不需要 3072
     [[NSUserDefaults standardUserDefaults] setInteger:pm forKey:@"mf.kfd.puafMethod"];
     [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)pages forKey:@"mf.kfd.puafPages"];
 
@@ -264,7 +279,20 @@
         [self reload];
 
         if (ok) {
-            [self alert:@"启动成功" message:message];
+            /*
+             * ★ [M5.95] 启动成功后【立即自动校准】。
+             *
+             * 校准内容：反推 proc->task / vm_map->pmap / pmap 根页表字段，
+             * 并用「读自己 Mach-O 头 == 0xfeedfacf」做自验证。
+             * 结果写 mf-calibration.json，同时弹窗显示。
+             *
+             * 为什么放在 App 里而不是外部脚本：只有这里能直接拿到 g_kfd，
+             * 外部去扫内存找句柄曾把用户地址当成内核地址 → copy_validate panic。
+             *
+             * 注意 MFCalibrateRun 结束时会 mf_kclose()：校准是一次性诊断，
+             * 关掉才不会留下悬空页（悬空页不释放，进程退出就是 panic）。
+             */
+            [self runCalibrationAfterKernel:message];
             return;
         }
 
@@ -284,6 +312,37 @@
         }]];
         [self presentViewController:f animated:YES completion:nil];
     }];
+}
+
+/// 内核起来后自动跑一次偏移校准（proc->task / vm_map->pmap / pmap 根页表）
+- (void)runCalibrationAfterKernel:(NSString *)kernelMessage {
+    self.headerLabel.text = @"内核已起，正在校准偏移…";
+    [self.spinner startAnimating];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mf-calibration.json"];
+        NSString *report = MFCalibrateRun(path);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.spinner stopAnimating];
+            [self reload];
+
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"校准结果"
+                                 message:[NSString stringWithFormat:@"%@\n\n%@",
+                                          kernelMessage, report]
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"复制全文"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+                [UIPasteboard generalPasteboard].string = report;
+            }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 /// 内核日志查看器：kfd 用 printf 输出的 9 个偏移查找过程
