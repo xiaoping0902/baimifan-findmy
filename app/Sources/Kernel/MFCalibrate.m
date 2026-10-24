@@ -22,8 +22,18 @@
 
 /* ---------------- address guards ---------------- */
 
-#define MF_KADDR_MIN 0xfffffe0000000000ULL
-#define MF_KADDR_MAX 0xfffffff000000000ULL
+/*
+ * Kernel VA window.
+ *
+ * arm64 内核地址的判据是「高 16 位全 1」，不是固定的 0xfffffe 前缀：
+ *   0xfffffe00_xxxxxxxx  kbase / proc / task / vm_map   （内核镜像 + 其 zone）
+ *   0xfffffdf0_xxxxxxxx  pmap 等 zone 对象                ← 实测就落在这一段
+ * 上一版把下限写成 0xfffffe0000000000，把这个 pmap 误判成"越界"，
+ * 校准在第 0 步就放弃了（M5.100 实机日志：cpmap=0xfffffdf0d63d1cb0）。
+ */
+#define MF_KADDR_MIN 0xffff000000000000ULL
+#define MF_KADDR_MAX 0xffffffffffffffffULL
+
 
 static inline bool mf_is_kaddr(uint64_t a)
 {
@@ -183,11 +193,23 @@ static NSString *run_locked(NSMutableDictionary *json)
     [log appendFormat:@"      cmap=%#llx cpmap=%#llx\n", (unsigned long long)g_k.current_map, (unsigned long long)g_k.current_pmap];
     [log appendFormat:@"perf  vbase=%#llx pbase=%#llx psize=%#llx\n", (unsigned long long)g_k.gVirtBase, (unsigned long long)g_k.gPhysBase, (unsigned long long)g_k.gPhysSize];
 
-    if (!mf_is_kaddr(g_k.kernel_proc) || !mf_is_kaddr(g_k.kernel_task) ||
-        !mf_is_kaddr(g_k.current_proc) || !mf_is_kaddr(g_k.current_task) ||
-        !mf_is_kaddr(g_k.current_map) || !mf_is_kaddr(g_k.current_pmap) ||
-        !mf_is_kaddr(g_k.gVirtBase)) {
-        return [log stringByAppendingString:@"FAIL: some address is outside the kernel VA window (refusing to continue)"];
+    {
+        struct { const char *name; uint64_t v; } checks[] = {
+            {"kernel_proc",  g_k.kernel_proc},
+            {"kernel_task",  g_k.kernel_task},
+            {"current_proc", g_k.current_proc},
+            {"current_task", g_k.current_task},
+            {"current_map",  g_k.current_map},
+            {"current_pmap", g_k.current_pmap},
+            {"gVirtBase",    g_k.gVirtBase},
+        };
+        for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+            if (!mf_is_kaddr(checks[i].v)) {
+                [log appendFormat:@"FAIL: %s = %#llx is outside the kernel VA window\n",
+                    checks[i].name, (unsigned long long)checks[i].v];
+                return log;
+            }
+        }
     }
 
     /* 1) allproc: p_list.le_next at +0x0, p_pid at +0x60 */
