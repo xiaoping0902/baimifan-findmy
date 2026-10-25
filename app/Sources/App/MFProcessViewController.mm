@@ -8,6 +8,7 @@
 #import "../Kernel/MFCalibrate.h"
 #import "../Kernel/MFCrossProc.h"
 #import "../Game/MFGameReader.h"
+#import "../Game/MFUEReader.h"
 #import "../Read/MFReadBackend.h"
 #import "../Game/Offsets.h"
 #import <mach/mach.h>
@@ -254,6 +255,19 @@
     if (self.autoBusy) {
         return;
     }
+    /*
+     * ★ [M5.119] 没点内核就什么都不做。
+     *
+     * 用户的原话：「没有启动内核不就会找？只能内核启动了才会找这个进程」。
+     * 完全正确 —— 之前是自动 kopen，导致"没点内核它也在动"，失败还会
+     * 反复开内核、养脏 PUAF 页。现在把内核当成硬前置：没有会话连扫都不扫。
+     */
+    if (![MFKernel shared].isOpen) {
+        self.autoAttachedPid = 0;
+        [[MFReadBackend shared] detachKFD];
+        self.headerLabel.text = @"内核未启动 —— 先点右下角「启动内核」";
+        return;
+    }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         MFKernel *k = [MFKernel shared];
         NSString *err = nil;
@@ -340,14 +354,17 @@
                 [[NSUserDefaults standardUserDefaults] synchronize];
 
                 /*
-                 * ★ [M5.117] 把读取后端切到 KFD。
-                 *
-                 * 这一步之后 MFReadBackend 的 readU64/readInt32/followChain
-                 * 全部走目标进程自己的页表 —— UE4 读取链一行都不用改，
-                 * 但不再需要（也拿不到）task port。
+                 * ★ [M5.117] 把读取后端切到 KFD；[M5.119] 同时把模块基址交给
+                 * UE4 读取层 —— 这之后「模块定位 / UE4 链解析」不用再靠 task port。
                  */
                 if (![[MFReadBackend shared] attachKFDPid:pid]) {
                     NSLog(@"[MF][Read] attachKFDPid(%d) 失败，读取后端仍不可用", pid);
+                }
+                uint64_t modBase = MFCrossProcLastModuleBase();
+                if (modBase != 0) {
+                    [MFUEReader shared].libBase = modBase;
+                    NSLog(@"[MF][UE4] 模块基址 = 0x%llx（来自 KFD 扫描）",
+                          (unsigned long long)modBase);
                 }
             } else {
                 /*
@@ -604,17 +621,13 @@
     [self.spinner startAnimating];
 
     /*
-     * ★ [M5.116] 会话必须在校准结束时关掉。
+     * ★ [M5.119] 校准结束后保持会话。
      *
-     * M5.115 曾让它保持开启（"启动内核 -> 自动找进程 -> 读内存"看起来更顺），
-     * 但真机立刻给了代价：只要 App 在会话开着的时候死掉（崩溃/被上滑杀），
-     * 内核就是 `pmap_mark_page_as_ppl_page_internal: page still has mappings`
-     * 整机 panic —— 14:07:22 和 14:07:59 两次都是这个签名。
-     *
-     * 所以恢复"用完就关"：读内存改成一次性的 open -> read -> close，
-     * 期间不留悬空页；要再读就再开一次。
+     * 语义按用户的要求定：点了「启动内核」→ 内核就在 → 页面自己去连进程。
+     * 关会话的时机只有两个：用户点「关闭内核」，或 App 真的要退出。
+     * （115 那版会 panic 是因为 App 在会话开着时崩溃；崩溃点已随 M5.116 修掉。）
      */
-    MFCalibrateSetKeepKernel(NO);
+    MFCalibrateSetKeepKernel(YES);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mf-calibration.json"];

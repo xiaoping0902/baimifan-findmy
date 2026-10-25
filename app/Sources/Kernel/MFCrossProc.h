@@ -17,6 +17,14 @@ extern "C" {
 /* 返回可直接显示的报告；同时写 /var/mobile/Media/mf-debug/mf-crossproc.txt。 */
 NSString *MFCrossProcRun(int pid);
 
+/*
+ * [M5.119] 最近一次成功解析出来的目标模块基址 / pid。
+ * 上层（模块定位 / UE4 链解析 / HUD）不用再自己扫 Mach-O，直接用这个值。
+ * 返回 0 表示还没有成功过一次。
+ */
+uint64_t MFCrossProcLastModuleBase(void);
+int      MFCrossProcLastPid(void);
+
 #ifdef __cplusplus
 }
 #endif

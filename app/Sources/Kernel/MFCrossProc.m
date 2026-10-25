@@ -45,51 +45,36 @@ static uint32_t mfxp_u32(const uint8_t *p)
            ((uint32_t)p[3] << 24);
 }
 
+static uint64_t g_xp_last_base;
+static int      g_xp_last_pid;
+
+uint64_t MFCrossProcLastModuleBase(void) { return g_xp_last_base; }
+int      MFCrossProcLastPid(void)        { return g_xp_last_pid; }
+
 NSString *MFCrossProcRun(int pid)
 {
     NSMutableString *log = [NSMutableString string];
-    BOOL ownSession = NO;
     uint64_t proc = 0, task = 0, map = 0, pmap = 0, root = 0;
     char why[256] = {0};
     int rc = 0;
 
-    /* ---------- 1) 会话 ---------- */
+    /* ---------- 1) 会话：必须由用户先点「启动内核」 ---------- */
     if (!mf_is_open()) {
         /*
-         * ★ [M5.113] 不能再用 mf_kopen_default()：它的默认值是
-         * landa + 3072（按 16.6.1 写的），在 16.1 上直接
-         * `assertion failed: (false) at krkw.h:412`。
-         * 这里显式用真机验证过的 physpuppet + 1024 + sem_open(1/1)。
+         * ★ [M5.119] 这里不再自己 kopen。
          *
-         * ★ [M5.116] 不再连试 3 次。
-         *
-         * M5.114 加过"失败隔 300 ms 重试 3 次"，本意是绕过 physpuppet 的
-         * 概率性失败。但真机证据表明：失败一次之后 perfmon 就已经锁住了
-         * （后续报 physpuppet.h:113 / "已上锁"），再接二连三地 kopen 只会
-         * 把 PUAF 页养脏，最后以
-         *     pmap_mark_page_as_ppl_page_internal: page still has mappings
-         * 整机 panic 收场（14:07:22、14:07:59 两次都是）。
-         *
-         * 所以：一次机会。失败就如实报错，并明确告诉用户"重启 App 再来"。
+         * 用户的语义很清楚：先点「启动内核」，内核起来了才去找进程；
+         * 没点内核就什么都不该动。之前自动 kopen 带来两个副作用：
+         *   · 失败了会在不同时机反复开，把 PUAF 页养脏（14:07 两次 panic 的成因）
+         *   · 用户看到"没点内核它也在动"，行为不可预期
+         * 现在：没有内核 = 直接返回一句提示，一次系统调用都不发。
          */
-        int krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
-                           MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
-        if (krc != 0) {
-            const char *e = mf_last_error();
-            NSString *errStr = (e && e[0]) ? [NSString stringWithUTF8String:e] : @"(no detail)";
-            [log appendFormat:
-                @"FAIL: 自动 kopen(physpuppet/1024) 失败 (rc=%d)\n  %@\n"
-                @"  → 这一次的 perfmon 已经脏了，不要再连点；\n"
-                @"    上滑杀掉 App 重开（或重启设备）后再试。\n",
-             krc, errStr ?: @"(undecodable)"];
-            mfxp_write(log);
-            return log;
-        }
-        ownSession = YES;
-        [log appendString:@"[session] 自己 kopen 成功（physpuppet/1024，一次过）\n"];
-    } else {
-        [log appendString:@"[session] 复用已打开的内核\n"];
+        [log appendString:@"FAIL: 内核未打开 —— 先点右下角「启动内核」\n"];
+        mfxp_write(log);
+        return log;
     }
+    mfpt_cache_reset();
+    [log appendString:@"[session] 使用已打开的内核（不再自己 kopen）\n"];
 
     mfpt_stats_reset();
 
@@ -173,6 +158,8 @@ NSString *MFCrossProcRun(int pid)
              * libbase+0x15947E70）。这里只做"能不能读出像样的指针"的探测，
              * 读不到就如实报，不做任何写操作。
              */
+            g_xp_last_base = macho;
+            g_xp_last_pid = pid;
             {
                 const uint64_t gwSlot = 0x15947E70ULL;
                 uint64_t gw = 0;
@@ -203,10 +190,11 @@ NSString *MFCrossProcRun(int pid)
     }
 
 done:
-    if (ownSession) {
-        mf_kclose();
-        [log appendString:@"[session] 已 kclose（不留悬空页）\n"];
-    }
+    /*
+     * [M5.119] 会话归用户管：这里不 kclose。
+     * 关会话的时机只有两个 —— 用户点「关闭内核」，或离开进程页（viewWillDisappear）。
+     * 这样既符合"点了内核才找进程"，也不会在页面外留着悬空页。
+     */
     {
         uint64_t cacheHit = 0, cacheMiss = 0;
         mfpt_cache_stats(&cacheHit, &cacheMiss);
