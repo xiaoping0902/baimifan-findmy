@@ -318,8 +318,27 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                  * 做法：把装备组件前 2KB 一次读进来，在内存里扫出所有符合
                  * 物品 ID 十进制编码的值（第 2-4 位 = 101/105/108，第 8 位 = 等级 1~6）。
                  */
+                /*
+                 * ★ [M5.163] 装备槽按 Actor 缓存 5 秒。
+                 * 装备几乎不变，但扫描要读 2KB；每帧扫会卡死，降频又会让文字闪。
+                 */
+                static NSMutableDictionary<NSNumber *, NSArray *> *equipCache = nil;
+                static dispatch_once_t equipOnce;
+                dispatch_once(&equipOnce, ^{ equipCache = [NSMutableDictionary dictionary]; });
+
                 uint64_t ec = 0;
-                if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
+                NSArray *cachedEquip = nil;
+                @synchronized (equipCache) { cachedEquip = equipCache[@(item)]; }
+                if (cachedEquip.count == 4 &&
+                    (CFAbsoluteTimeGetCurrent() - [cachedEquip[3] doubleValue]) < 5.0) {
+                    e.helmetLevel   = [cachedEquip[0] intValue];
+                    e.armorLevel    = [cachedEquip[1] intValue];
+                    e.backpackLevel = [cachedEquip[2] intValue];
+                    if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
+                        e.equipKnown = YES;
+                        e.armorKnown = YES;
+                    }
+                } else if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
                     uint8_t eqBuf[0x800];
                     size_t got = [rb readRemotePartial:ec into:eqBuf size:sizeof(eqBuf)];
                     for (size_t off = 0; off + 8 <= got; off += 8) {
@@ -348,6 +367,12 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                             case 108: if (!e.backpackLevel) { e.backpackLevel = lv; e.equipKnown = YES; } break;
                             default: break;
                         }
+                    }
+                    @synchronized (equipCache) {
+                        equipCache[@(item)] = @[ @(e.helmetLevel), @(e.armorLevel),
+                                                 @(e.backpackLevel),
+                                                 @(CFAbsoluteTimeGetCurrent()) ];
+                        if (equipCache.count > 512) [equipCache removeAllObjects];
                     }
                 }
 

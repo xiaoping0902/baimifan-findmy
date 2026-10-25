@@ -389,7 +389,29 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
      */
     MFGameReader *calibrated = [MFGameReader shared];
     if (calibrated.ready && calibrated.rootObjectBase != 0) {
-        NSDictionary *frame = [calibrated readFrameWithSize:size];
+        /*
+         * ★ [M5.163] KFD 帧缓存。
+         *
+         * 这条链一次要读几十个 Actor、每个几十个字段，还要扫 2KB 装备槽。
+         * 以前每帧（60 次/秒）都跑一遍 —— 主线程被拖住，iOS 看门狗直接杀进程
+         * （就是"启动就重启两次"），中间还会因为读不完而掉帧（一下有一帧一下没有）。
+         * 现在 250ms 才真正读一次，其余帧直接用缓存；ESP 位置 4 次/秒足够。
+         */
+        static NSDictionary *cachedFrame = nil;
+        static CFAbsoluteTime cachedAt = 0;
+        static CGSize cachedSize = {0, 0};
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        BOOL need = (cachedFrame == nil) ||
+                    (now - cachedAt > 0.25) ||
+                    !CGSizeEqualToSize(cachedSize, size);
+        if (need) {
+            @synchronized (calibrated) {
+                cachedFrame = [calibrated readFrameWithSize:size];
+                cachedAt = CFAbsoluteTimeGetCurrent();
+                cachedSize = size;
+            }
+        }
+        NSDictionary *frame = cachedFrame;
         if ([frame[@"cameraOK"] boolValue]) {
             NSDictionary *cd = frame[@"camera"];
             MFCamera cam = {0};
