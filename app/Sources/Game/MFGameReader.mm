@@ -241,175 +241,168 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             }
             e.worldX = pos[0]; e.worldY = pos[1]; e.worldZ = pos[2];
 
-            /* ══════════ [M5.155] 角色判据 + 全部属性（frida 真机验证）══════════
-             *   +0x3D0 Mesh → Mesh+0x750 骨骼数组（Num≥20 才算人）
-             *   +0x390 PlayerState（空 = 人机）   +0xDC8 死亡   PS+0x4C0 bit0 观战
-             *   +0x10C0 → +0x108 队伍            +0x24E0 → +0x1D8 装备槽
-             *   +0x1020 → 0x4D8/0x588 → +0x838 武器
+            /*
+             * ══════════ [M5.164] 分层读取：位置每帧，属性每秒 ══════════
+             *
+             * 相机和坐标决定"框跟不跟手"，必须每帧读；队伍/头甲/血量/武器/骨骼
+             * 这些一秒内不会变，按 Actor 缓存 1 秒即可。
+             * 这样每帧的内核读从"每角色 10+ 次"降到"每角色 1 次"，不再卡。
              */
             {
                 if (item == gMFUELocalPawn) continue;
 
-                uint64_t mesh = 0, boneData = 0;
-                int32_t boneNum = 0;
-                if (![rb readU64:item + 0x3D0 out:&mesh] || !mesh) continue;
-                if (![rb readU64:mesh + 0x750 out:&boneData] || !boneData) continue;
-                if (![rb readRemote:mesh + 0x750 + 8 into:&boneNum size:4]) continue;
-                if (boneNum < 20) continue;
-
-                /* [M5.159] 同一个 Mesh 就是自己 —— 防止数组里存的不是同一个 Actor 指针 */
-                if (gMFUELocalMesh != 0 && mesh == gMFUELocalMesh) continue;
-
-                uint8_t deadFlag = 0;
-                if ([rb readRemote:item + 0xDC8 into:&deadFlag size:1] && deadFlag != 0) continue;
-
-                uint64_t ps = 0;
-                BOOL havePS = ([rb readU64:item + 0x390 out:&ps] && ps != 0);
-                if (havePS) {
-                    uint8_t inactive = 0;
-                    if ([rb readRemote:ps + 0x4C0 into:&inactive size:1] && (inactive & 1)) continue;
-                }
-
-                uint32_t teamVal = 0;
-                uint64_t tc = 0;
-                if ([rb readU64:item + 0x10C0 out:&tc] && tc) {
-                    [rb readRemote:tc + 0x108 into:&teamVal size:4];
-                }
-                e.teamId = (int)teamVal;
-                e.isBot = havePS ? NO : YES;
-                if (gMFUELocalTeam != 0 && teamVal == gMFUELocalTeam && havePS &&
-                    ![MFSettings shared].showTeammates) {
+                /* ① 每帧只做一件事：读坐标（12 字节） */
+                float posNow[3] = {0};
+                if (![rb readFloat3:item + off.current.entityPositionOffset out:posNow]) {
                     continue;
                 }
-                if (havePS) {
-                    /*
-                     * ★ [M5.156] 人物ID 与 名字（frida 真机解码确认）
-                     *
-                     * UIN 在 PlayerState+0x320（实测 11102077440，11 位，符合三角洲格式）。
-                     * 名字是「指针在前」的字符串：Data@+0x470，Num(int32)@+0x478，UTF-16。
-                     * 这和 UE4 常见的 Num 在前不同 —— 之前按标准布局读，永远拿到 null。
-                     */
-                    uint64_t uinVal = 0;
-                    if ([rb readU64:ps + 0x320 out:&uinVal] && uinVal > 100000000ULL) {
-                        e.uin = uinVal;
-                    } else if ([rb readU64:ps + 0x490 out:&uinVal] && uinVal > 100000000ULL) {
-                        e.uin = uinVal;
-                    }
-
-                    uint64_t nameData = 0;
-                    int32_t nameNum = 0;
-                    if ([rb readU64:ps + 0x470 out:&nameData] && nameData &&
-                        [rb readRemote:ps + 0x478 into:&nameNum size:4] &&
-                        nameNum > 0 && nameNum <= 32) {
-                        unichar chars[33] = {0};
-                        if ([rb readRemote:nameData into:chars size:(size_t)nameNum * 2]) {
-                            NSString *nm = [NSString stringWithCharacters:chars
-                                                                   length:(NSUInteger)nameNum];
-                            if (nm.length) e.name = nm;
-                        }
-                    }
+                if (!isfinite(posNow[0]) || !isfinite(posNow[1]) || !isfinite(posNow[2])) {
+                    continue;
                 }
+                if (posNow[0] == 0.0f && posNow[1] == 0.0f && posNow[2] == 0.0f) continue;
 
-                /*
-                 * ★ [M5.157] 装备槽：不再依赖固定偏移。
-                 *
-                 * 真机实测：物品 ID 有时在 ec+0x3E0、有时在别处（人机刷新后布局会变），
-                 * 连“+0x1D8 是槽位数组指针”这条在现版本也不成立。
-                 * 做法：把装备组件前 2KB 一次读进来，在内存里扫出所有符合
-                 * 物品 ID 十进制编码的值（第 2-4 位 = 101/105/108，第 8 位 = 等级 1~6）。
-                 */
-                /*
-                 * ★ [M5.163] 装备槽按 Actor 缓存 5 秒。
-                 * 装备几乎不变，但扫描要读 2KB；每帧扫会卡死，降频又会让文字闪。
-                 */
-                static NSMutableDictionary<NSNumber *, NSArray *> *equipCache = nil;
-                static dispatch_once_t equipOnce;
-                dispatch_once(&equipOnce, ^{ equipCache = [NSMutableDictionary dictionary]; });
+                /* ② 属性：按 Actor 缓存 1 秒 */
+                static NSMutableDictionary<NSNumber *, NSDictionary *> *attrCache = nil;
+                static dispatch_once_t attrOnce;
+                dispatch_once(&attrOnce, ^{ attrCache = [NSMutableDictionary dictionary]; });
 
-                uint64_t ec = 0;
-                NSArray *cachedEquip = nil;
-                @synchronized (equipCache) { cachedEquip = equipCache[@(item)]; }
-                if (cachedEquip.count == 4 &&
-                    (CFAbsoluteTimeGetCurrent() - [cachedEquip[3] doubleValue]) < 5.0) {
-                    e.helmetLevel   = [cachedEquip[0] intValue];
-                    e.armorLevel    = [cachedEquip[1] intValue];
-                    e.backpackLevel = [cachedEquip[2] intValue];
-                    if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
-                        e.equipKnown = YES;
-                        e.armorKnown = YES;
-                    }
-                } else if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
-                    uint8_t eqBuf[0x800];
-                    size_t got = [rb readRemotePartial:ec into:eqBuf size:sizeof(eqBuf)];
-                    for (size_t off = 0; off + 8 <= got; off += 8) {
-                        uint64_t itemId = 0;
-                        memcpy(&itemId, eqBuf + off, 8);
-                        if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
+                NSDictionary *attr = nil;
+                /* TTL 按地址错开 1.0~1.5 秒：避免所有角色在同一帧一起刷新造成顿挫 */
+                const double ttl = 1.0 + (double)(item & 0x3F) / 128.0;
+                @synchronized (attrCache) { attr = attrCache[@(item)]; }
+                BOOL fresh = attr &&
+                    (CFAbsoluteTimeGetCurrent() - [attr[@"t"] doubleValue]) < ttl;
 
-                        char dec[24] = {0};
-                        int len = snprintf(dec, sizeof(dec), "%llu",
-                                           (unsigned long long)itemId);
-                        if (len < 8) continue;
-                        int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
-                                       (dec[3] - '0');
-                        int lv = dec[7] - '0';
-                        if (lv < 1 || lv > 6) continue;
-                        if (typeCode != 101 && typeCode != 105 && typeCode != 108) continue;
-                        if (!e.equipRawID) e.equipRawID = itemId;
-                        /* [M5.159] 分别记住头/甲/包的完整 ID，供查名 */
-                        if (typeCode == 101 && !e.helmetRawID) e.helmetRawID = itemId;
-                        if (typeCode == 105 && !e.armorRawID)  e.armorRawID  = itemId;
-                        if (typeCode == 108 && !e.bagRawID)    e.bagRawID    = itemId;
-                        switch (typeCode) {
-                            case 101: if (!e.helmetLevel)   { e.helmetLevel = lv;   e.equipKnown = YES; } break;
-                            case 105: if (!e.armorLevel)    { e.armorLevel = lv;    e.armorKnown = YES;
-                                                              e.equipKnown = YES; } break;
-                            case 108: if (!e.backpackLevel) { e.backpackLevel = lv; e.equipKnown = YES; } break;
-                            default: break;
-                        }
-                    }
-                    @synchronized (equipCache) {
-                        equipCache[@(item)] = @[ @(e.helmetLevel), @(e.armorLevel),
-                                                 @(e.backpackLevel),
-                                                 @(CFAbsoluteTimeGetCurrent()) ];
-                        if (equipCache.count > 512) [equipCache removeAllObjects];
-                    }
-                }
+                if (!fresh) {
+                    NSMutableDictionary *a = [NSMutableDictionary dictionary];
 
-                /*
-                 * ★ [M5.158] 血量：actor+0x10B8 → 血量组件 → +0x258 (float)
-                 * 真机实测自己与两个人机都是 100.0（满血）；清单写的 +0x280 读出来是垃圾。
-                 */
-                uint64_t hc = 0;
-                if ([rb readU64:item + 0x10B8 out:&hc] && hc) {
-                    float hp = 0.0f;
-                    if ([rb readRemote:hc + 0x258 into:&hp size:4] &&
-                        hp >= 0.0f && hp <= 2000.0f) {
-                        e.health = (int)lroundf(hp);
+                    uint64_t mesh = 0, boneData = 0;
+                    int32_t boneNum = 0;
+                    BOOL isChar = NO;
+                    if ([rb readU64:item + 0x3D0 out:&mesh] && mesh &&
+                        [rb readU64:mesh + 0x750 out:&boneData] && boneData &&
+                        [rb readRemote:mesh + 0x750 + 8 into:&boneNum size:4] &&
+                        boneNum >= 20) {
+                        isChar = YES;
                     }
-                }
+                    /* 同一个 Mesh 就是自己 */
+                    if (isChar && gMFUELocalMesh != 0 && mesh == gMFUELocalMesh) isChar = NO;
 
-                uint64_t combat = 0;
-                if ([rb readU64:item + 0x1020 out:&combat] && combat) {
-                    uint64_t wpn = 0;
-                    if (![rb readU64:combat + 0x4D8 out:&wpn] || !wpn) {
-                        [rb readU64:combat + 0x588 out:&wpn];
+                    uint8_t deadFlag = 0;
+                    if (isChar &&
+                        [rb readRemote:item + 0xDC8 into:&deadFlag size:1] && deadFlag != 0) {
+                        isChar = NO;
                     }
-                    if (wpn) {
-                        uint64_t wid = 0;
-                        if ([rb readU64:wpn + 0x838 out:&wid] && wid > 0) {
-                            char dec[24] = {0};
-                            int len = snprintf(dec, sizeof(dec), "%llu",
-                                               (unsigned long long)wid);
-                            if (len >= 4) {
-                                e.weaponId = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
-                                             (dec[3] - '0');
+
+                    uint64_t ps = 0;
+                    BOOL havePS = NO;
+                    if (isChar) {
+                        havePS = ([rb readU64:item + 0x390 out:&ps] && ps != 0);
+                        if (havePS) {
+                            uint8_t inactive = 0;
+                            if ([rb readRemote:ps + 0x4C0 into:&inactive size:1] &&
+                                (inactive & 1)) {
+                                isChar = NO;
                             }
-                            e.weaponRawID = wid;   /* [M5.159] 查中文名用 */
                         }
                     }
+
+                    uint32_t teamVal = 0;
+                    uint64_t tc = 0;
+                    if (isChar && [rb readU64:item + 0x10C0 out:&tc] && tc) {
+                        [rb readRemote:tc + 0x108 into:&teamVal size:4];
+                    }
+                    /* 队友（同队且带 PlayerState）不画 */
+                    if (isChar && gMFUELocalTeam != 0 && teamVal == gMFUELocalTeam && havePS &&
+                        ![MFSettings shared].showTeammates) {
+                        isChar = NO;
+                    }
+
+                    a[@"char"] = @(isChar);
+                    a[@"team"] = @(teamVal);
+                    a[@"bot"]  = @(havePS ? 0 : 1);
+
+                    if (isChar) {
+                        uint64_t uinVal = 0;
+                        if (havePS && [rb readU64:ps + 0x320 out:&uinVal]) a[@"uin"] = @(uinVal);
+
+                        /* 血量 */
+                        uint64_t hc = 0;
+                        if ([rb readU64:item + 0x10B8 out:&hc] && hc) {
+                            float hp = 0.0f;
+                            if ([rb readRemote:hc + 0x258 into:&hp size:4] &&
+                                hp >= 0.0f && hp <= 2000.0f) {
+                                a[@"hp"] = @((int)lroundf(hp));
+                            }
+                        }
+
+                        /* 手持 */
+                        uint64_t combat = 0;
+                        if ([rb readU64:item + 0x1020 out:&combat] && combat) {
+                            uint64_t wpn = 0;
+                            if (![rb readU64:combat + 0x4D8 out:&wpn] || !wpn) {
+                                [rb readU64:combat + 0x588 out:&wpn];
+                            }
+                            if (wpn) {
+                                uint64_t wid = 0;
+                                if ([rb readU64:wpn + 0x838 out:&wid] && wid > 0) {
+                                    a[@"wid"] = @(wid);
+                                }
+                            }
+                        }
+
+                        /* 头/甲/包：装备组件 2KB 扫描 */
+                        uint64_t ec = 0;
+                        if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
+                            uint8_t eqBuf[0x800];
+                            size_t got = [rb readRemotePartial:ec into:eqBuf size:sizeof(eqBuf)];
+                            for (size_t o2 = 0; o2 + 8 <= got; o2 += 8) {
+                                uint64_t itemId = 0;
+                                memcpy(&itemId, eqBuf + o2, 8);
+                                if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
+                                char dec[24] = {0};
+                                int len = snprintf(dec, sizeof(dec), "%llu",
+                                                   (unsigned long long)itemId);
+                                if (len < 8) continue;
+                                int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
+                                               (dec[3] - '0');
+                                int lv = dec[7] - '0';
+                                if (lv < 1 || lv > 6) continue;
+                                if (typeCode == 101 && !a[@"h"]) a[@"h"] = @(lv);
+                                if (typeCode == 105 && !a[@"a"]) a[@"a"] = @(lv);
+                                if (typeCode == 108 && !a[@"b"]) a[@"b"] = @(lv);
+                            }
+                        }
+                    }
+
+                    a[@"t"] = @(CFAbsoluteTimeGetCurrent());
+                    @synchronized (attrCache) {
+                        attrCache[@(item)] = a;
+                        if (attrCache.count > 1024) [attrCache removeAllObjects];
+                    }
+                    attr = a;
+                }
+
+                if (![attr[@"char"] boolValue]) continue;
+
+                e.worldX = posNow[0]; e.worldY = posNow[1]; e.worldZ = posNow[2];
+                e.teamId = [attr[@"team"] intValue];
+                e.isBot = [attr[@"bot"] boolValue];
+                e.uin = [attr[@"uin"] unsignedLongLongValue];
+                e.health = [attr[@"hp"] intValue];
+                e.weaponRawID = [attr[@"wid"] unsignedLongLongValue];
+                if (e.weaponRawID) {
+                    e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
+                }
+                e.helmetLevel = [attr[@"h"] intValue];
+                e.armorLevel = [attr[@"a"] intValue];
+                e.backpackLevel = [attr[@"b"] intValue];
+                if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
+                    e.equipKnown = YES;
+                    e.armorKnown = YES;
                 }
             }
+
 
             // ③ 投影
             float cam[3] = {camera.x, camera.y, camera.z};
