@@ -306,33 +306,39 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     }
                 }
 
-                uint64_t ec = 0, slots = 0;
-                if ([rb readU64:item + 0x24E0 out:&ec] && ec &&
-                    [rb readU64:ec + 0x1D8 out:&slots] && slots) {
-                    uint8_t rawSlots[10 * 0x30];
-                    size_t got = [rb readRemotePartial:slots into:rawSlots size:sizeof(rawSlots)];
-                    if (got >= 0x30) {
-                        size_t nSlot = got / 0x30;
-                        for (size_t s2 = 0; s2 < nSlot; s2++) {
-                            uint64_t itemId = 0;
-                            memcpy(&itemId, rawSlots + s2 * 0x30, 8);
-                            if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
-                            if (!e.equipRawID) e.equipRawID = itemId;
-                            char dec[24] = {0};
-                            int len = snprintf(dec, sizeof(dec), "%llu",
-                                               (unsigned long long)itemId);
-                            if (len < 8) continue;
-                            int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
-                                           (dec[3] - '0');
-                            int lv = dec[7] - '0';
-                            if (lv < 1 || lv > 6) continue;
-                            switch (typeCode) {
-                                case 101: e.helmetLevel = lv;   e.equipKnown = YES; break;
-                                case 105: e.armorLevel = lv;    e.armorKnown = YES;
-                                          e.equipKnown = YES; break;
-                                case 108: e.backpackLevel = lv; e.equipKnown = YES; break;
-                                default: break;
-                            }
+                /*
+                 * ★ [M5.157] 装备槽：不再依赖固定偏移。
+                 *
+                 * 真机实测：物品 ID 有时在 ec+0x3E0、有时在别处（人机刷新后布局会变），
+                 * 连“+0x1D8 是槽位数组指针”这条在现版本也不成立。
+                 * 做法：把装备组件前 2KB 一次读进来，在内存里扫出所有符合
+                 * 物品 ID 十进制编码的值（第 2-4 位 = 101/105/108，第 8 位 = 等级 1~6）。
+                 */
+                uint64_t ec = 0;
+                if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
+                    uint8_t eqBuf[0x800];
+                    size_t got = [rb readRemotePartial:ec into:eqBuf size:sizeof(eqBuf)];
+                    for (size_t off = 0; off + 8 <= got; off += 8) {
+                        uint64_t itemId = 0;
+                        memcpy(&itemId, eqBuf + off, 8);
+                        if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
+
+                        char dec[24] = {0};
+                        int len = snprintf(dec, sizeof(dec), "%llu",
+                                           (unsigned long long)itemId);
+                        if (len < 8) continue;
+                        int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
+                                       (dec[3] - '0');
+                        int lv = dec[7] - '0';
+                        if (lv < 1 || lv > 6) continue;
+                        if (typeCode != 101 && typeCode != 105 && typeCode != 108) continue;
+                        if (!e.equipRawID) e.equipRawID = itemId;
+                        switch (typeCode) {
+                            case 101: if (!e.helmetLevel)   { e.helmetLevel = lv;   e.equipKnown = YES; } break;
+                            case 105: if (!e.armorLevel)    { e.armorLevel = lv;    e.armorKnown = YES;
+                                                              e.equipKnown = YES; } break;
+                            case 108: if (!e.backpackLevel) { e.backpackLevel = lv; e.equipKnown = YES; } break;
+                            default: break;
                         }
                     }
                 }
