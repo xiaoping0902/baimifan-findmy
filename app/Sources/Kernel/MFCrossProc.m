@@ -19,6 +19,7 @@
 #import "MFPageTable.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>   /* usleep：physpuppet 重试间隔 */
 
@@ -172,10 +173,75 @@ NSString *MFCrossProcRun(int pid)
                 };
                 [log appendFormat:@"\n[game] module base = %#llx\n", (unsigned long long)macho];
 
+                /*
+                 * ★ [M5.122] 把游戏自己的段表打出来。
+                 *
+                 * 这一步是为了回答"base+0x178B44E0 到底在不在映像里"：
+                 * Mach-O 的 vmaddr 是镜像内地址，运行期地址 = vmaddr + slide，
+                 * slide = 模块基址 - 0x100000000。打印出 __DATA 的真实区间后，
+                 * 候选偏移落在里面还是外面一眼就能看出来。
+                 */
+                {
+                    const size_t kHdrLen = 16384;
+                    unsigned char *hdr = (unsigned char *)malloc(kHdrLen);
+                    if (hdr && mfpt_read(root, macho, hdr, kHdrLen) == 0) {
+                        uint32_t ncmds = mfxp_u32(hdr + 16);
+                        uint32_t o = 32;
+                        uint64_t slide = macho - 0x100000000ULL;
+                        [log appendString:@"[game] 段表（vmaddr 是镜像内地址，右边是运行期区间）：\n"];
+                        for (uint32_t i = 0; i < ncmds && o + 72 <= kHdrLen; i++) {
+                            uint32_t cmd = mfxp_u32(hdr + o);
+                            uint32_t sz  = mfxp_u32(hdr + o + 4);
+                            if (sz < 8 || o + sz > kHdrLen) break;
+                            if (cmd == 0x19) {           /* LC_SEGMENT_64 */
+                                char nm[17];
+                                uint64_t vmaddr = 0, vmsize = 0;
+                                memset(nm, 0, sizeof(nm));
+                                memcpy(nm, hdr + o + 8, 16);
+                                memcpy(&vmaddr, hdr + o + 24, 8);
+                                memcpy(&vmsize, hdr + o + 32, 8);
+                                int prot = (int)mfxp_u32(hdr + o + 60);
+                                uint64_t rs = vmaddr + slide;
+                                [log appendFormat:
+                                    @"         %-16s vm=%#llx size=%#llx prot=%d → %#llx..%#llx\n",
+                                 nm, (unsigned long long)vmaddr,
+                                 (unsigned long long)vmsize, prot,
+                                 (unsigned long long)rs,
+                                 (unsigned long long)(rs + vmsize)];
+                            }
+                            o += sz;
+                        }
+                    }
+                    free(hdr);
+                }
+
                 for (unsigned int i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
                     uint64_t slot = macho + cands[i].off;
                     uint64_t val = 0;
                     int r = mfpt_read(root, slot, &val, sizeof(val));
+
+                    /*
+                     * ★ [M5.122] 把页表翻译的具体错误码打出来。
+                     *
+                     * mfpt_read 把所有翻译失败都折叠成 -3，看不出断在哪一级。
+                     * 直接调 mfpt_translate 拿原始码：
+                     *   -5  L1 不合法（地址不在目标映射里）
+                     *   -8  L2 不合法
+                     *   -11 L3 不存在
+                     *   -12 压缩页（我们的走法不覆盖）
+                     *   -6/-9 ptov 查不到对应物理窗口
+                     */
+                    {
+                        uint64_t pa = 0;
+                        int tr = mfpt_translate(root, slot, &pa);
+                        [log appendFormat:
+                            @"[game]   translate(%#llx) rc=%d pa=%#llx %@\n",
+                         (unsigned long long)slot, tr, (unsigned long long)pa,
+                         tr == 0 ? @"(映射存在)"
+                                 : (tr == -11 ? @"(L3 不存在 = 这页没映射)"
+                                              : (tr == -12 ? @"(压缩页)" : @"(其它)"))];
+                    }
+
                     BOOL plausible = (r == 0 && val > 0x100000000ULL && val < 0x8000000000ULL);
 
                     [log appendFormat:@"[game] %-13s base+%#-10llx = %#llx (rc=%d)%@\n",
