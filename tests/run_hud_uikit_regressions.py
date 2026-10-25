@@ -118,7 +118,8 @@ def main():
                     # Real UDP receiver, drawing delegate, settings and projection.
                     # The fixture keeps local readers unbound and fails on any
                     # remote read; no kernel or game process is part of this suite.
-                    sources.append(ROOT / "app/Sources/HUD/MFDrawingLayer.mm")
+                    sources += [ROOT / "app/Sources/HUD/MFDrawingLayer.mm",
+                                ROOT / "app/Sources/HUD/MFRadar.mm"]
                     sources.append(ROOT / "app/Sources/Game/MFBones.mm")
                     sources += [ROOT / f"app/Sources/Game/{name}.mm" for name in (
                         "MFGameReader", "MFUEReader", "MFUEOffsets", "MFProjection", "Offsets",
