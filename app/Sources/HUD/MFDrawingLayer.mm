@@ -1064,6 +1064,12 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         }
     }
 
+    /* ── [M5.152] 射线：从【屏幕顶部中心】连到目标（之前画在底边，方向是反的）── */
+    if (st.showTracer) {
+        dl->AddLine(ImVec2(screen.x * 0.5f, 0.0f), pt,
+                    MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.55f), 1.0f);
+    }
+
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
     if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
         /* [M5.141] 优先画真骨骼；读不到再退回占位火柴人 */
