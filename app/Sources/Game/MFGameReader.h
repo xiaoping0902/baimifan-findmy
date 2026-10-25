@@ -57,6 +57,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t equipRawID;
 /* [M5.148] 人物 ID（PlayerState+0x490；未校准时为 0） */
 @property (nonatomic, assign) uint64_t uin;
+/* [M5.159] 原始物品 ID（用于查中文名） */
+@property (nonatomic, assign) uint64_t weaponRawID;
+@property (nonatomic, assign) uint64_t helmetRawID;
+@property (nonatomic, assign) uint64_t armorRawID;
+@property (nonatomic, assign) uint64_t bagRawID;
 @property (nonatomic, assign) BOOL armorKnown;
 
 /// 相对相机朝向的方位角（度），**带符号**：

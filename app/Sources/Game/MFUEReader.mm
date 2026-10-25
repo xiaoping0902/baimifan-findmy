@@ -3,6 +3,7 @@
 
 /* [M5.155] 供 MFGameReader（真正用于绘制的实体循环）使用的本地玩家信息 */
 uint64_t gMFUELocalPawn = 0;
+uint64_t gMFUELocalMesh = 0;
 uint32_t gMFUELocalTeam = 0;
 #import "Offsets.h"                       /* kMF_Deg2Rad / kMFBehindAngleDeg 等常量在这 */
 #import "../Read/MFReadBackend.h"
@@ -98,6 +99,11 @@ static NSString *gUEReport = nil;
 
     /* [M5.155] 把本地 Pawn / 队伍号交给 MFGameReader（绘制走的是它的实体循环） */
     gMFUELocalPawn = r.pawn;
+    gMFUELocalMesh = 0;
+    if (MFUEIsValidPtr(r.pawn)) {
+        uint64_t lm = 0;
+        if ([rb readU64:r.pawn + 0x3D0 out:&lm]) gMFUELocalMesh = lm;
+    }
     gMFUELocalTeam = 0;
     if (MFUEIsValidPtr(r.playerState)) {
         uint32_t teamLocal = 0;

@@ -5,6 +5,7 @@
 #import "Offsets.h"
 #import "MFSettings.h"
 #import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
+#import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Read/MFReadBackend.h"
 #import <mach/mach.h>
 #include <sys/sysctl.h>
@@ -256,6 +257,9 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 if (![rb readRemote:mesh + 0x750 + 8 into:&boneNum size:4]) continue;
                 if (boneNum < 20) continue;
 
+                /* [M5.159] 同一个 Mesh 就是自己 —— 防止数组里存的不是同一个 Actor 指针 */
+                if (gMFUELocalMesh != 0 && mesh == gMFUELocalMesh) continue;
+
                 uint8_t deadFlag = 0;
                 if ([rb readRemote:item + 0xDC8 into:&deadFlag size:1] && deadFlag != 0) continue;
 
@@ -333,6 +337,10 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                         if (lv < 1 || lv > 6) continue;
                         if (typeCode != 101 && typeCode != 105 && typeCode != 108) continue;
                         if (!e.equipRawID) e.equipRawID = itemId;
+                        /* [M5.159] 分别记住头/甲/包的完整 ID，供查名 */
+                        if (typeCode == 101 && !e.helmetRawID) e.helmetRawID = itemId;
+                        if (typeCode == 105 && !e.armorRawID)  e.armorRawID  = itemId;
+                        if (typeCode == 108 && !e.bagRawID)    e.bagRawID    = itemId;
                         switch (typeCode) {
                             case 101: if (!e.helmetLevel)   { e.helmetLevel = lv;   e.equipKnown = YES; } break;
                             case 105: if (!e.armorLevel)    { e.armorLevel = lv;    e.armorKnown = YES;
@@ -372,6 +380,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                                 e.weaponId = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
                                              (dec[3] - '0');
                             }
+                            e.weaponRawID = wid;   /* [M5.159] 查中文名用 */
                         }
                     }
                 }

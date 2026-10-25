@@ -306,6 +306,7 @@ static const uint32_t kMFUE_Weapon_ID             = 0x0838;
 /* [M5.155] 本地玩家 Pawn / 队伍号，由 MFUEReader 每次 resolve 时写入，
  * MFGameReader 读取（绘制走的是 MFGameReader 的实体循环）。 */
 extern uint64_t gMFUELocalPawn;
+extern uint64_t gMFUELocalMesh;
 extern uint32_t gMFUELocalTeam;
 
 /* 剔除判定（分析报告剔除表 第4/5 条）：死人 = actor+0xDC8 首字节非 0 */

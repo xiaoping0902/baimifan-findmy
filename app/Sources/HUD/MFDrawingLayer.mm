@@ -9,6 +9,7 @@
 #import "../Game/MFUEGNames.h"       /* [M5.85] 类名解析（FNamePool，已核实布局） */
 #import "../Game/MFGearCatalog.h"    /* [M5.85] 物资/装备类名分类目录 */
 #import "../Game/MFGearReader.h"     /* [M5.85] 物资属性读取（真实偏移） */
+#import "../Game/MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Game/MFItemTable.h"      /* [M5.86] 物品定义表（等级/价值/名字） */
 #import "../Game/Offsets.h"
 #import "../Read/MFReadBackend.h"
@@ -1009,8 +1010,12 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                           : (e.isBot ? "人机" : "敌人");
 
         char lHeld[32], lArmor[48], lTeam[48], lName[96];
-        snprintf(lHeld, sizeof(lHeld), "%s", e.weaponId ? "持 枪" : "持 空手");
-        if (e.weaponId) snprintf(lHeld, sizeof(lHeld), "持 W%d", e.weaponId);
+        {
+            const char *wn = e.weaponRawID ? MFItemNameForID(e.weaponRawID) : NULL;
+            if (wn)              snprintf(lHeld, sizeof(lHeld), "持 %s", wn);
+            else if (e.weaponId) snprintf(lHeld, sizeof(lHeld), "持 W%d", e.weaponId);
+            else                 snprintf(lHeld, sizeof(lHeld), "持 空手");
+        }
 
         ImU32 armorCol = MFU32([st colorForSlot:MFColorSlotArmor]);
         if (e.equipKnown) {
