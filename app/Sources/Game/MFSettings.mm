@@ -31,6 +31,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _drawEnabled = YES;
 
     _showBot = NO;
+    _showTeammates = NO;      /* [M5.150] 队友默认不画 */
     _showName = YES;
     _showArmor = YES;
     _showSkeleton = NO;
@@ -110,7 +111,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     NSArray *bools = @[
         @[@"masterEnabled", @(_masterEnabled)], @[@"drawEnabled", @(_drawEnabled)],
-        @[@"showBot", @(_showBot)], @[@"showName", @(_showName)],
+        @[@"showBot", @(_showBot)], @[@"showTeammates", @(_showTeammates)], @[@"showName", @(_showName)],
         @[@"showArmor", @(_showArmor)], @[@"showSkeleton", @(_showSkeleton)],
         @[@"showTracer", @(_showTracer)], @[@"showTeam", @(_showTeam)],
         @[@"showHeld", @(_showHeld)], @[@"showDistance", @(_showDistance)],
@@ -162,7 +163,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     #define LOAD_NUM(name)  if (d[@#name]) _##name = (__typeof__(_##name))[d[@#name] doubleValue]
 
     LOAD_BOOL(masterEnabled); LOAD_BOOL(drawEnabled);
-    LOAD_BOOL(showBot); LOAD_BOOL(showName); LOAD_BOOL(showArmor);
+    LOAD_BOOL(showBot); LOAD_BOOL(showTeammates); LOAD_BOOL(showName); LOAD_BOOL(showArmor);
     LOAD_BOOL(showSkeleton); LOAD_BOOL(showTracer); LOAD_BOOL(showTeam);
     LOAD_BOOL(showHeld); LOAD_BOOL(showDistance); LOAD_BOOL(showHealth);
     LOAD_BOOL(showLoot); LOAD_BOOL(showBox); LOAD_BOOL(showLootName); LOAD_BOOL(showLootStats);

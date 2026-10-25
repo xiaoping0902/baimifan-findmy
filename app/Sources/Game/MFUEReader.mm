@@ -360,8 +360,9 @@ static NSString *gUEReport = nil;
                         }
                     }
                 }
-                if (myTeam != 0 && teamVal == myTeam && havePS) {
-                    continue;      /* 队友：不画（人机即使 team 相同也照画） */
+                if (myTeam != 0 && teamVal == myTeam && havePS &&
+                    ![MFSettings shared].showTeammates) {
+                    continue;      /* 队友：默认不画，菜单里可开（人机不受影响） */
                 }
             }
 

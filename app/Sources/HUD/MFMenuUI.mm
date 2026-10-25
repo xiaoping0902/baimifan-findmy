@@ -308,6 +308,7 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::TextDisabled("绘制开关");
     ImGui::Separator();
     MF_CHECK("人机显示", showBot);
+    MF_CHECK("队友", showTeammates);
     MF_CHECK("名字", showName);
     MF_CHECK("头甲", showArmor);
     MF_CHECK("血量", showHealth);
