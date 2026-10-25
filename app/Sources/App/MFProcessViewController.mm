@@ -159,7 +159,7 @@
                 : [NSString stringWithFormat:@"× 枚举失败（%@）\n内核：%@",
                    err ?: @"未知", k.statusText];
             self.headerLabel.text = cand
-                ? [base stringByAppendingFormat:@"\n🎯 目标候选：%@ (pid %d)", cand.name, cand.pid]
+                ? [base stringByAppendingFormat:@"\n目标候选：%@ (pid %d)", cand.name, cand.pid]
                 : [base stringByAppendingString:@"\n（列表里没有 dfm/tmgp 类进程）"];
         });
     });
@@ -208,7 +208,7 @@
     [self stopAuto];
     /* 立刻给一行可见的状态，别让用户以为页面没反应 */
     if (self.autoAttachedPid == 0) {
-        self.headerLabel.text = @"🔍 正在检测进程…（每 2 秒自动扫描）";
+        self.headerLabel.text = @"正在检测进程…（每 2 秒自动扫描）";
     }
     self.autoTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
                                                      target:self
@@ -259,7 +259,7 @@
             if (cand == nil) {
                 self.autoAttachedPid = 0;      /* 游戏没了：等他再开 */
                 self.headerLabel.text = [NSString stringWithFormat:
-                    @"⏳ 等待游戏启动…（%lu 个进程，每 2 秒自动检测）",
+                    @"等待游戏启动…（%lu 个进程，每 2 秒自动检测）",
                     (unsigned long)list.count];
                 return;
             }
@@ -279,7 +279,7 @@
              */
             if (self.autoTryCount >= 5) {
                 self.headerLabel.text = [NSString stringWithFormat:
-                    @"❌ %@ (pid %d) 连续 %d 次连接失败\n上滑杀掉 App 重开（清脏页）后再进本页",
+                    @"%@ (pid %d) 连续 %d 次连接失败\n上滑杀掉 App 重开（清脏页）后再进本页",
                     cand.name, cand.pid, self.autoTryCount];
                 return;
             }
@@ -294,7 +294,7 @@
     const int pid = cand.pid;
     NSString *name = cand.name ?: @"game";
     self.headerLabel.text = [NSString stringWithFormat:
-        @"🎯 发现 %@ (pid %d)，正在连接…", name, pid];
+        @"发现 %@ (pid %d)，正在连接…", name, pid];
     [self.spinner startAnimating];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -311,23 +311,30 @@
                 [[NSUserDefaults standardUserDefaults] setObject:name forKey:@"mf.target.name"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
             } else {
-                /* 不锁死 pid：下一 tick 会自动再试；连错 5 次才认输（见 autoTick） */
-                self.autoAttachedPid = 0;
+                /*
+                 * ★ [M5.116] 失败就锁住，不再自动重试。
+                 *
+                 * 真机证据：kopen 失败一次，perfmon 就已经锁住了；随后每一次
+                 * 自动重试都在养 PUAF 脏页，最后以
+                 *   pmap_mark_page_as_ppl_page_internal: page still has mappings
+                 * 整机 panic（14:07:22 / 14:07:59）。一次机会，失败就等人。
+                 */
+                self.autoAttachedPid = pid;
                 self.autoTryPid = pid;
                 self.autoTryCount += 1;
             }
 
             self.headerLabel.text = [NSString stringWithFormat:
                 @"%@ %@ (pid %d) · %@",
-                ok ? @"✅ 已连接" : @"⚠️ 连接失败",
+                ok ? @"已连接" : @"连接失败",
                 name, pid,
                 ok ? @"跨进程读已自证"
-                   : [NSString stringWithFormat:@"第 %d 次，2 秒后自动重试", self.autoTryCount]];
+                   : @"上滑杀掉 App 重开后再试（不要连点）"];
 
-            /* 只在第一次失败时弹窗，避免每 2 秒糊一脸 */
+            /* 只在第一次失败时弹窗 */
             if (!ok && self.autoTryCount == 1) {
                 UIAlertController *a = [UIAlertController
-                    alertControllerWithTitle:@"自动连接失败（会自动重试）"
+                    alertControllerWithTitle:@"连接失败（不会再自动重试）"
                                      message:report
                               preferredStyle:UIAlertControllerStyleAlert];
                 [a addAction:[UIAlertAction actionWithTitle:@"好"
@@ -557,10 +564,17 @@
     [self.spinner startAnimating];
 
     /*
-     * ★ [M5.115] 主线要一直读内存，所以校准结束后不要关会话 ——
-     * 关掉的话自动挂载还得再 kopen 一次，而 kopen 是概率性的（多开多风险）。
+     * ★ [M5.116] 会话必须在校准结束时关掉。
+     *
+     * M5.115 曾让它保持开启（"启动内核 -> 自动找进程 -> 读内存"看起来更顺），
+     * 但真机立刻给了代价：只要 App 在会话开着的时候死掉（崩溃/被上滑杀），
+     * 内核就是 `pmap_mark_page_as_ppl_page_internal: page still has mappings`
+     * 整机 panic —— 14:07:22 和 14:07:59 两次都是这个签名。
+     *
+     * 所以恢复"用完就关"：读内存改成一次性的 open -> read -> close，
+     * 期间不留悬空页；要再读就再开一次。
      */
-    MFCalibrateSetKeepKernel(YES);
+    MFCalibrateSetKeepKernel(NO);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mf-calibration.json"];

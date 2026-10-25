@@ -61,33 +61,32 @@ NSString *MFCrossProcRun(int pid)
          * `assertion failed: (false) at krkw.h:412`。
          * 这里显式用真机验证过的 physpuppet + 1024 + sem_open(1/1)。
          *
-         * ★ [M5.114] physpuppet 本身是概率性的：
-         *     assertion failed: (kret == KERN_SUCCESS) at physpuppet.h:113
-         * 台账里就写着"它失败不重试，重试放调用侧"。所以这里在调用侧重试
-         * 3 次（每次隔 300 ms）—— 实测第二次通常就过。
+         * ★ [M5.116] 不再连试 3 次。
+         *
+         * M5.114 加过"失败隔 300 ms 重试 3 次"，本意是绕过 physpuppet 的
+         * 概率性失败。但真机证据表明：失败一次之后 perfmon 就已经锁住了
+         * （后续报 physpuppet.h:113 / "已上锁"），再接二连三地 kopen 只会
+         * 把 PUAF 页养脏，最后以
+         *     pmap_mark_page_as_ppl_page_internal: page still has mappings
+         * 整机 panic 收场（14:07:22、14:07:59 两次都是）。
+         *
+         * 所以：一次机会。失败就如实报错，并明确告诉用户"重启 App 再来"。
          */
-        int krc = -1;
-        int attempt = 0;
-        for (attempt = 1; attempt <= 3; attempt++) {
-            krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
+        int krc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
                            MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
-            if (krc == 0) {
-                break;
-            }
-            usleep(300 * 1000);
-        }
         if (krc != 0) {
             const char *e = mf_last_error();
             NSString *errStr = (e && e[0]) ? [NSString stringWithUTF8String:e] : @"(no detail)";
             [log appendFormat:
-                @"FAIL: 内核未打开，自动 kopen(physpuppet/1024) 连续 %d 次失败 (rc=%d)\n  %@\n"
-                @"  → 杀掉 App 重开可清掉 PUAF 脏页，再试一次\n",
-             attempt - 1, krc, errStr ?: @"(undecodable)"];
+                @"FAIL: 自动 kopen(physpuppet/1024) 失败 (rc=%d)\n  %@\n"
+                @"  → 这一次的 perfmon 已经脏了，不要再连点；\n"
+                @"    上滑杀掉 App 重开（或重启设备）后再试。\n",
+             krc, errStr ?: @"(undecodable)"];
             mfxp_write(log);
             return log;
         }
         ownSession = YES;
-        [log appendFormat:@"[session] 自己 kopen 成功（physpuppet/1024，第 %d 次尝试）\n", attempt];
+        [log appendString:@"[session] 自己 kopen 成功（physpuppet/1024，一次过）\n"];
     } else {
         [log appendString:@"[session] 复用已打开的内核\n"];
     }
