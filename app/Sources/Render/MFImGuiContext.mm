@@ -61,17 +61,16 @@
 
     /*
      * 4) 字体
-     * ★ [M5.185] 三处改动，专治「字小、字糊、字形难看」★
-     *   ① 优先用系统字体（PingFang / SF）—— 子集字体缺字，汉字会变方块；
-     *   ② RasterizerDensity = 设备倍率（2x/3x）—— 字形按物理像素烘焙，
-     *      再用逻辑尺寸落屏，边缘才不糊；
-     *   ③ 系统字体拿不到时回退打包的 NotoSansSC 子集。
+     * ★ [M5.186] 只用打包的 TrueType 字体 ★
+     *
+     * 前一版（185）试图改用系统 PingFang.ttc / SFProText.otf，结果 HUD 在
+     * 第一帧就没了（hud.log 停在 waiting-for-frames）。
+     * 原因：这两者都是 **CFF/OTF 轮廓**，而 ImGui 的栅格器 stb_truetype
+     * 只吃 TrueType(glyf) 轮廓 —— 文件能打开、字体对象也能建，但一取字形就崩。
+     * 所以回退到打包的 NotoSansSC-subset.ttf，靠 RasterizerDensity 提清晰度。
      */
-    const float density = (float)MAX(2.0, (double)(UIScreen.mainScreen.scale ?: 2.0));
-    if (![self loadSystemFontAtSize:16.0f density:density]) {
-        if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
-            NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
-        }
+    if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
+        NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
     }
 
     _initialized = YES;

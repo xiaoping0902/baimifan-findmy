@@ -8,6 +8,7 @@
 //
 #import "MFMenuPanel.h"
 #import "MFMenuUI.h"
+#import "MFHUDLog.h"
 #import "../Render/MFOverlayView.h"
 #import "../Game/MFSettings.h"
 
@@ -122,8 +123,20 @@ void MFMenuPanelRender(MFOverlayView *overlay, ImVec2 screen) {
     MFPanelStoreToSettings();
 
     /* ③ 画：外框 + 分页 + 当前页；收起态只画灵动岛
-     * RenderUI 在 ui.h 里是【全局函数】（不在 ios 命名空间内） */
+     * RenderUI 在 ui.h 里是【全局函数】（不在 ios 命名空间内）
+     *
+     * [M5.186] 前三帧打点：万一又死在渲染里，hud.log 会明确停在"开始"还是"结束"。
+     */
+    static int sFrameLog = 0;
+    if (sFrameLog < 3) {
+        sFrameLog++;
+        MFHUDLogLine(@"[面板] 第%d帧 开始 %.0fx%.0f scale=%.2f anim=%.2f font=%p",
+                     sFrameLog, screen.x, screen.y, gUI.uiScale, gUI.anim, (void *)font);
+    }
     RenderUI(gUI, screen, font, (ImTextureID)0, nullptr, 0);
+    if (sFrameLog <= 3) {
+        MFHUDLogLine(@"[面板] 第%d帧 结束", sFrameLog);
+    }
 
     /* ④ 触摸命中：展开报面板矩形，收起报灵动岛矩形 */
     if (gUI.anim > 0.01f) {
