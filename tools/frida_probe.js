@@ -1,11 +1,11 @@
-// frida_probe.js — 三角洲训练场数据探针（配合 Frida-iPad-Memory-Guide.md）
+// frida_probe.js — 三角洲训练场数据探针（JSON 版）
 //
-// 用法（Windows，iPad 越狱 + frida-server 已起、27042 已转发）：
-//   frida -H 127.0.0.1:27042 -n DeltaForceClient -l frida_probe.js
+// 旧的 console.log("%d/%s") 在 Frida 里不做替换，输出是裸数字串；这一版全部
+// 走 send({...})，Python 侧直接 json.dumps，字段一一对应。
 //
-// 输出：本地玩家链、队伍、手持武器候选、以及 Actors 里每个角色的
-//       坐标 / 队伍 / 人机标志 / Mesh / 骨数。
-// 所有偏移取自 SDK 1.201.37117 与本仓库 MFUEOffsets.h。
+// 用法：
+//   frida -H 127.0.0.1:27042 -n 三角洲行动 -l frida_probe.js
+//   或者由 frida_hold.py 每轮 create_script 加载。
 
 const OFF = {
   GWorld: 0x178B44E0,
@@ -18,100 +18,107 @@ const OFF = {
   LevelActorsData: 0x98,
   LevelActorsNum: 0xA0,
   ActorRootComponent: 0x180,
-  SceneComponentLocation: 0x220,   // ComponentToWorld.Translation
+  SceneComponentWorld: 0x220,   // ComponentToWorld.Translation
+  ActorClassPrivate: 0x10,
+  ActorFlagsHidden: 0x90,       // bHidden bit0
+  ActorFlagsDead: 0x95,         // bActorIsBeingDestroyed bit1
   CharacterMesh: 0x3D0,
-  MeshBoneArray: 0x0A18,           // TArray<FTransform> CachedComponentSpaceTransforms
-  MeshC2W: 0x210,
+  MeshBoneArray: 0x0A18,
   PawnTeamComp: 0x10C0,
   TeamCompTeamID: 0x108,
   PawnIsPlayerAI: 0x0E60,
-  ControllerWeaponCandidates: [0x1170, 0x1158, 0x3540],
-  ActorHiddenByte: 0x90,
-  ActorDestroyedByte: 0x95,
+  PawnWeapon: 0x1170,
+  RangeHelmetID: 0x3890,
+  RangeArmorID: 0x3898,
 };
 
-function u64(p) { try { return p.readU64(); } catch (e) { return null; } }
-function u32(p) { try { return p.readU32(); } catch (e) { return null; } }
-function i32(p) { try { return p.readS32(); } catch (e) { return null; } }
-function f32(p) { try { return p.readFloat(); } catch (e) { return null; } }
-function u8(p)  { try { return p.readU8(); } catch (e) { return null; } }
-
-function pos(actor) {
-  const root = u64(actor.add(OFF.ActorRootComponent));
-  if (!root || root < 0x10000) return null;
-  const p = ptr(root).add(OFF.SceneComponentLocation);
-  const x = f32(p), y = f32(p.add(4)), z = f32(p.add(8));
-  if (x === null || y === null || z === null) return null;
-  if (!isFinite(x) || Math.abs(x) > 1e7) return null;
-  return [x, y, z];
+function posOf(actor) {
+  try {
+    const root = actor.add(OFF.ActorRootComponent).readPointer();
+    if (root.isNull()) return null;
+    const p = root.add(OFF.SceneComponentWorld);
+    const x = p.readFloat(), y = p.add(4).readFloat(), z = p.add(8).readFloat();
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
+    if (Math.abs(x) > 1e7) return null;
+    return [Math.round(x), Math.round(y), Math.round(z)];
+  } catch (e) { return null; }
 }
 
 function main() {
   const mod = Process.findModuleByName('DeltaForceClient') ||
               Process.enumerateModules().find(m => m.name.indexOf('DeltaForce') >= 0);
-  if (!mod) { console.log('[-] 找不到 DeltaForceClient 模块'); return; }
+  if (!mod) { send({ stage: 'module', error: 'not found' }); return; }
+
   const base = mod.base;
-  console.log('[+] base =', base);
+  const gw = base.add(OFF.GWorld).readPointer();
+  send({ stage: 'world', base: base.toString(), gworld: gw.toString() });
+  if (gw.isNull()) return;
 
-  const gw = u64(base.add(OFF.GWorld));
-  console.log('[+] GWorld =', gw);
-  if (!gw) return;
-
-  const gi = u64(ptr(gw).add(OFF.WorldGameInstance));
-  const lp = gi ? u64(ptr(gi).add(OFF.GameInstanceLocalPlayers)) : null;
-  const localPlayer = lp ? u64(ptr(lp)) : null;
-  const pc = localPlayer ? u64(ptr(localPlayer).add(OFF.LocalPlayerController)) : null;
-  const pawn = pc ? u64(ptr(pc).add(OFF.ControllerPawn)) : null;
-  console.log('[+] GameInstance=%s LocalPlayer=%s Controller=%s Pawn=%s', gi, localPlayer, pc, pawn);
-
-  if (pawn) {
-    const pp = pos(ptr(pawn));
-    const teamComp = u64(ptr(pawn).add(OFF.PawnTeamComp));
-    const teamID = teamComp ? i32(ptr(teamComp).add(OFF.TeamCompTeamID)) : null;
-    const ai = u8(ptr(pawn).add(OFF.PawnIsPlayerAI));
-    const mesh = u64(ptr(pawn).add(OFF.CharacterMesh));
-    console.log('[本地] pos=%j team=%s ai=%s mesh=%s', pp, teamID, ai, mesh);
-
-    for (const off of OFF.ControllerWeaponCandidates) {
-      const w = u64(ptr(pc).add(off));
-      if (w && w > 0x10000) console.log('[武器候选] Controller+0x%s -> %s', off.toString(16), w);
-      const w2 = u64(ptr(pawn).add(off));
-      if (w2 && w2 > 0x10000) console.log('[武器候选] Pawn+0x%s -> %s', off.toString(16), w2);
+  const gi = gw.add(OFF.WorldGameInstance).readPointer();
+  let pc = null, pawn = null;
+  if (!gi.isNull()) {
+    const lps = gi.add(OFF.GameInstanceLocalPlayers).readPointer();
+    if (!lps.isNull()) {
+      const lp = lps.readPointer();
+      if (!lp.isNull()) pc = lp.add(OFF.LocalPlayerController).readPointer();
     }
   }
+  if (pc && !pc.isNull()) pawn = pc.add(OFF.ControllerPawn).readPointer();
 
-  const level = u64(ptr(gw).add(OFF.WorldPersistentLevel));
-  const data = level ? u64(ptr(level).add(OFF.LevelActorsData)) : null;
-  const num = level ? i32(ptr(level).add(OFF.LevelActorsNum)) : 0;
-  console.log('[+] Level=%s actorsData=%s num=%s', level, data, num);
-  if (!data || !num || num <= 0 || num > 20000) return;
+  const local = { gameInstance: gi.toString(), controller: pc ? pc.toString() : null,
+                  pawn: pawn ? pawn.toString() : null };
+  if (pawn && !pawn.isNull()) {
+    local.pos = posOf(pawn);
+    const tc = pawn.add(OFF.PawnTeamComp).readPointer();
+    local.team = tc.isNull() ? null : tc.add(OFF.TeamCompTeamID).readS32();
+    local.ai = pawn.add(OFF.PawnIsPlayerAI).readU8();
+    const mesh = pawn.add(OFF.CharacterMesh).readPointer();
+    local.mesh = mesh.toString();
+    if (!mesh.isNull()) {
+      const bd = mesh.add(OFF.MeshBoneArray).readPointer();
+      local.boneData = bd.toString();
+      local.boneNum = bd.isNull() ? 0 : mesh.add(OFF.MeshBoneArray + 8).readS32();
+    }
+    const wp = pawn.add(OFF.PawnWeapon).readPointer();
+    local.weapon = wp.toString();
+  }
+  send({ stage: 'local', data: local });
 
-  let shown = 0;
-  for (let i = 0; i < num && shown < 40; i++) {
-    const actor = u64(ptr(data).add(i * 8));
-    if (!actor || actor < 0x10000) continue;
+  const level = gw.add(OFF.WorldPersistentLevel).readPointer();
+  if (level.isNull()) { send({ stage: 'actors', error: 'no level' }); return; }
+  const data = level.add(OFF.LevelActorsData).readPointer();
+  const num = level.add(OFF.LevelActorsNum).readS32();
+  send({ stage: 'level', level: level.toString(), actorData: data.toString(), num: num });
+  if (data.isNull() || !num || num <= 0 || num > 20000) return;
 
-    const a = ptr(actor);
-    const hidden = u8(a.add(OFF.ActorHiddenByte));
-    const destroyed = u8(a.add(OFF.ActorDestroyedByte));
-    const p = pos(a);
+  const list = [];
+  for (let i = 0; i < num && list.length < 60; i++) {
+    let actor;
+    try { actor = data.add(i * 8).readPointer(); } catch (e) { continue; }
+    if (actor.isNull()) continue;
+
+    const p = posOf(actor);
     if (!p) continue;
 
-    const mesh = u64(a.add(OFF.CharacterMesh));
-    let boneNum = 0, boneData = 0;
-    if (mesh && mesh > 0x10000) {
-      boneData = u64(ptr(mesh).add(OFF.MeshBoneArray));
-      boneNum = i32(ptr(mesh).add(OFF.MeshBoneArray + 8)) || 0;
-    }
-    const teamComp = u64(a.add(OFF.PawnTeamComp));
-    const team = teamComp ? i32(ptr(teamComp).add(OFF.TeamCompTeamID)) : null;
-    const ai = u8(a.add(OFF.PawnIsPlayerAI));
+    const rec = { i: i, actor: actor.toString(), pos: p };
+    try { rec.cls = actor.add(OFF.ActorClassPrivate).readPointer().toString(); } catch (e) {}
+    rec.hidden = actor.add(OFF.ActorFlagsHidden).readU8();
+    rec.dead   = actor.add(OFF.ActorFlagsDead).readU8();
 
-    const self = (pawn && actor === pawn) ? ' <== 自己' : '';
-    console.log('#%d actor=%s pos=[%s] team=%s ai=%s hidden=%s dead=%d mesh=%s bones=%d%s',
-      i, actor, p.map(v => v.toFixed(0)).join(','), team, ai, hidden, destroyed, mesh, boneNum, self);
-    shown++;
+    const mesh = actor.add(OFF.CharacterMesh).readPointer();
+    if (!mesh.isNull()) {
+      rec.mesh = mesh.toString();
+      const bd = mesh.add(OFF.MeshBoneArray).readPointer();
+      rec.boneNum = bd.isNull() ? 0 : mesh.add(OFF.MeshBoneArray + 8).readS32();
+    }
+    const tc = actor.add(OFF.PawnTeamComp).readPointer();
+    if (!tc.isNull()) rec.team = tc.add(OFF.TeamCompTeamID).readS32();
+    rec.ai = actor.add(OFF.PawnIsPlayerAI).readU8();
+    try { rec.helm = actor.add(OFF.RangeHelmetID).readPointer().toString(); } catch (e) {}
+    try { rec.armor = actor.add(OFF.RangeArmorID).readPointer().toString(); } catch (e) {}
+    list.push(rec);
   }
+  send({ stage: 'actors', data: list });
 }
 
-setTimeout(main, 800);
+setTimeout(main, 500);
