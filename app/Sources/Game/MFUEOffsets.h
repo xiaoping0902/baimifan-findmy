@@ -286,6 +286,19 @@ static const uint32_t kMFUE_Actor_RootComponent = 0x0180;   // AActor → UScene
  */
 static const uint32_t kMFUE_SceneComponent_WorldLocation = 0x0220;
 
+/*
+ * 装备槽（头/甲/包）—— 来自《物资与头甲等级机制》对同版本游戏的反编译：
+ *     actor + 0x24E0 (9440) → 装备组件
+ *            + 0x1D8  (472) → 槽位数组
+ *     10 槽 × 0x30 (48) 字节，每槽 +0x00 是物品 ID（uint64）
+ * 物品 ID 是【十进制编码】：第 2~4 位 = 类型码（101 头 / 105 甲 / 108 包），
+ * 第 8 位 = 等级 1~6。合法性区间 [10000001, 0x4A87F317F]。
+ */
+static const uint32_t kMFUE_Pawn_EquipmentComponent = 0x24E0;
+static const uint32_t kMFUE_Equip_SlotsArray        = 0x01D8;
+static const uint32_t kMFUE_Equip_SlotStride        = 0x30;
+static const uint32_t kMFUE_Equip_SlotCount         = 10;
+
 /// 备选（局部坐标，仅当 RootComponent 未挂接时可用；留作对照）
 static const uint32_t kMFUE_SceneComponent_RelativeLocation = 0x0168;
 

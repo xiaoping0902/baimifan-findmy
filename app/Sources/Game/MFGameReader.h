@@ -49,6 +49,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) int health;
 /// 头甲等级 0=无甲
 @property (nonatomic, assign) int armorLevel;
+/* [M5.144] 头/甲/包等级（从装备槽物品 ID 的十进制编码解出，1~6；0=未读到） */
+@property (nonatomic, assign) int helmetLevel;
+@property (nonatomic, assign) int backpackLevel;
+@property (nonatomic, assign) BOOL equipKnown;
+/* 第一个非零槽位物品 ID —— 用来核对 ID 编码格式 */
+@property (nonatomic, assign) uint64_t equipRawID;
 @property (nonatomic, assign) BOOL armorKnown;
 
 /// 相对相机朝向的方位角（度），**带符号**：

@@ -1009,16 +1009,28 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, p2.y + 2.0f), boxCol, buf);
     }
 
-    /* ── 头甲（[M5.2] 用 fontArmor 字号 + Armor 颜色 + 真实等级）── */
+    /* ── 头甲包（[M5.144] 等级来自装备槽物品 ID 的十进制编码）──
+     * 颜色沿用《物资与头甲等级机制》那张表：2 绿 / 3 天蓝 / 4 紫 / 5 黄 / 6 红。
+     */
     if (st.showArmor) {
-        char buf[24];
-        if (e.armorKnown) {
-            snprintf(buf, sizeof(buf), "%d", e.armorLevel);
+        char buf[40];
+        ImU32 col = MFU32([st colorForSlot:MFColorSlotArmor]);
+        if (e.equipKnown) {
+            int h = e.helmetLevel, a = e.armorLevel, b = e.backpackLevel;
+            snprintf(buf, sizeof(buf), "头%d 甲%d 包%d", h, a, b);
+            int top = MAX(h, MAX(a, b));
+            switch (top) {
+                case 2: col = IM_COL32(0, 255, 0, 235); break;
+                case 3: col = IM_COL32(135, 206, 250, 235); break;
+                case 4: col = IM_COL32(122, 103, 238, 235); break;
+                case 5: col = IM_COL32(255, 219, 0, 235); break;
+                case 6: col = IM_COL32(255, 0, 0, 235); break;
+                default: break;
+            }
         } else {
             snprintf(buf, sizeof(buf), "甲");
         }
-        MFText(dl, st.fontArmor, ImVec2(p2.x + 4.0f, p1.y),
-               MFU32([st colorForSlot:MFColorSlotArmor]), buf);
+        MFText(dl, st.fontArmor, ImVec2(p2.x + 4.0f, p1.y), col, buf);
     }
 
     /* ── 队伍（[M5.2] 接线：显示队伍编号）── */

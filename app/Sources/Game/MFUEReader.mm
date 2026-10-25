@@ -3,6 +3,8 @@
 #import "../Read/MFReadBackend.h"
 #include <math.h>
 #include <stdlib.h>    /* calloc / free —— 宽松读要清零 */
+#include <string.h>    /* memcpy —— 装备槽解析 */
+#include <stdio.h>     /* snprintf —— 物品 ID 十进制解码 */
 
 @implementation MFUEResolveResult
 - (instancetype)init {
@@ -283,6 +285,49 @@ static NSString *gUEReport = nil;
                 while (d < -180.0f) d += 360.0f;
                 e.bearingDeg = d;
                 e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
+            }
+
+            /*
+             * ★ [M5.144] 头/甲/包等级：装备槽 → 物品 ID → 十进制解码。
+             *
+             * 链路（《物资与头甲等级机制》对同版本游戏的反编译）：
+             *     actor + 0x24E0 → 装备组件
+             *            + 0x1D8 → 槽位数组（10 槽 × 0x30 字节，槽内 +0 是 uint64 物品 ID）
+             * ID 十进制编码：第 2~4 位 = 类型码（101 头 / 105 甲 / 108 包），第 8 位 = 等级。
+             */
+            {
+                uint64_t equipComp = 0;
+                if ([rb readU64:actor + kMFUE_Pawn_EquipmentComponent out:&equipComp] &&
+                    MFUEIsValidPtr(equipComp)) {
+                    uint64_t slots = 0;
+                    if ([rb readU64:equipComp + kMFUE_Equip_SlotsArray out:&slots] &&
+                        MFUEIsValidPtr(slots)) {
+                        uint8_t rawSlots[kMFUE_Equip_SlotCount * kMFUE_Equip_SlotStride];
+                        if ([rb readRemote:slots into:rawSlots size:sizeof(rawSlots)]) {
+                            for (uint32_t s = 0; s < kMFUE_Equip_SlotCount; s++) {
+                                uint64_t itemId = 0;
+                                memcpy(&itemId, rawSlots + s * kMFUE_Equip_SlotStride,
+                                       sizeof(itemId));
+                                if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
+                                if (e.equipRawID == 0) e.equipRawID = itemId;
+
+                                char dec[24] = {0};
+                                int len = snprintf(dec, sizeof(dec), "%llu",
+                                                   (unsigned long long)itemId);
+                                if (len < 8) continue;
+                                int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 + (dec[3] - '0');
+                                int level = dec[7] - '0';
+                                if (level < 1 || level > 6) continue;
+                                switch (typeCode) {
+                                    case 101: e.helmetLevel = level;   e.equipKnown = YES; break;
+                                    case 105: e.armorLevel = level;    e.armorKnown = YES; e.equipKnown = YES; break;
+                                    case 108: e.backpackLevel = level; e.equipKnown = YES; break;
+                                    default: break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             [out addObject:e];
