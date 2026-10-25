@@ -164,6 +164,79 @@ static NSString *_Nullable MFUEDecodeName(const uint8_t *src, uint32_t len, BOOL
     return [NSString stringWithCharacters:buf length:n];
 }
 
+/*
+ * ★ [M5.182] 游戏自研的 GNames 加密（真机一直 ok=0 的根因）★
+ *
+ * 规格：rea_ipa_work/GNames解密算法规格.md（逆向自游戏内解码器 @0x100021df4）
+ *
+ *   密文 = 条目 + 2 起的 len 字节
+ *   明文[i] = 密文[i] ^ key
+ *   key = ((k0 | 0x7F) + 0x80) & 0xFF
+ *   k0 由 (len mod 9) 九选一；最后截掉最后一个 '/' 之前的路径前缀
+ *
+ * 注意顺序：先整体异或 → 按 '/' 截断 → 最后才做字符白名单校验。
+ * '/' 本身不在白名单里，顺序反了会把所有带路径的名字判死。
+ */
+static uint32_t MFUEFNameK0(uint32_t len, uint16_t hdr) {
+    switch (len % 9u) {
+        case 0: return ((hdr >> 6) & 0x1Fu) + len;   /* 头第 6-10 位 + 长度 */
+        case 1: return (len ^ 0xDFu) + len;
+        case 2: return (len | 0xCFu) + len;
+        case 3: return 33u * len;
+        case 4: return len + (hdr >> 8);
+        case 5: return 3u * len + 5u;
+        case 6: return ((4u * len) | 5u) + len;
+        case 7: return ((hdr >> 10) | 7u) + len;
+        default: return (len ^ 0x0Cu) + len;         /* len % 9 == 8 */
+    }
+}
+
+static NSString *_Nullable MFUEDecodeEncryptedName(const uint8_t *src, uint32_t len, uint16_t hdr) {
+    if (src == NULL || len == 0 || len > kMFUEGMaxNameChars) return nil;
+
+    const uint8_t key = (uint8_t)(((MFUEFNameK0(len, hdr) | 0x7Fu) + 0x80u) & 0xFFu);
+
+    uint8_t buf[kMFUEGMaxNameChars];
+    for (uint32_t i = 0; i < len; i++) buf[i] = (uint8_t)(src[i] ^ key);
+
+    /* 截掉最后一个 '/' 之前的部分（/Game/Items/… → 只留名字本体） */
+    uint32_t start = 0;
+    for (int i = (int)len - 1; i >= 0; i--) {
+        if (buf[i] == '/') { start = (uint32_t)i + 1; break; }
+    }
+    const uint32_t n = len - start;
+    if (n == 0) return nil;
+
+    /* 解错 key 时这里立刻挡掉（纯标识符校验） */
+    for (uint32_t i = 0; i < n; i++) {
+        if (!MFUEIsNameChar((unichar)buf[start + i])) return nil;
+    }
+    return [[NSString alloc] initWithBytes:buf + start
+                                    length:(NSUInteger)n
+                                  encoding:NSASCIIStringEncoding];
+}
+
+/// 自动判别：先按游戏加密解，解不出来再按明文解
+static NSString *_Nullable MFUEDecodeNameAuto(const uint8_t *src, uint32_t len,
+                                              BOOL wide, uint16_t hdr) {
+    if (src == NULL || len == 0) return nil;
+
+    /*
+     * 顺序说明：本机池里存的是密文，所以加密解优先。
+     * 头位型 (hdr & 0xC000) == 0x4000 是游戏自己认条目的判据，先试它；
+     * 万一某些条目不在这个位型里，也再无条件试一次解密 —— 明文名异或后
+     * 通不过标识符白名单，会自然回落到明文路径，不会误判。
+     */
+    if ((hdr & 0xC000u) == 0x4000u) {
+        NSString *enc = MFUEDecodeEncryptedName(src, len, hdr);
+        if (enc.length > 0) return enc;
+        return MFUEDecodeName(src, len, wide);
+    }
+    NSString *plain = MFUEDecodeName(src, len, wide);
+    if (plain.length > 0) return plain;
+    return MFUEDecodeEncryptedName(src, len, hdr);
+}
+
 static inline BOOL MFUEIsPowerOfTwo64(uint64_t v) {
     return (v != 0) && ((v & (v - 1)) == 0);
 }
@@ -817,7 +890,8 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
         src = payload;
     }
 
-    return MFUEDecodeName(src, len, wide);
+    /* [M5.182] 走自动判别：加密条目用游戏同款 XOR 解密，明文条目照旧 */
+    return MFUEDecodeNameAuto(src, len, wide, raw);
 }
 
 /// 用当前配置解（正常路径）
@@ -1075,7 +1149,7 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
             size_t off = cursor + kMFUEGEntryHeaderBytes;
             if (off + need > (size_t)bytes) break;
 
-            NSString *name = MFUEDecodeName(buf + off, len, wide);
+            NSString *name = MFUEDecodeNameAuto(buf + off, len, wide, raw);
             if (name == nil) break;                    // 解不出合法名字 → 这条走法不对
 
             for (NSString *lm in landmarks) {
