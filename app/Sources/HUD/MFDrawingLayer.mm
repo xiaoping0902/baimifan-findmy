@@ -380,19 +380,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                         loot:(NSArray<MFEntity *> **)outLoot
                       source:(MFDrawSource *)outSource {
     /*
-     * ★ [M5.161] 顺序修正：KFD 直读优先，外部 agent 只做兜底。
+     * ★ [M5.162] 只用 KFD。UDP/agent 那条路彻底摘掉。
      *
-     * 以前是「agent 有包就直接用并 return」，而 agent 的包只有坐标，
-     * 没有队伍/头甲/血量/名字 —— 于是过滤全失效、自己也被画。
-     * 而 MFGameReader 走的是本进程的 KFD（mfpt_read），过滤和字段都齐全。
-     * 现在的顺序：
-     *   ① KFD 直读（MFGameReader，本进程内核读）
-     *   ② 外部 agent 包（UDP，兜底）
-     *   ③ 可自动建立的 UE4 链
+     * agent 是电脑端调试工具（tools/agent_esp.js），不进 App、也不参与绘制。
+     * 小玉要什么数据，直接用自己的 KFD（mfpt_read）从内核读：
+     *   ① MFGameReader —— 校准过的链，字段最全（队伍/头甲/血量/手持/UIN）
+     *   ② 自动 UE4 链  —— 同一套 KFD，偏移不同
      */
-    [self startExternalFeedIfNeeded];
-
-    // ① KFD 直读：字段最全，过滤最强，优先使用
     MFGameReader *calibrated = [MFGameReader shared];
     if (calibrated.ready && calibrated.rootObjectBase != 0) {
         NSDictionary *frame = [calibrated readFrameWithSize:size];
@@ -413,13 +407,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             return YES;
         }
     }
-    // ② 外部 agent 兜底（UDP，字段少但至少能出框）
-    if ([self acquireExternalFrameWithSize:size camera:outCamera
-                                  entities:outEntities loot:outLoot source:outSource]) {
-        return YES;
-    }
-
-    // ③ 回退到可自动建立的 UE4 链
+    // ② 回退到可自动建立的 UE4 链（同样是 KFD 直读）
     return [self acquireUE4FrameWithSize:size camera:outCamera
                                 entities:outEntities loot:outLoot source:outSource];
 }
