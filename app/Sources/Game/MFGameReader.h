@@ -64,6 +64,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t bagRawID;
 @property (nonatomic, assign) BOOL armorKnown;
 
+/* [M5.176] 护甲耐久 —— FArmorInfo.ArmorHP / MaxArmorHP（float，实测 45/45、20/20、55/55）
+ * max == 0 表示没读到，绘制层不显示耐久。 */
+@property (nonatomic, assign) float helmetHP,  helmetMaxHP;
+@property (nonatomic, assign) float armorHP,   armorMaxHP;
+
 /// 相对相机朝向的方位角（度），**带符号**：
 ///   0 = 正前 · 负 = 左 · 正 = 右 · ±180 = 正后
 /// ★ 由坐标 + 相机 yaw 算得，【不依赖任何游戏字段】——

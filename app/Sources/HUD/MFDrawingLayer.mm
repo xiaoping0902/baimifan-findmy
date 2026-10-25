@@ -77,6 +77,10 @@ typedef NS_ENUM(NSInteger, MFActorKind) {
 @property (nonatomic, assign) MFActorKind kind;
 @property (nonatomic, copy, nullable) NSString *className;
 @property (nonatomic, assign) CFTimeInterval seenAt;
+/* [M5.176] 「确认是角色」：Mesh 存在 + 骨骼数 ≥20 + 不是自己的 Mesh。
+ * 分类不可用时用它兜底 —— 只画验证过的人，绝不把枪/道具/自己画出来。 */
+@property (nonatomic, assign) BOOL charOK;
+@property (nonatomic, assign) CFTimeInterval charAt;
 @end
 @implementation MFUECachedActor
 @end
@@ -185,7 +189,7 @@ static BOOL MFDecodeItemID(uint64_t itemId, int *typeCode, int *level) {
 ///   EquipmentInfoArray     stride 0x30，ItemID@+0x00（没有 type）
 static void MFFillEquipFromRecords(MFReadBackend *rb, uint64_t ec,
                                    uint32_t dataOff, uint32_t numOff, uint32_t stride,
-                                   int32_t typeOff, uint32_t itemIdOff,
+                                   int32_t typeOff, uint32_t itemIdOff, BOOL hasDurability,
                                    NSMutableDictionary *d) {
     if (ec == 0 || stride == 0 || itemIdOff + 8 > stride) return;
 
@@ -226,6 +230,22 @@ static void MFFillEquipFromRecords(MFReadBackend *rb, uint64_t ec,
 
         NSString *key = (slot == 0) ? @"h" : (slot == 1 ? @"a" : @"b");
         if ([d[key] intValue] == 0) d[key] = @(level);
+
+        /* [M5.176] 耐久：FArmorInfo +0x18 ArmorHP / +0x1C MaxArmorHP */
+        if (hasDurability && (uint32_t)(itemIdOff + 0x20) <= stride) {
+            float cur = 0.0f, maxHP = 0.0f;
+            memcpy(&cur,   buf + off + 0x18, sizeof(cur));
+            memcpy(&maxHP, buf + off + 0x1C, sizeof(maxHP));
+            if (isfinite(cur) && isfinite(maxHP) &&
+                cur >= 0.0f && maxHP > 0.0f && maxHP <= 10000.0f && cur <= maxHP + 1.0f) {
+                NSString *kCur = (slot == 0) ? @"hHP" : @"aHP";
+                NSString *kMax = (slot == 0) ? @"hMax" : @"aMax";
+                if ([d[kMax] floatValue] <= 0.0f) {
+                    d[kCur] = @(cur);
+                    d[kMax] = @(maxHP);
+                }
+            }
+        }
     }
 }
 
@@ -771,6 +791,25 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             }
             cached.x = pos[0]; cached.y = pos[1]; cached.z = pos[2];
             cached.seenAt = now;
+
+            /*
+             * [M5.176] 每 2 秒复核一次「这个 Actor 是不是人」。
+             * 只对出现在轮转里的 Actor 做，3 次读，摊到 2 秒 —— 代价可忽略。
+             * 结果用于"分类不可用"时的兜底：宁可少画，绝不把枪/道具/自己画成敌人。
+             */
+            if (now - cached.charAt > 2.0) {
+                cached.charAt = now;
+                uint64_t vMesh = 0, vBones = 0;
+                int32_t vNum = 0;
+                BOOL ok = NO;
+                if ([rb readU64:addr + kMFUE_Character_Mesh out:&vMesh] && MFUEIsValidPtr(vMesh) &&
+                    [rb readU64:vMesh + 0x750 out:&vBones] && MFUEIsValidPtr(vBones) &&
+                    [rb readRemote:vMesh + 0x758 into:&vNum size:4] && vNum >= 20 && vNum <= 256) {
+                    ok = YES;
+                }
+                if (ok && gMFUELocalMesh != 0 && vMesh == gMFUELocalMesh) ok = NO;  // 自己
+                cached.charOK = ok;
+            }
             /*
              * ★ [M5.85] 类名必须走两跳 —— 这是分类恒失败的真正根因 ★
              *
@@ -934,6 +973,17 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             if (e.isBot) _kindBot++; else _kindReal++;
             [ents addObject:e];
         } else {
+            /*
+             * [M5.176] 分类不可用（或判成 Unknown）时的兜底。
+             *
+             * 旧行为：带坐标就画 —— 于是自己、手上的枪、地面道具、展示台全成了"人"。
+             * 现在：只画轮转里验证过「有骨骼 Mesh、且不是自己 Mesh」的 Actor。
+             */
+            if (!a.charOK) continue;
+            if (![self fillPersonFields:e actor:a.address reader:rb
+                                profile:ue.profile now:now]) {
+                continue;
+            }
             [ents addObject:e];
         }
     }
@@ -1211,7 +1261,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         const char *name = e.name.length ? e.name.UTF8String
                           : (e.isBot ? "人机" : "敌人");
 
-        char lHeld[32], lArmor[48], lTeam[48], lName[96];
+        char lHeld[32], lArmor[112], lTeam[48], lName[96];
         {
             const char *wn = e.weaponRawID ? MFItemNameForID(e.weaponRawID) : NULL;
             if (wn)              snprintf(lHeld, sizeof(lHeld), "持 %s", wn);
@@ -1222,7 +1272,17 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         ImU32 armorCol = MFU32([st colorForSlot:MFColorSlotArmor]);
         if (e.equipKnown) {
             int h = e.helmetLevel, a = e.armorLevel, b = e.backpackLevel;
-            snprintf(lArmor, sizeof(lArmor), "头%d 甲%d 包%d", h, a, b);
+            /* [M5.176] 带耐久：头5(45/45) 甲5(30/30) 包0 */
+            char hPart[40], aPart[40];
+            if (e.helmetMaxHP > 0.5f)
+                snprintf(hPart, sizeof(hPart), "头%d(%.0f/%.0f)", h, e.helmetHP, e.helmetMaxHP);
+            else
+                snprintf(hPart, sizeof(hPart), "头%d", h);
+            if (e.armorMaxHP > 0.5f)
+                snprintf(aPart, sizeof(aPart), "甲%d(%.0f/%.0f)", a, e.armorHP, e.armorMaxHP);
+            else
+                snprintf(aPart, sizeof(aPart), "甲%d", a);
+            snprintf(lArmor, sizeof(lArmor), "%s %s 包%d", hPart, aPart, b);
             switch (MAX(h, MAX(a, b))) {
                 case 2: armorCol = IM_COL32(0, 255, 0, 235); break;
                 case 3: armorCol = IM_COL32(135, 206, 250, 235); break;
@@ -1453,6 +1513,10 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     e.armorLevel    = [a[@"a"] intValue];
     e.backpackLevel = [a[@"b"] intValue];
     e.weaponRawID   = [a[@"wid"] unsignedLongLongValue];
+    e.helmetHP      = [a[@"hHP"] floatValue];
+    e.helmetMaxHP   = [a[@"hMax"] floatValue];
+    e.armorHP       = [a[@"aHP"] floatValue];
+    e.armorMaxHP    = [a[@"aMax"] floatValue];
 
     if (e.weaponRawID) e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
     if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
@@ -1477,6 +1541,43 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     d[@"h"]    = @0;
     d[@"a"]    = @0;
     d[@"b"]    = @0;
+    d[@"hHP"]  = @0.0f;
+    d[@"hMax"] = @0.0f;
+    d[@"aHP"]  = @0.0f;
+    d[@"aMax"] = @0.0f;
+
+    /*
+     * ⓿ [M5.176] 先判"是不是人" —— 也顺手把自己剔掉
+     *
+     * ULevel::Actors 是整关卡列表：枪械、投掷物、展示台、场景挂件全在里面，
+     * 而且全都有 RootComponent 和坐标。只有真正的角色带 USkeletalMeshComponent
+     * （Actor+0x3D0）且骨骼数组（Mesh+0x750）数量 ≥ 20。
+     *
+     * 这一条同时解决三件事：
+     *   · 手上的枪 / 展示枪被画成"人"；
+     *   · 场景里的道具、尸体盒被画成"人"；
+     *   · 自己的模型（第三人称相机在你身后，距离 >2m，距离兜底漏掉）被画框 ——
+     *     改用 Mesh 指针与本地玩家 Mesh 比对，最准。
+     */
+    uint64_t mesh = 0, boneData = 0;
+    int32_t boneNum = 0;
+    if (![rb readU64:actor + kMFUE_Character_Mesh out:&mesh] || !MFUEIsValidPtr(mesh)) {
+        d[@"skip"] = @YES;
+        return d;
+    }
+    if (![rb readU64:mesh + 0x750 out:&boneData] || !MFUEIsValidPtr(boneData)) {
+        d[@"skip"] = @YES;
+        return d;
+    }
+    if (![rb readRemote:mesh + 0x758 into:&boneNum size:4] ||
+        boneNum < 20 || boneNum > 256) {
+        d[@"skip"] = @YES;
+        return d;
+    }
+    if (gMFUELocalMesh != 0 && mesh == gMFUELocalMesh) {
+        d[@"skip"] = @YES;                 /* 自己的模型 */
+        return d;
+    }
 
     /* ① 人机位（AGPCharacterBase+0xE60）—— 读不到就保持"当真人画" */
     uint8_t isAI = 0;
@@ -1571,11 +1672,11 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         MFFillEquipFromRecords(rb, ec,
                                kMFUE_Equip_ArmorArray, kMFUE_Equip_ArmorArrayNum,
                                kMFUE_Equip_ArmorStride, (int32_t)kMFUE_Equip_ArmorTypeOff,
-                               kMFUE_Equip_ArmorItemIDOff, d);
+                               kMFUE_Equip_ArmorItemIDOff, YES, d);
         MFFillEquipFromRecords(rb, ec,
                                kMFUE_Equip_InfoArray, kMFUE_Equip_InfoArrayNum,
                                kMFUE_Equip_InfoStride, -1,
-                               kMFUE_Equip_InfoItemIDOff, d);
+                               kMFUE_Equip_InfoItemIDOff, NO, d);
     }
 
     return d;
