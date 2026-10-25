@@ -686,30 +686,41 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         }
 
         /*
-         * ⑥ [M5.127] GWorld 到手之后，顺着偏移表往下走：玩家链 400/56/48/928。
-         * 每一跳都写 rc 和值，断了哪一级一目了然；坐标按 +544 的 3 个 float 试读。
+         * ⑥ [M5.133] 用验证过的链做一次自检：
+         *   UWorld +0xF8 → ULevel +0x98 → Actors{data, num}
+         *   AActor +0x180 → USceneComponent +0x168 → FEncVector
          */
         if (gw > 0x100000000ULL && gw < 0x8000000000ULL) {
-            uint64_t hops[] = { 400, 56, 48, 928 };
-            uint64_t cur = gw;
-            [log appendString:@"[chain] 玩家链 400/56/48/928：\n"];
-            for (unsigned int i = 0; i < sizeof(hops) / sizeof(hops[0]); i++) {
-                uint64_t nxt = 0;
-                int r = mfpt_read(root, cur + hops[i], &nxt, sizeof(nxt));
-                BOOL ok = (r == 0 && nxt > 0x100000000ULL && nxt < 0x8000000000ULL);
-                [log appendFormat:@"  %#llx + %llu → %#llx (rc=%d)%@\n",
-                 (unsigned long long)cur, (unsigned long long)hops[i],
-                 (unsigned long long)nxt, r, ok ? @"" : @"  断在这里"];
-                if (!ok) break;
-                cur = nxt;
+            uint64_t level = 0, actorsData = 0;
+            int32_t num = 0, maxc = 0;
+            mfpt_read(root, gw + 0xF8, &level, sizeof(level));
+            if (level) {
+                mfpt_read(root, level + 0x98, &actorsData, sizeof(actorsData));
+                mfpt_read(root, level + 0xA0, &num, sizeof(num));
+                mfpt_read(root, level + 0xA4, &maxc, sizeof(maxc));
             }
-            /* 坐标：+544 处三个 float（X/Y/Z），读不到就不写 */
-            {
-                float xyz[3] = {0, 0, 0};
-                int r = mfpt_read(root, cur + 544, xyz, sizeof(xyz));
-                [log appendFormat:@"[xyz] %#llx + 544 rc=%d → %.2f, %.2f, %.2f\n",
-                 (unsigned long long)cur, r, xyz[0], xyz[1], xyz[2]];
+            [log appendFormat:
+                @"[chain] world=%#llx  level=%#llx  actors=%#llx  num=%d  max=%d\n",
+             (unsigned long long)gw, (unsigned long long)level,
+             (unsigned long long)actorsData, num, maxc];
+
+            int valid = 0, shown = 0;
+            for (int i = 0; i < num && i < 200 && actorsData; i++) {
+                uint64_t a = 0, comp = 0;
+                float v[3] = {0, 0, 0};
+                uint32_t handler = 0;
+                if (mfpt_read(root, actorsData + (uint64_t)i * 8, &a, sizeof(a)) != 0 || !a) continue;
+                if (mfpt_read(root, a + 0x180, &comp, sizeof(comp)) != 0 || !comp) continue;
+                if (mfpt_read(root, comp + 0x168, v, sizeof(v)) != 0) continue;
+                mfpt_read(root, comp + 0x174, &handler, sizeof(handler));
+                valid++;
+                if (shown < 5 && v[0] != 0.0f) {
+                    [log appendFormat:@"[actor %d] %#llx  pos=%.1f, %.1f, %.1f  handler=%u\n",
+                     i, (unsigned long long)a, v[0], v[1], v[2], handler];
+                    shown++;
+                }
             }
+            [log appendFormat:@"[actors] 有效=%d / %d\n", valid, num];
         }
 
         [log appendString:@"\nRESULT OK —— 内核与读取都在常驻的 HUD 进程里\n"];
@@ -747,21 +758,58 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             int r = mfpt_read(root, base + 0x178B44E0ULL, &gw, sizeof(gw));
             [s appendFormat:@"  gworld rc=%d %#llx\n", r, (unsigned long long)gw];
 
-            uint64_t cur = gw;
-            uint64_t hops[] = { 400, 56, 48, 928 };
-            for (unsigned int i = 0; i < sizeof(hops) / sizeof(hops[0]); i++) {
-                if (cur < 0x100000000ULL || cur > 0x8000000000ULL) break;
-                uint64_t nxt = 0;
-                int rr = mfpt_read(root, cur + hops[i], &nxt, sizeof(nxt));
-                [s appendFormat:@"  +%-4llu → %#llx (rc=%d)\n",
-                 (unsigned long long)hops[i], (unsigned long long)nxt, rr];
-                if (rr != 0 || nxt < 0x100000000ULL || nxt > 0x8000000000ULL) break;
-                cur = nxt;
+            /*
+             * ★ [M5.133] 这里换成 SDK + 二进制双向验证过的链，不再用旧表的
+             * 400/56/48/928（那组值在 +48 就断了）：
+             *
+             *   UWorld +0x0F8 → ULevel          （PersistentLevel）
+             *   ULevel +0x098 → Actors.Data，+0x0A0 → Num，+0x0A4 → Max
+             *   AActor +0x180 → RootComponent（USceneComponent）
+             *   USceneComponent +0x168 → FEncVector{X,Y,Z,EncHandler@+0xC}
+             *
+             * 二进制侧证据：LDR[x,#0xF8] 15,270 处、与 [x,#0x98] 相邻 80 处、
+             * [x,#0x98]+[x,#0xA0] 成对 2109 处。
+             */
+            uint64_t level = 0, actorsData = 0;
+            int32_t num = 0, maxc = 0;
+            if (gw) mfpt_read(root, gw + 0xF8, &level, sizeof(level));
+            if (level) {
+                mfpt_read(root, level + 0x98, &actorsData, sizeof(actorsData));
+                mfpt_read(root, level + 0xA0, &num, sizeof(num));
+                mfpt_read(root, level + 0xA4, &maxc, sizeof(maxc));
             }
-            float xyz[3] = {0, 0, 0};
-            int rx = mfpt_read(root, cur + 544, xyz, sizeof(xyz));
-            [s appendFormat:@"  xyz rc=%d → %.2f, %.2f, %.2f\n",
-             rx, xyz[0], xyz[1], xyz[2]];
+            [s appendFormat:@"  world=%#llx  level=%#llx\n",
+             (unsigned long long)gw, (unsigned long long)level];
+            [s appendFormat:@"  actors=%#llx  num=%d  max=%d\n",
+             (unsigned long long)actorsData, num, maxc];
+
+            /* 遍历 Actors：每个取 RootComponent 的位置，并统计 EncHandler 是否非 0 */
+            int valid = 0, encrypted = 0, shown = 0;
+            for (int i = 0; i < num && i < 600 && actorsData; i++) {
+                uint64_t a = 0;
+                if (mfpt_read(root, actorsData + (uint64_t)i * 8, &a, sizeof(a)) != 0 || !a) {
+                    continue;
+                }
+                uint64_t comp = 0;
+                if (mfpt_read(root, a + 0x180, &comp, sizeof(comp)) != 0 || !comp) {
+                    continue;
+                }
+                float v[3] = {0, 0, 0};
+                uint32_t handler = 0;
+                if (mfpt_read(root, comp + 0x168, v, sizeof(v)) != 0) {
+                    continue;
+                }
+                mfpt_read(root, comp + 0x174, &handler, sizeof(handler));
+                valid++;
+                if (handler) encrypted++;
+                if (shown < 10 && v[0] != 0.0f && v[1] != 0.0f && v[2] != 0.0f) {
+                    [s appendFormat:@"    A[%d] %#llx  pos=%.1f, %.1f, %.1f  handler=%u\n",
+                     i, (unsigned long long)a, v[0], v[1], v[2], handler];
+                    shown++;
+                }
+            }
+            [s appendFormat:@"  scan: valid=%d  encrypted=%d  (num=%d)\n",
+             valid, encrypted, num];
 
             /*
              * [M5.130] GWorld 结构 dump（只跑一次）。
