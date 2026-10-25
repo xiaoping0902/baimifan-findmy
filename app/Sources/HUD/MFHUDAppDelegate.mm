@@ -130,6 +130,7 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
 
 @interface MFHUDAppDelegate ()
 /* [M5.124] 内核在 HUD 进程里常驻 */
+@property (nonatomic) BOOL kernelViaKFD;   /* KFD 就绪后停用 task port 老路 */
 - (void)bootstrapKernelInHUD;
 - (void)writeHUDKernelLog:(NSString *)text;
 @property (nonatomic, strong) MFOverlayView *menuOverlay;
@@ -616,11 +617,27 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 
         [log appendString:@"\nRESULT OK —— 内核与读取都在常驻的 HUD 进程里\n"];
         [self writeHUDKernelLog:log];
+        self.kernelViaKFD = YES;      /* [M5.125] 从此刻起不再碰 task port */
     });
 }
 
 - (void)refreshTargetBinding {
     if ([self isStopping]) return;
+
+    /*
+     * ★ [M5.125] KFD 接管之后，彻底停掉 task port 那条老路。
+     *
+     * 用户的问题很直接：「不是说不用 task port 吗，为什么还有这个？」
+     * 对 —— 读内存只用 KFD 页表直读。这里的老绑定会做三件我们不要的事：
+     *   ① 每秒尝试 task_for_pid（对正版游戏必然失败，白刷日志）
+     *   ② 失败后调 unbindReader，把 MFUEReader.libBase 清成 0
+     *   ③ 把 MFReadBackend.modeFlag 置 NO，干扰 KFD 读取状态
+     * 所以 KFD 一旦就绪，这条定时绑定直接返回，什么都不碰。
+     */
+    if (self.kernelViaKFD) {
+        return;
+    }
+
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     [defaults synchronize];
     NSString *expected = [MFOffsets shared].current.processName;
