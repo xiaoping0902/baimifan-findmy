@@ -194,6 +194,15 @@ static NSString *gUEReport = nil;
     MFReadBackend *rb = [MFReadBackend shared];
     MFUEProfile *p = self.profile;
 
+    /* [M5.146] 自己的队伍（用于"同队不画"）—— 人机没有 PlayerState，不受影响 */
+    uint32_t myTeam = 0;
+    if (MFUEIsValidPtr(r.pawn)) {
+        uint64_t myTC = 0;
+        if ([rb readU64:r.pawn + p.pawn_playerState out:&myTC] && MFUEIsValidPtr(myTC)) {
+            (void)[rb readRemote:myTC + p.playerState_teamID into:&myTeam size:4];
+        }
+    }
+
     /* ★ 批量读整个指针数组（对齐原实现）：
      *   mingyun 原文：sw533...(sGamePid, v15, vActors, 8 * v16);
      *   一次系统调用拿 N 个指针，比逐个读快几十倍 —— 也大幅减少读取痕迹。
@@ -285,6 +294,30 @@ static NSString *gUEReport = nil;
                 while (d < -180.0f) d += 360.0f;
                 e.bearingDeg = d;
                 e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
+            }
+
+            /*
+             * ★ [M5.146] 人机 / 队伍（真机验证过的判据）
+             *
+             * 人机没有 PlayerState（actor+0x390 == 0），真人一定有；
+             * 队伍走 Pawn+0x10C0 → UGPTeamComponent+0x108。
+             * 实测训练营：自己 team=1、PlayerState 非空；5 个人机 team=0、PlayerState 全空。
+             */
+            {
+                uint32_t teamVal = 0;
+                uint64_t tc = 0;
+                if ([rb readU64:actor + p.pawn_playerState out:&tc] && MFUEIsValidPtr(tc)) {
+                    (void)[rb readRemote:tc + p.playerState_teamID into:&teamVal size:4];
+                }
+                e.teamId = (int)teamVal;
+
+                uint64_t ps = 0;
+                BOOL havePS = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps] &&
+                              MFUEIsValidPtr(ps);
+                e.isBot = havePS ? NO : YES;
+                if (myTeam != 0 && teamVal == myTeam && havePS) {
+                    continue;      /* 队友：不画（人机即使 team 相同也照画） */
+                }
             }
 
             /*

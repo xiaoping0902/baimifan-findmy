@@ -294,6 +294,9 @@ static const uint32_t kMFUE_SceneComponent_WorldLocation = 0x0220;
  * 物品 ID 是【十进制编码】：第 2~4 位 = 类型码（101 头 / 105 甲 / 108 包），
  * 第 8 位 = 等级 1~6。合法性区间 [10000001, 0x4A87F317F]。
  */
+/* 人机/真人判定（真机验证）：人机的 PlayerState 为空，真人非空 */
+static const uint32_t kMFUE_Actor_PlayerState = 0x0390;
+
 static const uint32_t kMFUE_Pawn_EquipmentComponent = 0x24E0;
 static const uint32_t kMFUE_Equip_SlotsArray        = 0x01D8;
 static const uint32_t kMFUE_Equip_SlotStride        = 0x30;
