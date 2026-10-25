@@ -380,8 +380,15 @@ static NSString *gUEReport = nil;
                     uint64_t slots = 0;
                     if ([rb readU64:equipComp + kMFUE_Equip_SlotsArray out:&slots] &&
                         MFUEIsValidPtr(slots)) {
+                        /*
+                         * [M5.149] 宽松读：480 字节很容易跨到未映射页，
+                         * 严格读一旦失败整段作废 —— 这就是头甲一直显示 "头- 甲- 包-" 的原因。
+                         */
                         uint8_t rawSlots[kMFUE_Equip_SlotCount * kMFUE_Equip_SlotStride];
-                        if ([rb readRemote:slots into:rawSlots size:sizeof(rawSlots)]) {
+                        size_t gotSlots = [rb readRemotePartial:slots
+                                                           into:rawSlots
+                                                           size:sizeof(rawSlots)];
+                        if (gotSlots >= kMFUE_Equip_SlotStride) {
                             for (uint32_t s = 0; s < kMFUE_Equip_SlotCount; s++) {
                                 uint64_t itemId = 0;
                                 memcpy(&itemId, rawSlots + s * kMFUE_Equip_SlotStride,

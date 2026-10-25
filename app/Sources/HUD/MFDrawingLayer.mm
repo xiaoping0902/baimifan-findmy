@@ -858,12 +858,11 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     /* ── [M5.139] 雷达：画在实体循环之后、背敌之前 ── */
     [self drawRadar:ents drawList:dl settings:st camera:cam screen:screen];
 
-    /* ── [M5.2] 背敌提示 ──
-     * 放在实体循环【之后】画，确保它盖在框上面。
-     * 它用 bearingDeg（只由坐标 + 相机 yaw 算得）判定，不依赖游戏字段，
-     * 所以偏移未校准也能工作。
-     */
-    [self drawBackEnemies:ents drawList:dl settings:st screen:screen];
+    /* [M5.149] 背敌提示（屏幕中心那圈点）先关掉：它和"子弹被绘制"的观感混淆，
+     * 需要时在菜单里再打开。实现保留在 drawBackEnemies: 里，没删。 */
+    if (st.backEnemyEnabled && NO) {
+        [self drawBackEnemies:ents drawList:dl settings:st screen:screen];
+    }
 
     // ── 物资 ──
     if (st.showLoot || st.showBox) {
@@ -1063,12 +1062,6 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             MFText(dl, st.fontPerson, ImVec2(pt.x - ts.x * 0.5f, y + lh * 3.0f),
                    boxCol, lName);
         }
-    }
-
-    /* ── 射线 ── */
-    if (st.showTracer) {
-        dl->AddLine(ImVec2(screen.x * 0.5f, screen.y), ImVec2(pt.x, pt.y),
-                    MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.6f), 1.5f);
     }
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */

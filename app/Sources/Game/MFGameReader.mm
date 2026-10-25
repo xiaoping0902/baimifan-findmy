@@ -272,7 +272,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
              * 代理身体）那条就不生效，于是屏幕上给自己画框、脚下还留一条"残留骨骼"。
              * 实体离相机不到 1.2m 的，无论指针怎么指都不可能是别人。
              */
-            if (e.distanceMeters >= 0.0f && e.distanceMeters < 1.2f) {
+            if (e.distanceMeters >= 0.0f && e.distanceMeters < 2.0f) {
                 continue;
             }
 
