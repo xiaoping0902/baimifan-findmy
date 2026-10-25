@@ -44,6 +44,13 @@ void mfpt_stats_reset(void);
 void mfpt_cache_stats(uint64_t *hit, uint64_t *miss);
 void mfpt_cache_reset(void);
 
+/*
+ * [M5.123] Dump the raw descriptors of all three levels for one VA into buf.
+ * Returns the walk result code (0 = translated). Pure diagnostics: it does not
+ * touch the v2p cache, so it always shows what the tables really say.
+ */
+int mfpt_walk_trace(uint64_t root, uint64_t va, char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

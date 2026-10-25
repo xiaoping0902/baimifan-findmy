@@ -215,6 +215,14 @@ NSString *MFCrossProcRun(int pid)
                     free(hdr);
                 }
 
+                /* [M5.123] 一条"已知能读"的对照：Mach-O 头那一页的走法 */
+                {
+                    char trace[1024];
+                    int trc = mfpt_walk_trace(root, macho, trace, sizeof(trace));
+                    [log appendFormat:@"[game] 对照（__TEXT 首字节，已知可读）rc=%d\n%s",
+                     trc, trace];
+                }
+
                 for (unsigned int i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
                     uint64_t slot = macho + cands[i].off;
                     uint64_t val = 0;
@@ -240,6 +248,13 @@ NSString *MFCrossProcRun(int pid)
                          tr == 0 ? @"(映射存在)"
                                  : (tr == -11 ? @"(L3 不存在 = 这页没映射)"
                                               : (tr == -12 ? @"(压缩页)" : @"(其它)"))];
+
+                        /* [M5.123] 失败时把三级原始描述符打出来，和 Frida 的结论对齐 */
+                        if (tr != 0) {
+                            char trace[1024];
+                            int trc = mfpt_walk_trace(root, slot, trace, sizeof(trace));
+                            [log appendFormat:@"[game]   trace rc=%d\n%s", trc, trace];
+                        }
                     }
 
                     BOOL plausible = (r == 0 && val > 0x100000000ULL && val < 0x8000000000ULL);

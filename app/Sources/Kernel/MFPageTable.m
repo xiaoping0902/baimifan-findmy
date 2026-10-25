@@ -14,6 +14,7 @@
 #import "MFKernelBridge.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #define MFP_KADDR_MIN   0xffff000000000000ULL
 #define MFP_MASK_16K    0x0000ffffffffc000ULL
@@ -194,8 +195,93 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
     return 0;
 }
 
-int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out)
+/*
+ * [M5.123] 把三级走法的每一步原样打出来。
+ *
+ * 起因：Frida 在游戏自己地址空间里读 base+0x178B44E0 是成功的（拿到
+ * 0x13d302600），而我们的 walk 报 -11（L3 不存在）。同一个 root 读
+ * __TEXT 又是成功的。也就是说判据在特定页上不成立，必须看原始描述符。
+ *
+ * 输出每一级的下标、表地址、描述符原值、以及 VALID/TYPE 两位的解读。
+ * 返回 walk 的最终结果码（0 表示成功）。
+ */
+int mfpt_walk_trace(uint64_t root, uint64_t va, char *buf, size_t cap)
 {
+    size_t used = 0;
+    uint64_t tt = root, tte = 0, idx, pa = 0;
+    int rc = 0;
+    size_t n;
+
+#define MFP_EMIT(...)                                                      \
+    do {                                                                   \
+        if (used + 1 < cap) {                                              \
+            n = (size_t)snprintf(buf + used, cap - used, __VA_ARGS__);      \
+            if (n > 0) used += (n < cap - used ? n : cap - used - 1);        \
+        }                                                                  \
+    } while (0)
+
+    if (!buf || cap == 0) return -2;
+    buf[0] = '\0';
+
+    MFP_EMIT("    walk va=%#llx root=%#llx\n", (unsigned long long)va,
+             (unsigned long long)root);
+
+    idx = (va & MFP_L1_INDEX) >> MFP_L1_SHIFT;
+    if (mfp_k64(tt + idx * 8, &tte) != 0) {
+        MFP_EMIT("      L1[%llu] %#llx 读失败\n", (unsigned long long)idx,
+                 (unsigned long long)(tt + idx * 8));
+        return -4;
+    }
+    MFP_EMIT("      L1[%llu] %#llx = %#llx  v=%d t=%d%s\n",
+             (unsigned long long)idx, (unsigned long long)(tt + idx * 8),
+             (unsigned long long)tte, (int)(tte & 1), (int)((tte >> 1) & 1),
+             ((tte & 1) && !((tte >> 1) & 1)) ? "  (块描述符)" : "");
+    if (!(tte & MFP_TTE_VALID)) return -5;
+    if (!((tte >> 1) & 1)) {                       /* L1 block: 512 GB */
+        pa = ((tte & MFP_MASK_16K & ~MFP_L1_OFFMASK) | (va & MFP_L1_OFFMASK));
+        MFP_EMIT("      → L1 块映射 pa=%#llx\n", (unsigned long long)pa);
+        return 0;
+    }
+    if (mfp_phys_to_kva(tte & MFP_MASK_16K, &tt) != 0) return -6;
+
+    idx = (va & MFP_L2_INDEX) >> MFP_L2_SHIFT;
+    if (mfp_k64(tt + idx * 8, &tte) != 0) {
+        MFP_EMIT("      L2[%llu] 读失败\n", (unsigned long long)idx);
+        return -7;
+    }
+    MFP_EMIT("      L2[%llu] %#llx = %#llx  v=%d t=%d%s\n",
+             (unsigned long long)idx, (unsigned long long)(tt + idx * 8),
+             (unsigned long long)tte, (int)(tte & 1), (int)((tte >> 1) & 1),
+             ((tte & 1) && !((tte >> 1) & 1)) ? "  (块描述符)" : "");
+    if (!(tte & MFP_TTE_VALID)) return -8;
+    if (!((tte >> 1) & 1)) {                       /* L2 block: 32 MB */
+        pa = ((tte & MFP_MASK_16K & ~MFP_L2_OFFMASK) | (va & MFP_L2_OFFMASK));
+        MFP_EMIT("      → L2 块映射 pa=%#llx\n", (unsigned long long)pa);
+        return 0;
+    }
+    if (mfp_phys_to_kva(tte & MFP_MASK_16K, &tt) != 0) return -9;
+
+    idx = (va & MFP_L3_INDEX) >> MFP_L3_SHIFT;
+    if (mfp_k64(tt + idx * 8, &tte) != 0) {
+        MFP_EMIT("      L3[%llu] 读失败\n", (unsigned long long)idx);
+        return -10;
+    }
+    MFP_EMIT("      L3[%llu] %#llx = %#llx  v=%d t=%d 压缩=%d\n",
+             (unsigned long long)idx, (unsigned long long)(tt + idx * 8),
+             (unsigned long long)tte, (int)(tte & 1), (int)((tte >> 1) & 1),
+             (tte & (MFP_PTE_COMPRESSED | MFP_PTE_COMP_ALT)) ? 1 : 0);
+    if ((tte & MFP_PTE_TYPE_VALID) != MFP_PTE_TYPE_VALID) return -11;
+    if (tte & (MFP_PTE_COMPRESSED | MFP_PTE_COMP_ALT)) return -12;
+
+    pa = ((tte & MFP_MASK_16K) | (va & MFP_L3_OFFMASK));
+    MFP_EMIT("      → 4 级页 pa=%#llx\n", (unsigned long long)pa);
+    (void)rc;
+    return 0;
+
+#undef MFP_EMIT
+}
+
+int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out){
     uint64_t pa = 0, kva = 0;
     uint32_t v = 0;
 
