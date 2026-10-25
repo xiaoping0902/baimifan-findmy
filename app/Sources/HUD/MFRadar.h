@@ -33,6 +33,7 @@ typedef struct {
     float distM;            // 到自己的距离（米），用于标注
     ImU32 color;            // 光点颜色
     BOOL  isBot;            // 人机 → 小一号的点
+    float yawDeg;           // [M5.178] 目标朝向（ControlRotation.Yaw，度）；NAN = 未知，不画方向
 } MFRadarBlip;
 
 /**

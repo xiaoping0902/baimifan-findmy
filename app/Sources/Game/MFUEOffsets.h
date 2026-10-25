@@ -334,6 +334,16 @@ static const uint32_t kMFUE_Pawn_HealthComponent = 0x10B8;
 static const uint32_t kMFUE_Health_Value         = 0x0258;
 /// 血量合理上限：超出即视为读错/未映射，不当真
 static const float    kMFUE_HealthMax            = 2000.0f;
+
+/*
+ * ★ [M5.178] 朝向（雷达上的"他在看哪边"）
+ *     APawn::Controller            @ 0x03A8  AController*
+ *     AController::ControlRotation @ 0x03D8  FRotator（Pitch/Yaw/Roll 三个 float）
+ * 取值来自 Dumper-7 SDK（Engine_classes.hpp），Yaw 就是"看向的方位角"。
+ * 人机走 AIController 也有 ControlRotation（AI 的注视方向），一样能读。
+ */
+static const uint32_t kMFUE_Pawn_Controller              = 0x03A8;
+static const uint32_t kMFUE_Controller_ControlRotation   = 0x03D8;
 /// 名字长度上限（FString Num 的合法区间）
 static const int32_t  kMFUE_PlayerNameMaxChars   = 32;
 

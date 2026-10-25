@@ -76,6 +76,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) float bearingDeg;
 /// 是否在背后（|bearingDeg| > 90）
 @property (nonatomic, assign) BOOL isBehind;
+/// [M5.178] 目标朝向（ControlRotation.Yaw，度；NAN = 未读到）。雷达用它画方向指针。
+@property (nonatomic, assign) float yawDeg;
 @end
 
 @interface MFGameReader : NSObject

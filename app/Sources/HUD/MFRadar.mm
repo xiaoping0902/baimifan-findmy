@@ -177,6 +177,32 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
         dl->AddCircleFilled(p, markerR + 1.2f * scale, IM_COL32(0, 0, 0, 130), 16);
         dl->AddCircleFilled(p, markerR, b->color, 16);
 
+        /*
+         * ★ [M5.178] 朝向：雷达上画一根短指针，指向"他在看的方向"。
+         *
+         * 世界前向量 = (cos θ, sin θ)，θ = ControlRotation.Yaw。
+         * 和光点用同一套旋转（ProjectRadarOffset），所以"前方朝上/北朝上"两种模式都对。
+         */
+        if (isfinite(b->yawDeg)) {
+            const float th = b->yawDeg * (kMFRA_PI / 180.0f);
+            const float wx = cosf(th), wy = sinf(th);
+            float rx, ry;
+            if (cfg->northUp) {
+                rx =  wx;
+                ry = -wy;
+            } else {
+                const float camRad = cfg->yawDeg * (kMFRA_PI / 180.0f);
+                const float cs = sinf(camRad), cc = cosf(camRad);
+                rx =  (wy * cc - wx * cs);
+                ry = -(wx * cc + wy * cs);
+            }
+            const float len = (markerR + 9.0f * scale);
+            const ImVec2 tip(p.x + rx * len, p.y + ry * len);
+            dl->AddLine(p, tip, b->color, 1.5f * scale);
+            /* 箭头尖：在 tip 处点一个小点，远看也能分辨朝向 */
+            dl->AddCircleFilled(tip, 1.6f * scale, b->color, 12);
+        }
+
         if (b->distM > 0.0f && b->distM < 900.0f) {
             const float fs = 10.0f * scale;
             char buf[16];

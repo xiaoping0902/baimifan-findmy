@@ -81,6 +81,9 @@ typedef NS_ENUM(NSInteger, MFActorKind) {
  * 分类不可用时用它兜底 —— 只画验证过的人，绝不把枪/道具/自己画出来。 */
 @property (nonatomic, assign) BOOL charOK;
 @property (nonatomic, assign) CFTimeInterval charAt;
+/* [M5.178] 朝向（雷达方向指针用）：Yaw 度 + 上次读取时间（15Hz 限流） */
+@property (nonatomic, assign) float yawDeg;
+@property (nonatomic, assign) CFTimeInterval yawAt;
 @end
 @implementation MFUECachedActor
 @end
@@ -787,6 +790,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             if (cached == nil) {
                 cached = [[MFUECachedActor alloc] init];
                 cached.address = addr;
+                cached.yawDeg = NAN;         /* [M5.178] 还没读到朝向 */
                 _ueActors[key] = cached;
             }
             cached.x = pos[0]; cached.y = pos[1]; cached.z = pos[2];
@@ -885,6 +889,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
          * 目标都显示成一条空血条 —— 看起来就像"血量功能坏了"。 */
         e.health = -1;
         e.address = a.address;
+        e.yawDeg = a.yawDeg;                 /* [M5.178] 雷达方向指针 */
         e.worldX = a.x; e.worldY = a.y; e.worldZ = a.z;
         e.distanceMeters = [MFProjection distanceMetersFrom:world to:camPos];
         if (e.distanceMeters > maxDrawDistance) continue;   // 太远，连投影都不用做
@@ -989,6 +994,22 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     }
     for (NSNumber *key in stale) [_ueActors removeObjectForKey:key];
     [self logClassHistogramIfDue];
+
+    /*
+     * [M5.178] 每 10 秒一行剔除统计 —— 用来回答"队友为什么也被画"：
+     *   自己队号是不是 0（0 = 过滤失效）、菜单里的「队友」是不是开着的、这一帧画了几个人。
+     */
+    {
+        static CFTimeInterval lastTeamLog = 0;
+        if (now - lastTeamLog > 10.0) {
+            lastTeamLog = now;
+            MFHUDLogLine(@"[剔除] 自己队=%u · 展示队友=%d · 本帧画人=%lu · 缓存Actor=%lu",
+                         gMFUELocalTeam,
+                         (int)[MFSettings shared].showTeammates,
+                         (unsigned long)ents.count,
+                         (unsigned long)_ueActors.count);
+        }
+    }
 
     if (outEntities) *outEntities = ents;
     if (outLoot) *outLoot = lootOut;
@@ -1475,12 +1496,50 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
 
     a.x = pos[0]; a.y = pos[1]; a.z = pos[2];
     a.seenAt = now;
+
+    /*
+     * [M5.178] 顺手取朝向（雷达方向指针）。
+     * APawn+0x3A8 = Controller；AController+0x3D8 = ControlRotation（Pitch/Yaw/Roll）。
+     * 转向变化快但不需要 60Hz —— 15Hz 足够，省掉一半以上读取。
+     */
+    if (now - a.yawAt > 0.066) {
+        a.yawAt = now;
+        uint64_t ctrl = 0;
+        if ([rb readU64:a.address + kMFUE_Pawn_Controller out:&ctrl] && MFUEIsValidPtr(ctrl)) {
+            float rot[3] = {0};     /* Pitch, Yaw, Roll */
+            if ([rb readRemote:ctrl + kMFUE_Controller_ControlRotation into:rot size:12] &&
+                isfinite(rot[1]) && fabsf(rot[1]) <= 720.0f) {
+                a.yawDeg = rot[1];
+            }
+        }
+    }
 }
 
 - (BOOL)fillPersonFields:(MFEntity *)e actor:(uint64_t)actor
                   reader:(MFReadBackend *)rb profile:(MFUEProfile *)p
                      now:(CFTimeInterval)now {
     if (actor == 0) return NO;
+
+    /*
+     * [M5.178] 本地队伍号补读。
+     * 队伍过滤全靠 gMFUELocalTeam；resolve 那一下如果刚好读到 0（换人/重生瞬间），
+     * 过滤会整体失效 —— 表现就是「队友也被画成敌人」。这里发现是 0 就自己补一次（2 秒冷却）。
+     */
+    if (gMFUELocalTeam == 0 && gMFUELocalPawn != 0) {
+        static CFTimeInterval lastTeamTry = 0;
+        if (now - lastTeamTry > 2.0) {
+            lastTeamTry = now;
+            uint64_t tc = 0;
+            if ([rb readU64:gMFUELocalPawn + kMFUE_Pawn_PlayerState out:&tc] &&
+                MFUEIsValidPtr(tc)) {
+                int32_t t = 0;
+                if ([rb readRemote:tc + kMFUE_PlayerState_TeamID into:&t size:4] &&
+                    t >= 0 && t < 1000) {
+                    gMFUELocalTeam = (uint32_t)t;
+                }
+            }
+        }
+    }
 
     /* ① 自己：按 Pawn 指针，读不到时下面还有距离兜底 */
     if (gMFUELocalPawn != 0 && actor == gMFUELocalPawn) return NO;
@@ -1626,8 +1685,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         d[@"team"] = @(team);
     }
 
-    /* ⑤ 队友：同队 + 有 PlayerState（人机 team 恒 0，不受影响），菜单可反 */
-    if (havePS && gMFUELocalTeam != 0 && [d[@"team"] intValue] == (int)gMFUELocalTeam &&
+    /* ⑤ 队友：同队就丢（菜单「队友」可反）。[M5.178] 不再要求 havePS ——
+     *    人机/未完全复制的目标也有 TeamComp，之前那个条件让一部分队友漏过筛选。 */
+    if (gMFUELocalTeam != 0 && [d[@"team"] intValue] == (int)gMFUELocalTeam &&
         ![MFSettings shared].showTeammates) {
         d[@"skip"] = @YES;
         return d;
@@ -1719,6 +1779,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         blips[n].x = e.worldX;
         blips[n].y = e.worldY;
         blips[n].distM = e.distanceMeters;
+        blips[n].yawDeg = e.yawDeg;          /* [M5.178] 他在看哪边 */
         blips[n].isBot = e.isBot;
         blips[n].color = e.isBot ? IM_COL32(255, 190, 90, 235)
                                  : IM_COL32(238, 80, 70, 235);
