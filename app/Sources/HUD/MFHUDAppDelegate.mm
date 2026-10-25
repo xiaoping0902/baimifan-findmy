@@ -721,7 +721,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             NSMutableString *s = [NSMutableString string];
             NSDateFormatter *f = [[NSDateFormatter alloc] init];
             f.dateFormat = @"HH:mm:ss";
-            [s appendFormat:@"[%s] session=%@\n", f.stringFromDate.description.UTF8String,
+            NSString *stamp = [f stringFromDate:[NSDate date]];
+            [s appendFormat:@"[%@] session=%@\n", stamp,
              mf_is_open() ? @"open" : @"closed"];
 
             uint64_t base = [MFUEReader shared].libBase;
