@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Included inside namespace ios; all coordinates are logical panel pixels.
 static bool DrawingValue(const UIState& st,int index) {
     switch(index){
@@ -239,7 +239,7 @@ static float Personality(Canvas& c) {
     const char* styles[]={"分段","胶囊"};int style=NormalizeHealthBarStyleId(c.st.healthBarStyle)==kHealthBarStyleCapsule?1:0;
     if(c.segment(14,110,cw-28,"血条样式",styles,2,style,"health_style"))c.st.healthBarStyle=style?kHealthBarStyleCapsule:kHealthBarStyleSegmented;
     c.slider(14,150,cw-28,"背景透明度",c.st.bgAlpha,.6f,1,"%.0f%%",100,"background_alpha");
-    c.slider(14,190,cw-28,"灵动岛位置",c.st.islandYOffset,-24,180,"%.0f",1,"island_y");
+    c.slider(14,190,cw-28,"灵动岛位置",c.st.islandYOffset,-24,600,"%.0f",1,"island_y");
     c.slider(14,230,cw-28,"灵动岛透明度",c.st.islandAlpha,.2f,1,"%.0f%%",100,"island_alpha");
     c.slider(14,270,cw-28,"绘制字体大小",c.st.espFontScale,.50f,1.20f,"%.0f%%",100,"esp_font_scale");
     c.slider(14,310,cw-28,"物资字体大小",c.st.lootFontScale,.70f,1.20f,"%.0f%%",100,"loot_font_scale");

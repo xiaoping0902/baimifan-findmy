@@ -2,6 +2,7 @@
 //  MFImGuiContext.mm — ImGui 上下文（实现）
 //
 #import "MFImGuiContext.h"
+#import <UIKit/UIKit.h>               /* [M5.185] UIScreen.scale（字体密度） */
 
 #include "imgui.h"
 #include "imgui_internal.h"           // ImLerp 等
@@ -58,9 +59,19 @@
     // 3) 皮肤
     [self applyIOSStyle];
 
-    // 4) 字体（失败不致命：会用内嵌 ProggyClean，汉字显示为方块）
-    if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
-        NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
+    /*
+     * 4) 字体
+     * ★ [M5.185] 三处改动，专治「字小、字糊、字形难看」★
+     *   ① 优先用系统字体（PingFang / SF）—— 子集字体缺字，汉字会变方块；
+     *   ② RasterizerDensity = 设备倍率（2x/3x）—— 字形按物理像素烘焙，
+     *      再用逻辑尺寸落屏，边缘才不糊；
+     *   ③ 系统字体拿不到时回退打包的 NotoSansSC 子集。
+     */
+    const float density = (float)MAX(2.0, (double)(UIScreen.mainScreen.scale ?: 2.0));
+    if (![self loadSystemFontAtSize:16.0f density:density]) {
+        if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
+            NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
+        }
     }
 
     _initialized = YES;
@@ -173,6 +184,44 @@
 
 #pragma mark - 字体
 
+/*
+ * [M5.185] 系统字体优先。
+ * PingFang 是 iOS 的中文正文字体，字形/字重都是用户熟悉的那一套；
+ * SFPro 兜英文。两条都读不到就回退打包字体（本 App 走 TrollStore 安装，
+ * 没有沙盒限制，正常情况下 PingFang 一定读得到）。
+ */
+- (BOOL)loadSystemFontAtSize:(float)size density:(float)density {
+    ImGui::SetCurrentContext(_ctx);
+    static const char *kPaths[] = {
+        "/System/Library/Fonts/LanguageSupport/PingFang.ttc",
+        "/System/Library/Fonts/LanguageSupport/PingFangSC-Regular.ttf",
+        "/System/Library/Fonts/Core/SFProText-Regular.otf",
+        "/System/Library/Fonts/Core/SFUI.ttf",
+        "/System/Library/Fonts/Core/SFUISans.ttf",
+    };
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    ImGuiIO &io = ImGui::GetIO();
+    for (size_t i = 0; i < sizeof(kPaths) / sizeof(kPaths[0]); i++) {
+        NSString *path = [NSString stringWithUTF8String:kPaths[i]];
+        if (![fm isReadableFileAtPath:path]) continue;
+
+        ImFontConfig cfg;
+        cfg.RasterizerDensity = density;    /* ★ 2x/3x 烘焙 → 不糊 */
+        cfg.FontNo = 0;                     /* TTC 取第一个字面（PingFangSC） */
+        cfg.PixelSnapH = false;
+        ImFont *f = io.Fonts->AddFontFromFileTTF(path.fileSystemRepresentation, size, &cfg);
+        if (f != NULL) {
+            io.FontDefault = f;
+            NSLog(@"[MF][ImGui] 系统字体已加载: %@ @ %.0fpt density=%.1f",
+                  path.lastPathComponent, size, density);
+            return YES;
+        }
+    }
+    NSLog(@"[MF][ImGui] 系统字体都读不到，回退打包字体");
+    return NO;
+}
+
 - (BOOL)loadFontNamed:(NSString *)name size:(float)size {
     ImGui::SetCurrentContext(_ctx);
     NSString *path = [[NSBundle mainBundle] pathForResource:name ofType:@"ttf"];
@@ -184,7 +233,9 @@
 
     ImGuiIO &io = ImGui::GetIO();
     // 1.92+ 动态字体：不传 GlyphRanges、不 Build()
-    ImFont *f = io.Fonts->AddFontFromFileTTF(path.fileSystemRepresentation, size);
+    ImFontConfig cfg;
+    cfg.RasterizerDensity = (float)MAX(2.0, (double)(UIScreen.mainScreen.scale ?: 2.0));
+    ImFont *f = io.Fonts->AddFontFromFileTTF(path.fileSystemRepresentation, size, &cfg);
     if (!f) {
         NSLog(@"[MF][ImGui] AddFontFromFileTTF 返回空: %@", path);
         return NO;

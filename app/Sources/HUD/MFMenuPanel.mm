@@ -76,9 +76,11 @@ static void MFPanelInitOnce(void) {
     gUI.expanded     = false;
     gUI.anim         = 0.0f;
     gUI.tab          = 0;
-    gUI.uiScale      = 1.0f;
-    gUI.uiScaleVisual= 1.0f;
-    gUI.islandYOffset= 0.0f;
+    /* [M5.185] 默认放大到 1.15（上限 1.212）—— 原来的 1.0 在 iPad 上偏小 */
+    gUI.uiScale      = 1.15f;
+    gUI.uiScaleVisual= 1.15f;
+    /* 灵动岛默认往下压 40，不再贴着状态栏；外观页滑杆可再调（0~600） */
+    gUI.islandYOffset= 40.0f;
     gUI.islandAlpha  = 1.0f;
     gUI.panelCenterXRatio = 0.5f;
     gUI.panelCenterYRatio = 0.5f;
