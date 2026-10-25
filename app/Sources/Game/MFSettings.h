@@ -70,6 +70,8 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 
 @property (nonatomic, assign) BOOL backEnemyEnabled;   // 背敌
 @property (nonatomic, assign) float backEnemyRadius;   // 背敌半径（px）
+/// [M5.179] 背敌距离（米）：超过这个距离的目标不再算"背敌"，避免远处目标也报警
+@property (nonatomic, assign) float backEnemyDistance;
 @property (nonatomic, assign) MFBackEnemyStyle backEnemyStyle;
 
 #pragma mark 外观页

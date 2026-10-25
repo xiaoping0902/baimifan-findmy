@@ -1816,6 +1816,10 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     for (MFEntity *e in ents) {
         if (!e.isBehind) continue;
         if (e.isBot && !st.showBot) continue;
+        /* [M5.179] 队友不算背敌 —— 否则开着「队友」时后面站个队友也会报警 */
+        if (gMFUELocalTeam != 0 && e.teamId == (int)gMFUELocalTeam) continue;
+        /* [M5.179] 距离闸：远处目标不提示（默认 80m，菜单可调） */
+        if (st.backEnemyDistance > 0.0f && e.distanceMeters > st.backEnemyDistance) continue;
         n++;
 
         /* bearingDeg: 0=前 负=左 正=右 ±180=后

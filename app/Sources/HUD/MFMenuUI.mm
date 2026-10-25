@@ -434,6 +434,7 @@ static const float kMFMenuBallSize = 56.0f;
     MFBeginCard("back-enemy", "背敌提示", "标记处于屏幕后方的目标方向");
     MF_SWITCH("背敌", backEnemyEnabled);
     MF_SLIDE_F("背敌半径", backEnemyRadius, 10.0f, 300.0f, "%.0f px");
+    MF_SLIDE_F("背敌距离", backEnemyDistance, 10.0f, 300.0f, "%.0f 米");
     {
         const char *styles[] = {"圆形", "箭头", "圆环"};
         int st = (int)s.backEnemyStyle;

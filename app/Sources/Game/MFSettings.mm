@@ -55,6 +55,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
 
     _backEnemyEnabled = NO;
     _backEnemyRadius = 60.0f;
+    _backEnemyDistance = 80.0f;
     _backEnemyStyle = MFBackEnemyStyleCircle;
 
     _fontPerson = 13.0f;
@@ -132,6 +133,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         @[@"lootDrawDistance", @(_lootDrawDistance)],
         @[@"skeletonDistance", @(_skeletonDistance)],
         @[@"backEnemyRadius", @(_backEnemyRadius)],
+        @[@"backEnemyDistance", @(_backEnemyDistance)],
         @[@"backEnemyStyle", @(_backEnemyStyle)],
         @[@"fontPerson", @(_fontPerson)], @[@"fontBox", @(_fontBox)],
         @[@"fontInfo", @(_fontInfo)], @[@"fontArmor", @(_fontArmor)],
@@ -174,6 +176,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     LOAD_NUM(minLootLevel); LOAD_NUM(minLootValue);
     LOAD_NUM(boxDrawDistance); LOAD_NUM(lootDrawDistance); LOAD_NUM(skeletonDistance);
     LOAD_NUM(backEnemyRadius); LOAD_NUM(backEnemyStyle);
+    LOAD_NUM(backEnemyDistance);
     LOAD_NUM(fontPerson); LOAD_NUM(fontBox); LOAD_NUM(fontInfo); LOAD_NUM(fontArmor);
     LOAD_NUM(skeletonThickness); LOAD_NUM(refreshRate); LOAD_NUM(healthBarStyle);
 
