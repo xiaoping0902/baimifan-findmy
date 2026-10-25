@@ -282,6 +282,14 @@ static NSString *gUEReport = nil;
                 if (boneNumChk < 20) continue;
             }
 
+            /* [M5.153] 死人：actor+0xDC8 首字节非 0（分析报告剔除表 §4） */
+            {
+                uint8_t dead = 0;
+                if ([rb readRemote:actor + kMFUE_Actor_DeadFlag into:&dead size:1] && dead != 0) {
+                    continue;
+                }
+            }
+
             uint64_t rootComp = 0;
             if (![rb readU64:actor + p.actor_rootComponent out:&rootComp]) continue;
             if (!MFUEIsValidPtr(rootComp)) continue;
@@ -334,6 +342,16 @@ static NSString *gUEReport = nil;
                 BOOL havePS = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps] &&
                               MFUEIsValidPtr(ps);
                 e.isBot = havePS ? NO : YES;
+
+                /* [M5.153] 观战 / 未激活：PlayerState+0x4C0 的 bit0（剔除表 §5） */
+                if (havePS) {
+                    uint8_t inactive = 0;
+                    if ([rb readRemote:ps + kMFUE_PlayerState_Remove into:&inactive size:1] &&
+                        (inactive & 1)) {
+                        continue;
+                    }
+                }
+
                 if (havePS) {
                     uint64_t uinVal = 0;
                     if ([rb readU64:ps + 0x490 out:&uinVal]) e.uin = uinVal;

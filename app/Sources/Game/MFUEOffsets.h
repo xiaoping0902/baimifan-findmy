@@ -303,6 +303,11 @@ static const uint32_t kMFUE_Combat_WeaponA        = 0x04D8;
 static const uint32_t kMFUE_Combat_WeaponB        = 0x0588;
 static const uint32_t kMFUE_Weapon_ID             = 0x0838;
 
+/* 剔除判定（分析报告剔除表 第4/5 条）：死人 = actor+0xDC8 首字节非 0 */
+static const uint32_t kMFUE_Actor_DeadFlag      = 0x0DC8;
+/* 观战/未激活 = PlayerState+0x4C0 & 1 */
+static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
+
 /* 人机/真人判定（真机验证）：人机的 PlayerState 为空，真人非空 */
 static const uint32_t kMFUE_Actor_PlayerState = 0x0390;
 
