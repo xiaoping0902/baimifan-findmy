@@ -28,6 +28,7 @@
 #import "MFUEGNames.h"
 #import "MFUEReader.h"                  /* 只用它拿 libBase / profile（不改它） */
 #import "../Read/MFReadBackend.h"
+#import "../HUD/MFHUDLog.h"             /* [M5.180] 探测现场落到 mf-debug/hud.log */
 #include <stdlib.h>
 #include <CoreFoundation/CFStringEncodingExt.h>   /* GB18030 —— 中文名解码 */
 #include <string.h>
@@ -204,6 +205,8 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
                landmarks:(NSArray<NSString *> *)landmarks
               maxEntries:(NSUInteger)maxEntries
                   report:(NSMutableString *)rep;
+/// [M5.180] 探测失败时把池头的原始字节与候选 bias 的读数拼进报告 —— 一次定位
+- (void)appendPoolDump:(NSMutableString *)rep;
 @end
 
 @implementation MFUEGNames {
@@ -274,6 +277,8 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
         if (ok) [_nameCache removeAllObjects];
 
         NSLog(@"[MF][GNames] %@", _probeReport);
+        /* [M5.180] 同时落到文件日志：NSLog 在真机上看不到，hud.log 才是唯一证据链 */
+        MFHUDLogLine(@"[GNames] %@", _probeReport);
         return ok;
     }
 }
@@ -381,6 +386,7 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
             return YES;
         }
         [rep appendString:@"  ✗ 扁平兜底也不成立 —— 结论：这个名字池布局不认识\n"];
+        [self appendPoolDump:rep];
         return NO;
     }
 
@@ -870,6 +876,49 @@ static inline uint32_t MFUELog2_64(uint64_t v) {
 }
 
 #pragma mark - 诊断
+
+/// [M5.180] 探测失败时把池头的原始字节与各候选 bias 的读数拼进报告。
+- (void)appendPoolDump:(NSMutableString *)rep {
+    MFReadBackend *rb = [MFReadBackend shared];
+    if (_gnamesBase == 0) { [rep appendString:@"  （池地址为 0）\n"]; return; }
+
+    [rep appendFormat:@"  ── 池头原始字节 0x%llx 起 0x100 ──\n",
+        (unsigned long long)_gnamesBase];
+    uint8_t buf[0x40];
+    for (uint64_t off = 0; off < 0x100; off += sizeof(buf)) {
+        if (![rb readRemote:_gnamesBase + off into:buf size:sizeof(buf)]) {
+            [rep appendFormat:@"   +0x%02llX 读失败\n", (unsigned long long)off];
+            break;
+        }
+        [rep appendFormat:@"   +0x%02llX ", (unsigned long long)off];
+        for (size_t i = 0; i < sizeof(buf); i++) [rep appendFormat:@"%02X", buf[i]];
+        [rep appendString:@"\n"];
+    }
+
+    [rep appendString:@"  ── 候选 bias 读数 ──\n"];
+    for (size_t i = 0; i < kMFUEGBiasCandidateCount; i++) {
+        uint32_t b = kMFUEGBiasCandidates[i];
+        if (b > 0x400) continue;
+        uint64_t v = 0;
+        if ([rb readU64:_gnamesBase + b out:&v]) {
+            [rep appendFormat:@"   +0x%X → 0x%llx%@\n", b, (unsigned long long)v,
+                MFUEIsValidPtr(v) ? @"" : @"（不是指针）"];
+        }
+    }
+
+    uint64_t lib = self.libBase ?: [MFUEReader shared].libBase;
+    MFUEProfile *p = self.profile ?: [MFUEReader shared].profile;
+    if (lib != 0 && p != nil) {
+        uint64_t gw = 0;
+        if ([rb readU64:lib + p.gworldStaticOffset out:&gw]) {
+            [rep appendFormat:@"  GWorld 对照：0x%llx + 0x%llX → 0x%llx\n",
+                (unsigned long long)lib, (unsigned long long)p.gworldStaticOffset,
+                (unsigned long long)gw];
+        }
+        [rep appendFormat:@"  GNames/GWorld 偏移差 0x%llX\n",
+            (unsigned long long)(p.gworldStaticOffset - p.gnamesStaticOffset)];
+    }
+}
 
 - (NSString *)statsText {
     return [NSString stringWithFormat:
