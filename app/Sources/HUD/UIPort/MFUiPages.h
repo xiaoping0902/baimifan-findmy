@@ -221,9 +221,10 @@ static float Tracking(Canvas& c) {
 }
 static float Personality(Canvas& c) {
     const bool two=c.width>=600;const float cw=two?(c.width-12)/2:c.width;
-    // 卡片高度 470 -> 478：末尾只加了一行「骨骼线条粗细」。
-    // 该行在 y=430、行高 36 => 底 466，再留 12 边距 = 478。
-    c.card(0,0,cw,478,"外观与绘制大小");
+    // Leave room for panel zoom and every existing drawing-size control.
+    const float sizeY=c.st.hostedViewport?230.0f:270.0f;
+    const float cardHeight=sizeY+248;
+    c.card(0,0,cw,cardHeight,"外观与绘制大小");
     const char* themes[]={"纯白","雾蓝","浅紫","柔粉"};
     if(c.segment(14,38,cw-28,"主题",themes,4,c.st.theme,"theme")){
         const float hues[]={.587f,.587f,.72f,.96f};c.st.accentHue=hues[c.st.theme];
@@ -239,22 +240,26 @@ static float Personality(Canvas& c) {
     const char* styles[]={"分段","胶囊"};int style=NormalizeHealthBarStyleId(c.st.healthBarStyle)==kHealthBarStyleCapsule?1:0;
     if(c.segment(14,110,cw-28,"血条样式",styles,2,style,"health_style"))c.st.healthBarStyle=style?kHealthBarStyleCapsule:kHealthBarStyleSegmented;
     c.slider(14,150,cw-28,"背景透明度",c.st.bgAlpha,.6f,1,"%.0f%%",100,"background_alpha");
-    c.slider(14,190,cw-28,"灵动岛位置",c.st.islandYOffset,-24,600,"%.0f",1,"island_y");
-    c.slider(14,230,cw-28,"灵动岛透明度",c.st.islandAlpha,.2f,1,"%.0f%%",100,"island_alpha");
-    c.slider(14,270,cw-28,"绘制字体大小",c.st.espFontScale,.50f,1.20f,"%.0f%%",100,"esp_font_scale");
-    c.slider(14,310,cw-28,"物资字体大小",c.st.lootFontScale,.70f,1.20f,"%.0f%%",100,"loot_font_scale");
-    c.slider(14,350,cw-28,"载具文字/血条",c.st.vehicleFontScale,.70f,1.40f,"%.0f%%",100,"vehicle_font_scale");
-    c.slider(14,390,cw-28,"载具贴图大小",c.st.vehicleIconScale,.50f,1.50f,"%.0f%%",100,"vehicle_icon_scale");
+    if(c.st.hostedViewport)c.text(14,202,12,c.tc.textMuted,"灵动岛固定在屏幕顶部中央");
+    else{
+        c.slider(14,190,cw-28,"灵动岛位置",c.st.islandYOffset,-24,600,"%.0f",1,"island_y");
+        c.slider(14,230,cw-28,"灵动岛透明度",c.st.islandAlpha,.2f,1,"%.0f%%",100,"island_alpha");
+    }
+    c.slider(14,sizeY,cw-28,"面板大小",c.st.uiScale,kPanelScaleMinimum,kPanelScaleMaximum,"%.0f%%",100*kPanelDefaultWidthRatio,"panel_size",.01f/kPanelDefaultWidthRatio);
+    c.slider(14,sizeY+40,cw-28,"绘制字体大小",c.st.espFontScale,.50f,1.20f,"%.0f%%",100,"esp_font_scale");
+    c.slider(14,sizeY+80,cw-28,"物资字体大小",c.st.lootFontScale,.70f,1.20f,"%.0f%%",100,"loot_font_scale");
+    c.slider(14,sizeY+120,cw-28,"载具文字/血条",c.st.vehicleFontScale,.70f,1.40f,"%.0f%%",100,"vehicle_font_scale");
+    c.slider(14,sizeY+160,cw-28,"载具贴图大小",c.st.vehicleIconScale,.50f,1.50f,"%.0f%%",100,"vehicle_icon_scale");
     // 骨骼线条粗细（2026-09-15 用户要求）。
     // 开关不放在这里 —— 「绘制」页里已经有「骨骼」开关了，两处重复没意义。
     // 这里只管**粗细**，倍率 1.00 = 原始宽度（1.9~4.5px，随人物在屏幕上的身高变化）。
-    c.slider(14,430,cw-28,"骨骼线条粗细",c.st.boneLineWidth,.50f,3.00f,"%.0f%%",100,"personality_bone_width");
-    float x=two?cw+12:0,y=two?0:490;
+    c.slider(14,sizeY+200,cw-28,"骨骼线条粗细",c.st.boneLineWidth,.50f,3.00f,"%.0f%%",100,"personality_bone_width");
+    float x=two?cw+12:0,y=two?0:cardHeight+12;
     c.card(x,y,cw,340,"自定义颜色");
     const char* labels[]={"真人骨骼","人机骨骼","掩体变色","能量饮料","止痛药","肾上腺素","医疗箱"};
     ImVec4* values[]={&c.st.humanSkeletonColor,&c.st.botSkeletonColor,&c.st.coverColor,&c.st.energyDrinkColor,&c.st.painkillerColor,&c.st.adrenalineColor,&c.st.medKitColor};
     for(int i=0;i<7;i++){char id[24];snprintf(id,sizeof(id),"color_%d",i);c.color(x+14,y+38+i*36,cw-28,labels[i],*values[i],id);}
-    return two ? ImMax(478.0f, y + 340.0f) : y + 340.0f;
+    return two ? ImMax(cardHeight, y + 340.0f) : y + 340.0f;
 }
 static float Settings(Canvas& c) {
     c.card(0,0,c.width,268,"运行选项");

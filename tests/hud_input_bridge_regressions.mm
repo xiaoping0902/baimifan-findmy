@@ -119,7 +119,7 @@ static CFTypeRef Hand(uint32_t identity, BOOL touch, uint32_t secondary = 0, BOO
     }
     return parent;
 }
-static void Deliver(MFHUDInputBridge *bridge, UIWindow *window, InputPanel *panel,
+static void Deliver(MFHUDInputBridge *bridge, UIWindow *window, UIView *panel,
                     CFTypeRef event, unsigned char axIdentity, NSInteger phase,
                     CGPoint local, NSUInteger axPaths = 1) {
     currentAX = [AXFixtureEvent new];
@@ -446,6 +446,165 @@ static void TestCancellationDiscardsQueuedBallTap(void) {
     }
 }
 
+// The island owns a separate, small native window. It must remain usable while
+// the Metal panel is hidden or has no completed frame, without creating a
+// second BKS callback or forwarding the same tap into ImGui.
+static UIWindow *IslandWindow(MFHUDInputBridge *bridge, UIView **viewOut) {
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(80, 12, 142, 36)];
+    window.rootViewController = [UIViewController new];
+    window.rootViewController.view.frame = window.bounds;
+    UIView *view = [[UIView alloc] initWithFrame:window.bounds];
+    [window.rootViewController.view addSubview:view];
+    window.hidden = NO;
+    bridge.auxiliaryView = view;
+    *viewOut = view;
+    return window;
+}
+static void SendIsland(MFHUDInputBridge *bridge, UIView *view, uint32_t index,
+                        NSInteger phase, CGPoint point, uint32_t secondary = 0) {
+    CFTypeRef event = Hand(index, phase < 2, secondary, phase != 3);
+    Deliver(bridge, view.window, view, event, phase < 2 ? 3 : 2, phase, point,
+            secondary ? 2 : 1);
+    CFRelease(event);
+}
+static void TestIslandTapDoesNotDependOnThePanel(void) {
+    UIWindow *menu; InputPanel *panel; MFHUDInputBridge *bridge = NewBridge(&menu, &panel);
+    UIView *island; UIWindow *islandWindow = IslandWindow(bridge, &island);
+    __block NSUInteger activations = 0, presses = 0;
+    __block BOOL pressed = NO;
+    bridge.auxiliaryActivationHandler = ^{ activations++; };
+    bridge.auxiliaryPressHandler = ^(BOOL value) { pressed = value; if (value) presses++; };
+    bridge.menuInputEnabled = NO;
+    menu.hidden = YES;
+    panel.hasCompletedFrame = NO;
+    panel.captureRect = CGRectNull;
+    SendIsland(bridge, island, 0x800001A4u, 0, CGPointMake(71, 18));
+    CHECK(pressed && activations == 0, "a hidden-panel island must show press feedback before activation");
+    SendIsland(bridge, island, 0x800001A5u, 2, CGPointMake(71, 18));
+    CHECK(pressed && activations == 0, "a foreign contact must not release the island's owner");
+    SendIsland(bridge, island, 0x800001A4u, 3, CGPointMake(71, 18));
+    SendIsland(bridge, island, 0x800001A4u, 2, CGPointMake(71, 18));
+    CHECK(!pressed && presses == 1 && activations == 1,
+          "the full-width owner index must activate a hidden-panel island exactly once on release");
+    CHECK(panel.imgui.presses == 0 && panel.imgui.releases == 0,
+          "an island tap must never be delivered to the Metal panel as a second click");
+    islandWindow.hidden = YES;
+    SendIsland(bridge, island, 20, 0, CGPointMake(71, 18));
+    SendIsland(bridge, island, 20, 2, CGPointMake(71, 18));
+    CHECK(activations == 1 && !pressed, "a hidden auxiliary window must not accept touches");
+}
+static void TestIslandCancellationAndGestureOrigin(void) {
+    UIWindow *menu; InputPanel *panel; MFHUDInputBridge *bridge = NewBridge(&menu, &panel);
+    UIView *island; UIWindow *islandWindow = IslandWindow(bridge, &island);
+    __block NSUInteger activations = 0;
+    __block BOOL pressed = NO;
+    bridge.auxiliaryActivationHandler = ^{ activations++; };
+    bridge.auxiliaryPressHandler = ^(BOOL value) { pressed = value; };
+
+    SendIsland(bridge, island, 30, 0, CGPointMake(-20, 18));
+    SendIsland(bridge, island, 30, 1, CGPointMake(40, 18));
+    SendIsland(bridge, island, 30, 2, CGPointMake(40, 18));
+    CHECK(!pressed && activations == 0,
+          "a gesture beginning outside the island must not become an island tap when it crosses it");
+
+    SendIsland(bridge, island, 31, 0, CGPointMake(40, 18));
+    SendIsland(bridge, island, 31, 1, CGPointMake(55, 18));
+    SendIsland(bridge, island, 31, 2, CGPointMake(55, 18));
+    CHECK(!pressed && activations == 0, "movement past the tap threshold must not activate the island");
+    SendIsland(bridge, island, 32, 0, CGPointMake(40, 18));
+    SendIsland(bridge, island, 32, 1, CGPointMake(-10, 18));
+    SendIsland(bridge, island, 32, 1, CGPointMake(40, 18));
+    SendIsland(bridge, island, 32, 2, CGPointMake(40, 18));
+    CHECK(!pressed && activations == 0, "dragging out and back must not turn into a release click");
+
+    SendIsland(bridge, island, 33, 0, CGPointMake(40, 18));
+    [bridge cancelAll];
+    SendIsland(bridge, island, 33, 2, CGPointMake(40, 18));
+    CHECK(!pressed && activations == 0, "lock or rotation cancellation must clear an island press");
+    SendIsland(bridge, island, 34, 0, CGPointMake(40, 18));
+    SendIsland(bridge, island, 34, 1, CGPointMake(40, 18), 35);
+    SendIsland(bridge, island, 34, 2, CGPointMake(40, 18));
+    CHECK(!pressed && activations == 0, "multiple contacts must cancel island activation");
+
+    SendIsland(bridge, island, 36, 0, CGPointMake(40, 18));
+    SendIsland(bridge, island, 36, 2, CGPointMake(40, 18));
+    CHECK(activations == 1 && !pressed, "a fresh tap after cancellation must still work");
+    CHECK(panel.imgui.presses == 0 && panel.imgui.releases == 0,
+          "cancelled auxiliary gestures must never become ImGui button events");
+    menu.hidden = islandWindow.hidden = YES;
+}
+static void TestIslandCoordinatesInBothLandscapeDirections(void) {
+    UIWindow *menu; InputPanel *panel; MFHUDInputBridge *bridge = NewBridge(&menu, &panel);
+    UIView *island; UIWindow *islandWindow = IslandWindow(bridge, &island);
+    __block NSUInteger activations = 0;
+    bridge.auxiliaryActivationHandler = ^{ activations++; };
+    const CGFloat angles[] = { (CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0 };
+    for (CGFloat angle : angles) {
+        const BOOL landscape = fabs(angle) > .1;
+        islandWindow.bounds = CGRectMake(0, 0, landscape ? 36 : 142, landscape ? 142 : 36);
+        islandWindow.rootViewController.view.frame = islandWindow.bounds;
+        island.transform = CGAffineTransformIdentity;
+        island.bounds = CGRectMake(0, 0, 142, 36);
+        island.center = CGPointMake(CGRectGetMidX(islandWindow.bounds), CGRectGetMidY(islandWindow.bounds));
+        island.transform = CGAffineTransformMakeRotation(angle);
+        SendIsland(bridge, island, 40, 0, CGPointMake(71, 18));
+        SendIsland(bridge, island, 40, 2, CGPointMake(71, 18));
+    }
+    CHECK(activations == 3, "fixed-screen HID coordinates must reach the rotated island in every orientation");
+    Send(bridge, menu, panel, 41, 3, 0, CGPointMake(180, 200));
+    Send(bridge, menu, panel, 41, 2, 2, CGPointMake(180, 200));
+    CHECK(panel.imgui.presses == 1 && panel.imgui.releases == 1,
+          "routing the island must preserve independent Metal panel controls");
+    menu.hidden = islandWindow.hidden = YES;
+}
+static void TestResizeFrameGapPreservesOnlyTheEstablishedContact(void) {
+    UIWindow *window; InputPanel *panel; MFHUDInputBridge *bridge = NewBridge(&window, &panel);
+    Send(bridge, window, panel, 60, 3, 0, CGPointMake(180, 200));
+    CHECK(panel.imgui.presses == 1 && panel.imgui.releases == 0,
+          "a menu resize gesture must establish its owner before the frame generation changes");
+    const NSUInteger cancellations = panel.imgui.cancellations;
+    panel.hasCompletedFrame = NO;
+    Send(bridge, window, panel, 60, 3, 1, CGPointMake(190, 210));
+    CHECK(panel.imgui.presses == 2 && panel.imgui.releases == 0 &&
+          panel.imgui.cancellations == cancellations &&
+          fabs(panel.imgui.lastPoint.x - 190) < .1 && fabs(panel.imgui.lastPoint.y - 210) < .1,
+          "the established contact must keep moving while resize waits for a new Metal frame");
+    Send(bridge, window, panel, 60, 2, 3, CGPointMake(195, 215));
+    CHECK(panel.imgui.releases == 1 && panel.imgui.cancellations == cancellations &&
+          fabs(panel.imgui.lastPoint.x - 195) < .1 && fabs(panel.imgui.lastPoint.y - 215) < .1,
+          "the established contact must release once during the temporary incomplete-frame gap");
+
+    Send(bridge, window, panel, 61, 3, 0, CGPointMake(180, 200));
+    Send(bridge, window, panel, 61, 2, 2, CGPointMake(180, 200));
+    CHECK(panel.imgui.presses == 2 && panel.imgui.releases == 1,
+          "an incomplete generation must still reject a fresh contact after the previous owner lifts");
+    panel.hasCompletedFrame = YES;
+    Send(bridge, window, panel, 62, 3, 0, CGPointMake(180, 200));
+    Send(bridge, window, panel, 62, 2, 2, CGPointMake(180, 200));
+    CHECK(panel.imgui.presses == 3 && panel.imgui.releases == 2,
+          "a fresh contact must work once the resized Metal generation completes");
+    window.hidden = YES;
+}
+static void TestTitleCanReachEveryScreenEdge(void) {
+    UIWindow *window; InputPanel *panel; MFHUDInputBridge *bridge = NewBridge(&window, &panel);
+    const CGRect screen = window.screen.fixedCoordinateSpace.bounds;
+    Send(bridge, window, panel, 50, 3, 0, CGPointMake(80, 15));
+    Send(bridge, window, panel, 50, 3, 1, CGPointMake(10000, 10000));
+    CHECK(fabs(CGRectGetMaxX(window.frame) - CGRectGetMaxX(screen)) < .1 &&
+          fabs(CGRectGetMaxY(window.frame) - CGRectGetMaxY(screen)) < .1,
+          "title dragging must reach the real screen's bottom-right edge");
+    Send(bridge, window, panel, 50, 2, 2, CGPointMake(80, 15));
+    Send(bridge, window, panel, 51, 3, 0, CGPointMake(80, 15));
+    Send(bridge, window, panel, 51, 3, 1, CGPointMake(-10000, -10000));
+    CHECK(fabs(CGRectGetMinX(window.frame) - CGRectGetMinX(screen)) < .1 &&
+          fabs(CGRectGetMinY(window.frame) - CGRectGetMinY(screen)) < .1,
+          "title dragging must reach the real screen's top-left edge");
+    Send(bridge, window, panel, 51, 2, 2, CGPointMake(80, 15));
+    CHECK(panel.imgui.presses == 0 && panel.imgui.releases == 0,
+          "moving across the full display must not click a panel control on release");
+    window.hidden = YES;
+}
+
 @interface InputRegressionDelegate : UIResponder <UIApplicationDelegate>
 @end
 @implementation InputRegressionDelegate
@@ -472,6 +631,11 @@ static void TestCancellationDiscardsQueuedBallTap(void) {
         TestBlankSpaceCannotStartMenuInteraction();
         TestBallTapAndDragHaveDifferentOutcomes();
         TestCancellationDiscardsQueuedBallTap();
+        TestIslandTapDoesNotDependOnThePanel();
+        TestIslandCancellationAndGestureOrigin();
+        TestIslandCoordinatesInBothLandscapeDirections();
+        TestResizeFrameGapPreservesOnlyTheEstablishedContact();
+        TestTitleCanReachEveryScreenEdge();
         puts("PASS: production HID bridge releases device taps and drags with full digitizer-index ownership");
         fflush(stdout); exit(0);
     });

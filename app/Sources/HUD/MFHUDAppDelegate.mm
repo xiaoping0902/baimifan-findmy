@@ -6,6 +6,9 @@
 #import "MFHUDWindowHost.h"
 #import "MFHUDStartupStatus.h"
 #import "MFHUDInputBridge.h"
+#import "MFHUDIslandView.h"
+#import "MFMenuPanel.h"
+#include "MFHUDFloatingLayout.h"
 #import "MFHUDCaptureShieldView.h"
 #import "MFHUDControl.h"
 #import "MFHUDTargetBinding.h"
@@ -149,6 +152,12 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
 @property (nonatomic, strong) MFHUDInputBridge *inputBridge;
 @property (nonatomic, strong) MFHUDCaptureShieldView *menuContent;
 @property (nonatomic, strong) MFHUDCaptureShieldView *drawingContent;
+@property (nonatomic, strong) MFHUDWindow *islandWindow;
+@property (nonatomic, strong) MFHUDWindowHost *islandHost;
+@property (nonatomic, strong) MFHUDCaptureShieldView *islandContent;
+@property (nonatomic, strong) MFHUDIslandView *islandView;
+@property (nonatomic) NSUInteger presentationGeneration;
+@property (nonatomic) BOOL menuTransitioning;
 @property (nonatomic, strong) id<MFHUDOrientationObserver> orientationObserver;
 @property (nonatomic) UIInterfaceOrientation hudOrientation;
 @property (nonatomic) BOOL exitRequested;
@@ -272,6 +281,27 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
+
+    // The island owns only its small capsule surface, even while the panel is
+    // expanded. A separate bounded window keeps the rest of the screen free.
+    CGSize islandSize = [MFHUDIslandView preferredSize];
+    MFHUDWindow *islandWin = [[MFHUDWindow alloc] initWithFrame:(CGRect){CGPointZero, islandSize}];
+    islandWin.windowLevel = 10000011.0;
+    islandWin.backgroundColor = UIColor.clearColor;
+    islandWin.opaque = NO;
+    UIViewController *islandVC = [[MFHUDFixedRootController alloc] init];
+    islandVC.view.backgroundColor = UIColor.clearColor;
+    islandWin.rootViewController = islandVC;
+    islandVC.view.frame = islandWin.bounds;
+    self.islandWindow = islandWin;
+    self.islandContent = [[MFHUDCaptureShieldView alloc] initWithFrame:islandVC.view.bounds error:&captureError];
+    if (!self.islandContent) { [self failStartup:captureError]; return YES; }
+    [islandVC.view addSubview:self.islandContent];
+    self.islandView = [[MFHUDIslandView alloc] initWithFrame:(CGRect){CGPointZero, islandSize}];
+    [self.islandContent.contentView addSubview:self.islandView];
+    islandWin.interactiveView = self.islandContent;
+    islandWin.hidden = NO;
+    [self.islandView setExpanded:![MFMenuUI collapsed] animated:NO];
     /*
      * ★ [M5.134] 启动时强制关掉防录屏，并清掉持久化的开关。
      *
@@ -307,20 +337,35 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     {
         NSInteger rate = [MFSettings shared].refreshRate;
         if (rate < 15) rate = 60;
-        menuView.preferredFPS = rate;
+        // Touch presentation follows the hardware refresh capability. Drawing
+        // retains its configured budget independently of the menu animation.
+        menuView.preferredFPS = MAX(60, UIScreen.mainScreen.maximumFramesPerSecond);
         menuView.idleFPS = 12;
         drawView.preferredFPS = rate;
         __weak MFHUDAppDelegate *weakSelfForFPS = self;
         [MFMenuUI setFrameRateApplier:^(NSInteger fps) {
             MFHUDAppDelegate *owner = weakSelfForFPS;
-            owner.menuOverlay.preferredFPS = fps;
+            owner.menuOverlay.preferredFPS = MAX(60, UIScreen.mainScreen.maximumFramesPerSecond);
             owner.drawingOverlay.preferredFPS = fps;
-            MFHUDLogLine(@"刷新率 → %ld 帧（菜单层 + 绘制层同时应用）", (long)fps);
+            MFHUDLogLine(@"绘制刷新率 → %ld；菜单交互跟随屏幕", (long)fps);
         }];
-        MFHUDLogLine(@"帧率：菜单 %ld/空闲 12，绘制 %ld", (long)rate, (long)rate);
+        MFHUDLogLine(@"帧率：菜单 %ld/空闲 12，绘制 %ld", (long)menuView.preferredFPS, (long)rate);
     }
 
     self.inputBridge = [[MFHUDInputBridge alloc] initWithOverlay:menuView window:menuWin];
+    self.islandView.usesExternalTouchInput = YES;
+    self.inputBridge.auxiliaryView = self.islandView;
+    __weak MFHUDAppDelegate *weakIslandOwner = self;
+    self.inputBridge.auxiliaryPressHandler = ^(BOOL pressed) {
+        [weakIslandOwner.islandView setPressed:pressed animated:YES];
+    };
+    void (^activateIsland)(void) = ^{
+        MFHUDAppDelegate *owner = weakIslandOwner;
+        if (!owner || [owner isStopping] || ![owner.startupReport[@"state"] isEqual:@"ready"]) return;
+        [MFMenuUI setCollapsed:![MFMenuUI collapsed]];
+    };
+    self.inputBridge.auxiliaryActivationHandler = activateIsland;
+    self.islandView.activationHandler = activateIsland;
     NSString *inputError = nil;
     if (![self.inputBridge installWithError:&inputError]) {
         [self failStartup:inputError];
@@ -331,28 +376,46 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         MFHUDAppDelegate *owner = weakSelfForInput;
         if (!owner || [owner isStopping]) return;
         BOOL empty = CGRectIsNull(rect) || CGRectIsEmpty(rect);
-        owner.hudMenuWindow.hidden = empty;
-        if (empty) [owner.inputBridge cancelAll];
+        // Collapse owns its native animation and hides only on completion.
+        // Keep the independent island active while the panel is paused.
+        if (![MFMenuUI collapsed] && !owner.menuTransitioning) {
+            owner.hudMenuWindow.hidden = empty;
+            owner.inputBridge.menuInputEnabled = !empty;
+            if (empty) [owner.inputBridge cancelAll];
+        }
     };
     [MFMenuUI setCollapseChangeHandler:^(BOOL collapsed) {
-        // Resize only after the current ImGui frame has ended.
+        // Freeze the last complete Metal image before the next display tick;
+        // UIKit can animate that surface without rebuilding a collapsed UI.
+        MFHUDAppDelegate *currentOwner = weakSelfForInput;
+        currentOwner.menuOverlay.paused = collapsed;
+        currentOwner.inputBridge.menuInputEnabled = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MFHUDAppDelegate *owner = weakSelfForInput;
+            if (!owner || [owner isStopping]) return;
+            [owner setMenuCollapsed:[MFMenuUI collapsed] animated:YES];
+        });
+    }];
+    MFMenuPanelSetPresentationChangeHandler(^{
         dispatch_async(dispatch_get_main_queue(), ^{
             MFHUDAppDelegate *owner = weakSelfForInput;
             if (!owner || [owner isStopping]) return;
             [owner resizeMenuForOrientation:owner.hudOrientation initial:NO];
         });
-    }];
+    });
     [self startObservingOrientation];
 
     // Let UIKit finish initial window layout before reading its native context.
-    // Keep rendering stopped until both layer trees have been registered.
+    // Keep rendering stopped until all three layer trees have been registered.
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([self isStopping]) return;
         @try {
             [self.hudMenuWindow layoutIfNeeded];
             [self.drawingWindow layoutIfNeeded];
+            [self.islandWindow layoutIfNeeded];
+            [self layoutIslandForOrientation:self.hudOrientation];
             [CATransaction flush];
-            MFHUDLogLine(@"---- 准备单一窗口 context 与托管 ----");
+            MFHUDLogLine(@"---- 准备菜单、绘制与灵动岛窗口 context 与托管 ----");
             MFHUDLogLine(@"connectedScenes=%lu，menu bounds=%@，drawing bounds=%@",
                          (unsigned long)app.connectedScenes.count,
                          NSStringFromCGRect(menuView.bounds), NSStringFromCGRect(drawView.bounds));
@@ -360,6 +423,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             Class hostingClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
             uint32_t nativeMenu = [self nativeContextIDForWindow:self.hudMenuWindow];
             uint32_t nativeDrawing = [self nativeContextIDForWindow:self.drawingWindow];
+            uint32_t nativeIsland = [self nativeContextIDForWindow:self.islandWindow];
             MFHUDLogLine(@"绘制窗口=%@ nativeContext=0x%x（创建时固定忽略命中）",
                          NSStringFromClass(self.drawingWindow.class), nativeDrawing);
             if (nativeDrawing == 0) {
@@ -374,7 +438,16 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
             self.drawingHost = [[MFHUDWindowHost alloc] initWithLayer:self.drawingWindow.layer
                 nativeContextID:nativeDrawing level:self.drawingWindow.windowLevel
                 contextClass:contextClass hostingClass:hostingClass];
+            self.islandHost = [[MFHUDWindowHost alloc] initWithLayer:self.islandWindow.layer
+                nativeContextID:nativeIsland level:self.islandWindow.windowLevel
+                contextClass:contextClass hostingClass:hostingClass];
             NSString *error = nil;
+            if (!nativeIsland || ![self.islandHost registerWithError:&error]) {
+                [self failStartup:[@"灵动岛窗口：" stringByAppendingString:error ?: @"未取得原生 context"]];
+                return;
+            }
+            self.startupReport[@"islandContextID"] = @(self.islandHost.contextID);
+            self.startupReport[@"islandRegistered"] = @YES;
             if (![self.menuHost registerWithError:&error]) {
                 [self failStartup:[@"菜单窗口：" stringByAppendingString:error ?: @"托管失败"]];
                 return;
@@ -475,6 +548,11 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     if ([self isStopping] || self.hudOrientation == orientation) return;
     BOOL initial = self.hudOrientation == UIInterfaceOrientationUnknown;
     [self.inputBridge cancelAll];
+    self.presentationGeneration++;
+    [self.menuOverlay.layer removeAllAnimations];
+    self.menuOverlay.transform = CGAffineTransformIdentity;
+    self.menuOverlay.alpha = 1;
+    self.menuTransitioning = NO;
     self.hudOrientation = orientation;
     CGFloat angle = orientation == UIInterfaceOrientationPortraitUpsideDown ? M_PI :
         (orientation == UIInterfaceOrientationLandscapeLeft ? -M_PI_2 :
@@ -483,6 +561,10 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     BOOL landscape = UIInterfaceOrientationIsLandscape(orientation);
     CGSize logicalScreen = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
     [self resizeMenuForOrientation:orientation initial:initial];
+    [self layoutIslandForOrientation:orientation];
+    self.hudMenuWindow.hidden = [MFMenuUI collapsed];
+    self.menuOverlay.paused = [MFMenuUI collapsed];
+    self.inputBridge.menuInputEnabled = ![MFMenuUI collapsed];
     self.drawingContent.bounds = (CGRect){CGPointZero, logicalScreen};
     self.drawingContent.center = CGPointMake(fixed.size.width / 2, fixed.size.height / 2);
     self.drawingContent.transform = CGAffineTransformMakeRotation(angle);
@@ -496,32 +578,37 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         NSStringFromCGRect(self.menuOverlay.bounds), NSStringFromCGRect(self.drawingOverlay.bounds));
     // Never leave a stale registered context silently owning an invisible input surface.
     if ((self.menuHost && [self nativeContextIDForWindow:self.hudMenuWindow] != self.menuHost.contextID) ||
-        (self.drawingHost && [self nativeContextIDForWindow:self.drawingWindow] != self.drawingHost.contextID))
+        (self.drawingHost && [self nativeContextIDForWindow:self.drawingWindow] != self.drawingHost.contextID) ||
+        (self.islandHost && [self nativeContextIDForWindow:self.islandWindow] != self.islandHost.contextID))
         [self failStartup:@"旋转后窗口 context 已变化，悬浮窗已退出，请重新启动悬浮窗。"];
 }
 
 - (void)applyCaptureProtectionEnabled:(BOOL)enabled {
-    NSString *menuError = nil, *drawingError = nil;
+    NSString *menuError = nil, *drawingError = nil, *islandError = nil;
     BOOL menuOK = [self.menuContent setCaptureProtectionEnabled:enabled error:&menuError];
     BOOL drawingOK = [self.drawingContent setCaptureProtectionEnabled:enabled error:&drawingError];
-    if (!menuOK || !drawingOK) {
+    BOOL islandOK = [self.islandContent setCaptureProtectionEnabled:enabled error:&islandError];
+    if (!menuOK || !drawingOK || !islandOK) {
         // Optional capture protection must not stop the HUD or leave only one
         // surface hidden. Ordinary content remains available for screenshots.
         [self.menuContent setCaptureProtectionEnabled:NO error:NULL];
         [self.drawingContent setCaptureProtectionEnabled:NO error:NULL];
+        [self.islandContent setCaptureProtectionEnabled:NO error:NULL];
         [MFSettings shared].captureProtectionEnabled = NO;
         [[MFSettings shared] save];
-        self.startupReport[@"captureProtectionError"] = menuError ?: drawingError ?: @"防录屏切换失败";
+        self.startupReport[@"captureProtectionError"] = menuError ?: drawingError ?: islandError ?: @"防录屏切换失败";
         MFHUDLogLine(@"防录屏切换失败，已回退关闭：menu=%@ drawing=%@", menuError ?: @"无", drawingError ?: @"无");
     } else {
         [self.startupReport removeObjectForKey:@"captureProtectionError"];
     }
     BOOL menuProtected = self.menuContent.captureProtectionEnabled;
     BOOL drawingProtected = self.drawingContent.captureProtectionEnabled;
-    BOOL active = menuProtected && drawingProtected;
+    BOOL islandProtected = self.islandContent.captureProtectionEnabled;
+    BOOL active = menuProtected && drawingProtected && islandProtected;
     self.startupReport[@"captureProtectionEnabled"] = @(active);
     NSMutableArray *surfaces = [NSMutableArray array];
-    if (menuProtected) [surfaces addObjectsFromArray:@[@"menu", @"ball"]];
+    if (menuProtected) [surfaces addObject:@"menu"];
+    if (islandProtected) [surfaces addObject:@"island"];
     if (drawingProtected) [surfaces addObject:@"drawing"];
     self.startupReport[@"captureProtectedSurfaces"] = surfaces;
     MFHUDLogLine(@"防录屏=%@ menu=%d drawing=%d（请求=%d）", active ? @"开" : @"关", menuProtected, drawingProtected, enabled);
@@ -1183,7 +1270,7 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     double fps = self.drawingOverlay.renderedFPS;
     NSDictionary *snapshot = @{
         @"role": @"hud",
-        @"captureProtectionEnabled": @(self.menuContent.captureProtectionEnabled && self.drawingContent.captureProtectionEnabled),
+        @"captureProtectionEnabled": @(self.menuContent.captureProtectionEnabled && self.drawingContent.captureProtectionEnabled && self.islandContent.captureProtectionEnabled),
         @"kernelState": @(kernel.state), @"kernelBase": @(kernel.kbase),
         @"startup": [self.startupReport copy] ?: @{},
         @"binding": @{
@@ -1233,22 +1320,18 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 
 - (void)resizeMenuForOrientation:(UIInterfaceOrientation)orientation initial:(BOOL)initial {
     if ([self isStopping]) return;
-    [self.inputBridge cancelAll];
     UIWindow *window = self.hudMenuWindow;
     CGRect fixed = window.screen.fixedCoordinateSpace.bounds;
     BOOL landscape = UIInterfaceOrientationIsLandscape(orientation);
     CGFloat angle = orientation == UIInterfaceOrientationPortraitUpsideDown ? M_PI :
         (orientation == UIInterfaceOrientationLandscapeLeft ? -M_PI_2 :
          (orientation == UIInterfaceOrientationLandscapeRight ? M_PI_2 : 0));
-    CGSize panel = [MFMenuUI collapsed] ? CGSizeMake(56, 56) : CGSizeMake(348, 520);
+    CGSize logical = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
+    CGSize panel = MFMenuPanelPreferredSize(logical);
     CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
     CGPoint center = window.center;
     if (initial) {
-        CGSize logical = landscape ? CGSizeMake(fixed.size.height, fixed.size.width) : fixed.size;
-        CGFloat dx = 24 + panel.width / 2 - logical.width / 2;
-        CGFloat dy = 90 + panel.height / 2 - logical.height / 2;
-        center = CGPointMake(CGRectGetMidX(fixed) + cos(angle)*dx - sin(angle)*dy,
-                             CGRectGetMidY(fixed) + sin(angle)*dx + cos(angle)*dy);
+        center = CGPointMake(CGRectGetMidX(fixed), CGRectGetMidY(fixed));
     } else if (CGAffineTransformEqualToTransform(self.menuContent.transform,
                                                 CGAffineTransformMakeRotation(angle))) {
         CGPoint anchor = [self.menuContent convertPoint:CGPointZero
@@ -1256,8 +1339,10 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         center = CGPointMake(anchor.x + cos(angle)*panel.width/2 - sin(angle)*panel.height/2,
                              anchor.y + sin(angle)*panel.width/2 + cos(angle)*panel.height/2);
     }
-    center.x = MIN(CGRectGetMaxX(fixed)-physical.width/2, MAX(physical.width/2, center.x));
-    center.y = MIN(CGRectGetMaxY(fixed)-physical.height/2, MAX(physical.height/2, center.y));
+    auto clamped = MFHUDFloating::ClampCenter({center.x, center.y},
+        {physical.width, physical.height},
+        {fixed.origin.x, fixed.origin.y, fixed.size.width, fixed.size.height});
+    center = CGPointMake(clamped.x, clamped.y);
     window.bounds = (CGRect){CGPointZero, physical};
     window.center = center;
     window.rootViewController.view.frame = window.bounds;
@@ -1265,13 +1350,74 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     self.menuContent.bounds = (CGRect){CGPointZero, panel};
     self.menuContent.center = CGPointMake(physical.width/2, physical.height/2);
     self.menuContent.transform = CGAffineTransformMakeRotation(angle);
-    self.menuOverlay.frame = self.menuContent.bounds;
+    self.menuOverlay.bounds = self.menuContent.bounds;
+    self.menuOverlay.center = CGPointMake(panel.width/2, panel.height/2);
     [window layoutIfNeeded]; [self.menuOverlay layoutIfNeeded];
     [self.menuOverlay requestRedraw];
     [CATransaction flush];
-    MFHUDLogLine(@"菜单原生窗口尺寸=%@ collapsed=%d", NSStringFromCGSize(window.bounds.size), [MFMenuUI collapsed]);
     if (self.menuHost && [self nativeContextIDForWindow:window] != self.menuHost.contextID)
         [self failStartup:@"调整菜单尺寸后 context 已变化，已停止悬浮窗，请重新启动。"];
+}
+
+- (void)layoutIslandForOrientation:(UIInterfaceOrientation)orientation {
+    CGRect fixed = UIScreen.mainScreen.fixedCoordinateSpace.bounds;
+    auto screen = MFHUDFloating::LogicalSize({fixed.size.width, fixed.size.height}, (int)orientation);
+    CGSize size = [MFHUDIslandView preferredSize];
+    CGFloat top = UIInterfaceOrientationIsLandscape(orientation) ? 12 :
+        MAX(12, MIN(60, self.drawingWindow.safeAreaInsets.top + 6));
+    auto logicalCenter = MFHUDFloating::IslandCenter(screen, {size.width, size.height}, top);
+    auto center = MFHUDFloating::ToPhysical(logicalCenter,
+        {fixed.origin.x, fixed.origin.y, fixed.size.width, fixed.size.height}, (int)orientation);
+    auto physical = MFHUDFloating::PhysicalSize({size.width,size.height}, (int)orientation);
+    UIWindow *window = self.islandWindow;
+    window.bounds = CGRectMake(0,0,physical.width,physical.height);
+    window.center = CGPointMake(center.x,center.y);
+    window.rootViewController.view.frame = window.bounds;
+    self.islandContent.bounds = (CGRect){CGPointZero,size};
+    self.islandContent.center = CGPointMake(physical.width/2,physical.height/2);
+    self.islandContent.transform = CGAffineTransformMakeRotation(MFHUDFloating::Angle((int)orientation));
+    self.islandView.frame = (CGRect){CGPointZero,size};
+    [window layoutIfNeeded];
+    MFMenuPanelSetIslandCenter(CGPointMake(logicalCenter.x,logicalCenter.y));
+}
+
+- (void)setMenuCollapsed:(BOOL)collapsed animated:(BOOL)animated {
+    if ([self isStopping]) return;
+    [self.inputBridge cancelAll];
+    self.inputBridge.menuInputEnabled = NO;
+    [self.islandView setExpanded:!collapsed animated:animated];
+    const NSUInteger generation = ++self.presentationGeneration;
+    self.menuTransitioning = YES;
+    self.menuOverlay.paused = collapsed;
+    if (!collapsed) [self.menuOverlay requestRedraw];
+    BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
+    CGAffineTransform compact = CGAffineTransformMakeTranslation(0, -12);
+    compact = CGAffineTransformScale(compact, 0.94, 0.94);
+    if (!collapsed && self.hudMenuWindow.hidden) {
+        self.menuOverlay.alpha = 0;
+        self.menuOverlay.transform = reduce ? CGAffineTransformIdentity : compact;
+    }
+    self.hudMenuWindow.hidden = NO;
+    void (^changes)(void) = ^{
+        self.menuOverlay.alpha = collapsed ? 0 : 1;
+        self.menuOverlay.transform = collapsed && !reduce ? compact : CGAffineTransformIdentity;
+    };
+    void (^finished)(BOOL) = ^(BOOL completed) {
+        if (generation != self.presentationGeneration || [self isStopping]) return;
+        self.menuTransitioning = NO;
+        self.hudMenuWindow.hidden = collapsed;
+        self.menuOverlay.paused = collapsed;
+        self.inputBridge.menuInputEnabled = !collapsed;
+        if (!collapsed) [self.menuOverlay requestRedraw];
+    };
+    if (!animated || reduce) {
+        [UIView animateWithDuration:animated ? 0.12 : 0 animations:changes completion:finished];
+    } else {
+        [UIView animateWithDuration:collapsed ? 0.22 : 0.38 delay:0
+            usingSpringWithDamping:collapsed ? 1.0 : 0.88 initialSpringVelocity:0
+            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+            animations:changes completion:finished];
+    }
 }
 
 - (void)dealloc {
@@ -1279,6 +1425,9 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     [self.targetTimer invalidate];
     _targetBinding.reset(MFMakeTargetBindingHooks());
     [MFMenuUI setCaptureProtectionApplier:nil];
+    [MFMenuUI setCollapseChangeHandler:nil];
+    [MFMenuUI setFrameRateApplier:nil];
+    MFMenuPanelSetPresentationChangeHandler(nil);
 }
 
 - (void)publishStartupState:(NSString *)state error:(NSString *)error {
@@ -1302,6 +1451,10 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     if ([self isStopping]) return;
     [self.targetTimer invalidate];
     [MFMenuUI setCaptureProtectionApplier:nil];
+    [MFMenuUI setCollapseChangeHandler:nil];
+    [MFMenuUI setFrameRateApplier:nil];
+    MFMenuPanelSetPresentationChangeHandler(nil);
+    self.presentationGeneration++;
     _targetBinding.reset(MFMakeTargetBindingHooks());
     self.boundTargetPID = 0; self.boundTargetIdentity = nil;
     [self.inputBridge cancelAll];
@@ -1309,8 +1462,10 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     [self.drawingOverlay stopRendering];
     self.hudMenuWindow.hidden = YES;
     self.drawingWindow.hidden = YES;
+    self.islandWindow.hidden = YES;
     self.menuHost = nil;
     self.drawingHost = nil;
+    self.islandHost = nil;
     [self publishStartupState:@"failed" error:error];
     /*
      * ★ [M5.135] 退出前必须显式释放内核。
@@ -1363,6 +1518,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     [MFMenuUI setCollapseChangeHandler:nil];
     [MFMenuUI setFrameRateApplier:nil];
     [MFMenuUI setCaptureProtectionApplier:nil];
+    MFMenuPanelSetPresentationChangeHandler(nil);
+    self.presentationGeneration++;
     self.menuOverlay.firstFrameCompletion = nil;
     self.drawingOverlay.firstFrameCompletion = nil;
 
@@ -1376,10 +1533,13 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 
     self.hudMenuWindow.hidden = YES;
     self.drawingWindow.hidden = YES;
+    self.islandWindow.hidden = YES;
     self.hudMenuWindow = nil;
     self.drawingWindow = nil;
+    self.islandWindow = nil;
     self.menuHost = nil;
     self.drawingHost = nil;
+    self.islandHost = nil;
 
     [MFHUDControl stopWatching];
 

@@ -32,8 +32,9 @@ jobs:
         # 注意：必须在仓库根目录跑 —— tests/ 与 scripts/ 都在根下，
         # 不能加 working-directory: app（加了就会 ImportError: 'tests' 不可导入）
         run: |
-          set -o pipefail
+          set -eo pipefail
           ( python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
+            python3 tests/run_uipanel_regressions.py
             python3 scripts/preflight.py ) 2>&1 | tee app/build.log
 
       - name: Generate Xcode project

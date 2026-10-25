@@ -1,6 +1,7 @@
 #import "MFHUDInputBridge.h"
 #import "MFHUDTouchRouter.h"
 #import "MFHUDLog.h"
+#include "MFHUDFloatingLayout.h"
 #import "../Render/MFOverlayView.h"
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
@@ -146,6 +147,8 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
 
     NSInteger _gestureIndex; // Full uint32_t contact index; zero means no owner.
     BOOL _dragMoved;
+    BOOL _auxiliaryGesture, _auxiliaryMoved;
+    CGPoint _auxiliaryStart;
 
 }
 - (instancetype)initWithOverlay:(MFOverlayView *)overlay window:(UIWindow *)window {
@@ -153,6 +156,7 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         _overlay = overlay; _window = window;
         _router = [[MFHUDTouchRouter alloc] initWithOutput:self];
         _lockToken = NOTIFY_TOKEN_INVALID;
+        _menuInputEnabled = YES;
     }
     return self;
 }
@@ -187,6 +191,8 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     [_router cancelAll];
     if (!routerWillCancel) [self cancelTouch];
     _dragIndex = nil; _gestureIndex = 0; _dragMoved = NO;
+    _auxiliaryGesture = NO; _auxiliaryMoved = NO;
+    if (self.auxiliaryPressHandler) self.auxiliaryPressHandler(NO);
 }
 - (void)touchAtPoint:(CGPoint)point down:(BOOL)down {
     [_overlay.imgui addTouchX:(float)point.x y:(float)point.y down:down];
@@ -201,8 +207,17 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     CFTimeInterval receivedAt = CACurrentMediaTime();
     CFTimeInterval delay = receivedAt - queuedAt;
     MFOverlayView *overlay = _overlay; UIWindow *window = _window;
-    if (!overlay.hasCompletedFrame || window.hidden || CGRectIsNull(overlay.captureRect) ||
-        CGRectIsEmpty(overlay.captureRect)) { [self cancelAll]; return; }
+    UIView *auxiliary = self.auxiliaryView;
+    BOOL auxiliaryReady = auxiliary && auxiliary.window && !auxiliary.window.hidden &&
+        !auxiliary.hidden && auxiliary.alpha > 0.01 && auxiliary.userInteractionEnabled;
+    // Resizing invalidates the Metal generation until its next completion.
+    // Keep the established finger through that gap; new presses still wait
+    // for a completed frame so they cannot hit unpublished UI geometry.
+    BOOL ownsMenuGesture = _gestureIndex != 0 && !_auxiliaryGesture;
+    BOOL menuReady = self.menuInputEnabled && (overlay.hasCompletedFrame || ownsMenuGesture) && !window.hidden &&
+        !CGRectIsNull(overlay.captureRect) && !CGRectIsEmpty(overlay.captureRect);
+    if ((!menuReady && !auxiliaryReady) || (_auxiliaryGesture && !auxiliaryReady) ||
+        (_gestureIndex && !_auxiliaryGesture && !menuReady)) { [self cancelAll]; return; }
     id<MFAXEvent> rep = [(Class<MFAXEvent>)_representationClass
         representationWithHIDEvent:event hidStreamIdentifier:@"UIApplicationEvents"];
     NSArray<id<MFAXPath>> *paths = rep.handInfo.paths;
@@ -250,6 +265,34 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
     }
     if (phase != MFHUDTouchBegan && contactIndex != _gestureIndex) return;
 
+    // The island remains usable while the Metal panel is hidden/paused. Never
+    // install a second global BKS bridge or forward this same tap to ImGui.
+    CGPoint auxiliaryPoint = CGPointZero;
+    if (auxiliaryReady) {
+        CGPoint p = [auxiliary.window convertPoint:global
+            fromCoordinateSpace:auxiliary.window.screen.fixedCoordinateSpace];
+        auxiliaryPoint = [auxiliary convertPoint:p fromView:auxiliary.window];
+    }
+    BOOL insideAuxiliary = auxiliaryReady && CGRectContainsPoint(auxiliary.bounds, auxiliaryPoint);
+    if (phase == MFHUDTouchBegan && insideAuxiliary) {
+        _gestureIndex = contactIndex; _auxiliaryGesture = YES;
+        _auxiliaryMoved = NO; _auxiliaryStart = global;
+        if (self.auxiliaryPressHandler) self.auxiliaryPressHandler(YES);
+        return;
+    }
+    if (_auxiliaryGesture) {
+        CGFloat dx = global.x-_auxiliaryStart.x, dy = global.y-_auxiliaryStart.y;
+        if (dx*dx+dy*dy >= 64.0 || !insideAuxiliary) _auxiliaryMoved = YES;
+        if (self.auxiliaryPressHandler) self.auxiliaryPressHandler(insideAuxiliary && !_auxiliaryMoved && phase != MFHUDTouchEnded);
+        if (phase == MFHUDTouchEnded) {
+            BOOL activate = insideAuxiliary && !_auxiliaryMoved;
+            _gestureIndex = 0; _auxiliaryGesture = NO; _auxiliaryMoved = NO;
+            if (activate && self.auxiliaryActivationHandler) self.auxiliaryActivationHandler();
+        }
+        return;
+    }
+    if (!menuReady) return;
+
     CGPoint inWindow = [window convertPoint:global fromCoordinateSpace:window.screen.fixedCoordinateSpace];
     CGPoint local = [overlay convertPoint:inWindow fromView:window];
     if (phase == MFHUDTouchBegan) {
@@ -270,10 +313,10 @@ static void MFHUDEventCallback(void *target, void *refcon, void *service, CFType
         if (_dragMoved) {
             CGPoint center = CGPointMake(_windowStart.x + dx, _windowStart.y + dy);
             CGRect screen = window.screen.fixedCoordinateSpace.bounds;
-            CGFloat halfW = window.bounds.size.width / 2, halfH = window.bounds.size.height / 2;
-            center.x = MIN(CGRectGetMaxX(screen) - halfW, MAX(CGRectGetMinX(screen) + halfW, center.x));
-            center.y = MIN(CGRectGetMaxY(screen) - halfH, MAX(CGRectGetMinY(screen) + halfH, center.y));
-            window.center = center;
+            auto clamped = MFHUDFloating::ClampCenter({center.x, center.y},
+                {window.bounds.size.width, window.bounds.size.height},
+                {screen.origin.x, screen.origin.y, screen.size.width, screen.size.height});
+            window.center = CGPointMake(clamped.x, clamped.y);
             MFRequestOverlayRedraw(overlay);
         }
         if (phase == MFHUDTouchEnded) {

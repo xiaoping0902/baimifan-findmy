@@ -30,6 +30,31 @@ static constexpr float kUIBackgroundFadeSeconds = 0.7f;
 static constexpr float kPanelDefaultWidthRatio = 0.66f;
 static constexpr float kPanelScaleMinimum = 0.35f / kPanelDefaultWidthRatio;
 static constexpr float kPanelScaleMaximum = 0.80f / kPanelDefaultWidthRatio;
+
+// The native window and the canvas use the same layout.  A hosted canvas is
+// fitted to the resulting window size; it must not apply uiScale a second time.
+struct UIPanelLayout
+{
+    bool portrait;
+    float baseWidth;
+    float baseHeight;
+    float scale;
+    ImVec2 size;
+};
+
+static UIPanelLayout ComputePanelLayout(ImVec2 screenSize, float uiScale)
+{
+    const bool portrait = screenSize.y > screenSize.x * 1.08f;
+    const float baseWidth = portrait ? 640.0f : 860.0f;
+    const float baseHeight = portrait ? 820.0f : 540.0f;
+    const float requested = screenSize.x * kPanelDefaultWidthRatio / baseWidth *
+        ImClamp(uiScale, kPanelScaleMinimum, kPanelScaleMaximum);
+    const float available = ImMin(ImMax(1.0f, screenSize.x - 24.0f) / baseWidth,
+                                 ImMax(1.0f, screenSize.y - 24.0f) / baseHeight);
+    const float scale = ImMax(.001f, ImMin(requested, available));
+    return {portrait, baseWidth, baseHeight, scale,
+            ImVec2(baseWidth * scale, baseHeight * scale)};
+}
 enum DrawingFeatureIndex : int
 {
     DrawingHuman = 0,
@@ -241,6 +266,8 @@ struct UIState
     float gestureLastY = 0.0f;
     int visualTab = -1;
     float pageReveal = 1.0f;
+    bool animationActive = false;
+    bool hostedViewport = false;
 
     int   resizeCorner = -1;
     bool  resizing = false;
@@ -457,6 +484,7 @@ static void BuildUIChineseRanges(ImGuiIO& io, ImVector<ImWchar>& out)
     //    现在 rebuild_xiaoyu.bat 每次编译前会自动重新生成, 新增文案必然包含在内。
 #include "MFUiFontChars.h"
     builder.AddText(kGeneratedFontChars);
+    builder.AddText("灵动岛固定在屏幕顶部中央");
     // 固定界面文字在启动时建立；玩家昵称的字形由主循环按需加入，避免整套汉字图集占满显存。
     builder.AddText(
         "黑皇主页绘制瞄准物资设置退出主页运行状态在线刷新项目筛选应用背景图"

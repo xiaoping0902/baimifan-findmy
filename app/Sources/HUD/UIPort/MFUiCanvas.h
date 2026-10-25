@@ -4,13 +4,14 @@
 // Presentation only: persistent settings remain in UIState and main.cpp.
 namespace ios {
 static float Damp(float from,float to,float rate=20.0f) {
-    return ImLerp(from,to,1.0f-std::exp(-rate*ImClamp(ImGui::GetIO().DeltaTime,0.0f,.05f)));
+    return ImLerp(from,to,1.0f-std::exp(-rate*ImClamp(ImGui::GetIO().DeltaTime,0.0f,.1f)));
 }
-static float Motion(ImGuiID id,float target) {
+static float Motion(UIState& st,ImGuiID id,float target) {
     ImGuiStorage* storage=ImGui::GetStateStorage();
     float value=storage->GetFloat(id,target);
     value=Damp(value,target);
     if(std::fabs(value-target)<.001f)value=target;
+    else st.animationActive=true;
     storage->SetFloat(id,value);
     return value;
 }
@@ -44,7 +45,7 @@ struct Canvas {
         text(x+w-tw,y+11,11,color?color:tc.textMuted,value);
     }
     void switchShape(float x,float y,bool value,ImGuiID id) {
-        const float t=Motion(id^0x635091u,value?1.0f:0.0f);
+        const float t=Motion(st,id^0x635091u,value?1.0f:0.0f);
         rect(x,y,38,23,MixColor(IM_COL32(228,228,233,(tc.surface>>24)&255),WithAlpha(IM_COL32(52,199,89,255),(tc.surface>>24)&255),t),12);
         ImVec2 center=p(x+11.5f+15*t,y+11.5f);
         dl->AddCircleFilled(ImVec2(center.x,center.y+s),9.6f*s,MultiplyAlpha(IM_COL32(0,0,0,25),(tc.text>>24)/255.0f),20);
@@ -61,7 +62,7 @@ struct Canvas {
     bool tile(float x,float y,float w,const char* label,bool value,const char* id) {
         const bool changed=hit(x,y,w,48,id);
         ImGuiID key=ImGui::GetID(id);
-        const float t=Motion(key^0x1834u,value?1.0f:0.0f);
+        const float t=Motion(st,key^0x1834u,value?1.0f:0.0f);
         rect(x,y,w,48,MixColor(tc.surface,tc.accent,.035f*t),13);
         dl->AddRect(p(x,y),p(x+w,y+48),MixColor(tc.border,WithAlpha(tc.accent,65),t),13*s,0,ImMax(.5f,s*.7f));
         float size=12;
@@ -86,7 +87,7 @@ struct Canvas {
             ImGui::PopID();
         }
         // One geometry calculation drives the selected background and hit areas.
-        float visual=Motion(ImGui::GetID("##selected"),float(selected));
+        float visual=Motion(st,ImGui::GetID("##selected"),float(selected));
         rect(cx+2+part*visual,y+7,part,25,MultiplyAlpha(IM_COL32(0,0,0,16),((tc.text>>24)&255)/255.0f),7);
         rect(cx+2+part*visual,y+6,part,25,tc.surface,7);
         for(int i=0;i<count;++i){
@@ -211,7 +212,7 @@ static bool UpdateScroll(UIState& st,ImVec2 from,ImVec2 to,float s,float viewHei
     ImGuiIO& io=ImGui::GetIO();
     const int tab=st.tab;
     float& offset=st.pageOffsets[tab];float& speed=st.pageSpeeds[tab];
-    const float dt=ImClamp(io.DeltaTime,.0001f,.05f);
+    const float dt=ImClamp(io.DeltaTime,.0001f,.1f);
     const float maximum=ImMax(0.0f,st.pageHeights[tab]-viewHeight);
     const bool inside=io.MousePos.x>=from.x&&io.MousePos.x<=to.x&&io.MousePos.y>=from.y&&io.MousePos.y<=to.y;
     const bool popup=ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
@@ -243,6 +244,7 @@ static bool UpdateScroll(UIState& st,ImVec2 from,ImVec2 to,float s,float viewHei
     const float clamped=ImClamp(offset,0.0f,maximum);
     if(clamped!=offset)speed=0;
     offset=clamped;
+    if(speed!=0.0f)st.animationActive=true;
     return blocked;
 }
 static void DrawIslandCapsule(ImDrawList* dl, ImVec2 p0, ImVec2 p1,
@@ -400,23 +402,33 @@ static float BackgroundLayerAlpha(float opacity,float weight,float weightAbove) 
 
 static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID brandLogoTexture,
                      const UIBackgroundTexture* backgroundTextures=nullptr,
-                     int backgroundTextureCount=0) {
+                     int backgroundTextureCount=0,
+                     const UIPanelLayout* hostedLayout=nullptr) {
     if(!font||screenSize.x<=0||screenSize.y<=0)return;
     ImGuiIO& io=ImGui::GetIO();
+    const bool hosted=hostedLayout!=nullptr;
+    st.hostedViewport=hosted;
+    if(hosted&&!st.expanded){st.animationActive=false;return;}
+    st.animationActive=io.MouseDown[0];
     st.tab=ImClamp(st.tab,0,6);
     const float boundedScale=ImClamp(st.uiScale,kPanelScaleMinimum,kPanelScaleMaximum);
     if(st.uiScale!=boundedScale){st.uiScale=boundedScale;st.configDirty=true;}
     st.uiScaleVisual=ImClamp(st.uiScaleVisual,kPanelScaleMinimum,kPanelScaleMaximum);
-    const float dt=ImClamp(io.DeltaTime,0.0f,.05f);
-    st.anim=ImClamp(st.anim+(st.expanded?dt/.32f:-dt/.25f),0.0f,1.0f);
+    const float dt=ImClamp(io.DeltaTime,0.0f,.1f);
+    // UIKit animates the hosted window, including its last expanded frame.
+    // Keep this canvas stable so the content and capture area never collapse
+    // inside a second, independently animated coordinate system.
+    st.anim=hosted?1.0f:ImClamp(st.anim+(st.expanded?dt/.32f:-dt/.25f),0.0f,1.0f);
     // Apply scale continuously, including while the size slider is held.
-    st.uiScaleVisual=ios::Damp(st.uiScaleVisual,st.uiScale,20);
+    st.uiScaleVisual=hosted?st.uiScale:ios::Damp(st.uiScaleVisual,st.uiScale,20);
     if(std::fabs(st.uiScaleVisual-st.uiScale)<.0001f)st.uiScaleVisual=st.uiScale;
-    if(st.anim<=.001f){ios::DrawIsland(st,screenSize,font);return;}
-    const bool portrait=screenSize.y>screenSize.x*1.08f;
-    const float baseW=portrait?640.0f:860.0f,baseH=portrait?820.0f:540.0f;
-    float scale=screenSize.x*kPanelDefaultWidthRatio/baseW*st.uiScaleVisual;
-    scale=ImMax(.08f,ImMin(scale,ImMin((screenSize.x-24)/baseW,(screenSize.y-24)/baseH)));
+    if(st.anim>0.001f&&st.anim<1.0f)st.animationActive=true;
+    if(st.uiScaleVisual!=st.uiScale)st.animationActive=true;
+    if(st.anim<=.001f){if(!hosted)ios::DrawIsland(st,screenSize,font);return;}
+    const UIPanelLayout layout=hosted?*hostedLayout:ComputePanelLayout(screenSize,st.uiScaleVisual);
+    const bool portrait=layout.portrait;
+    const float baseW=layout.baseWidth,baseH=layout.baseHeight;
+    const float scale=hosted?ImMin(screenSize.x/baseW,screenSize.y/baseH):layout.scale;
     const float reveal=SmootherStep(st.anim);
     const float s=scale;
     const float w=baseW*s,h=baseH*s;
@@ -425,8 +437,8 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
         ImClamp(st.panelCenterYRatio*screenSize.y-h*.5f,12.0f,ImMax(12.0f,screenSize.y-h-12)));
     const IslandLayout island=ComputeIslandLayout(screenSize,st.islandYOffset);
     const float islandW=st.islandWidthVisual>0?st.islandWidthVisual:108*island.scale;
-    const ImVec2 pos=ImLerp(ImVec2((screenSize.x-islandW)*.5f,island.top),finalPos,reveal);
-    const ImVec2 size(ImLerp(islandW,w,reveal),ImLerp(island.height,h,reveal));
+    const ImVec2 pos=hosted?ImVec2(0,0):ImLerp(ImVec2((screenSize.x-islandW)*.5f,island.top),finalPos,reveal);
+    const ImVec2 size=hosted?ImVec2(w,h):ImVec2(ImLerp(islandW,w,reveal),ImLerp(island.height,h,reveal));
     const ImVec2 end(pos.x+size.x,pos.y+size.y);
     const float x=pos.x,y=pos.y;
     const float rounding=ImLerp(island.height*.5f,24*s,reveal);
@@ -459,7 +471,7 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     }else dl->AddRectFilled(pos,end,panelColor,rounding);
     if(contentAlpha<=.001f){
         ImGui::End();ImGui::PopStyleVar(2);
-        ios::DrawIsland(st,screenSize,font);return;
+        if(!hosted)ios::DrawIsland(st,screenSize,font);return;
     }
     if(showBackground){
         const UIBackgroundBlend blend=ComputeUIBackgroundBlend(st.time);
@@ -495,18 +507,20 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     const bool disabled=st.anim<.98f||!st.expanded;
     if(disabled)ImGui::BeginDisabled();
     // Header-only drag region never covers navigation or content controls.
-    shell.hit(0,0,baseW-170,top,"panel_drag");
-    if(ImGui::IsItemActivated()){
-        st.panelDragStartMouse=io.MousePos;
-        st.panelDragStartXRatio=(x+w*.5f)/screenSize.x;
-        st.panelDragStartYRatio=(y+h*.5f)/screenSize.y;
-    }
-    if(ImGui::IsItemActive()){
-        const float nx=st.panelDragStartXRatio*screenSize.x+io.MousePos.x-st.panelDragStartMouse.x;
-        const float ny=st.panelDragStartYRatio*screenSize.y+io.MousePos.y-st.panelDragStartMouse.y;
-        st.panelCenterXRatio=ImClamp(nx,w*.5f+12,screenSize.x-w*.5f-12)/screenSize.x;
-        st.panelCenterYRatio=ImClamp(ny,h*.5f+12,screenSize.y-h*.5f-12)/screenSize.y;
-        st.configDirty=true;ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    if(!hosted){
+        shell.hit(0,0,baseW-214,top,"panel_drag");
+        if(ImGui::IsItemActivated()){
+            st.panelDragStartMouse=io.MousePos;
+            st.panelDragStartXRatio=(x+w*.5f)/screenSize.x;
+            st.panelDragStartYRatio=(y+h*.5f)/screenSize.y;
+        }
+        if(ImGui::IsItemActive()){
+            const float nx=st.panelDragStartXRatio*screenSize.x+io.MousePos.x-st.panelDragStartMouse.x;
+            const float ny=st.panelDragStartYRatio*screenSize.y+io.MousePos.y-st.panelDragStartMouse.y;
+            st.panelCenterXRatio=ImClamp(nx,w*.5f+12,screenSize.x-w*.5f-12)/screenSize.x;
+            st.panelCenterYRatio=ImClamp(ny,h*.5f+12,screenSize.y-h*.5f-12)/screenSize.y;
+            st.configDirty=true;ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        }
     }
     if(brandLogoTexture){
         dl->AddImageRounded(brandLogoTexture,shell.p(18,11),shell.p(56,49),
@@ -521,8 +535,12 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     else if(st.tab==4){snprintf(status,sizeof(status),"%d / 17",CountEnabledConfigurableLoot(st));tone=tc.warning;}
     else if(st.tab==2||st.tab==3){bool enabled=st.tab==2?st.aim.enabled:st.aim.trackingEnabled;snprintf(status,sizeof(status),"%s",enabled?"已开启":"已关闭");tone=enabled?tc.success:tc.textMuted;}
     else snprintf(status,sizeof(status),"运行正常");
-    shell.rect(baseW-147,18,83,25,WithAlpha(tone,22),13);
-    DrawTextCentered(dl,font,10.5f*s,shell.p(baseW-143,18),shell.p(baseW-68,43),tone,status);
+    shell.rect(baseW-207,18,83,25,WithAlpha(tone,22),13);
+    DrawTextCentered(dl,font,10.5f*s,shell.p(baseW-203,18),shell.p(baseW-128,43),tone,status);
+    if(shell.hit(baseW-94,14,32,32,"header_minimize"))st.expanded=false;
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("收起面板");
+    shell.rect(baseW-94,14,32,32,WithAlpha(tc.textFaint,18),16);
+    dl->AddLine(shell.p(baseW-84,30),shell.p(baseW-72,30),tc.textMuted,ImMax(1.0f,1.8f*s));
     bool close=shell.hit(baseW-50,14,32,32,"header_exit");
     if(ImGui::IsItemHovered())ImGui::SetTooltip("退出程序");
     shell.rect(baseW-50,14,32,32,WithAlpha(tc.textFaint,18),16);
@@ -535,7 +553,7 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
         ImGui::PushID(i);
         bool pressed=shell.hit(10,top+15+i*49,side-20,43,"nav");
         if(pressed&&st.tab!=i){st.tab=i;st.pageReveal=0;st.gesturePage=-1;for(float& v:st.pageSpeeds)v=0;}
-        float selected=ios::Motion(ImGui::GetID("selected"),st.tab==i?1.0f:0.0f);
+        float selected=ios::Motion(st,ImGui::GetID("selected"),st.tab==i?1.0f:0.0f);
         shell.rect(10,top+15+i*49,side-20,43,MultiplyAlpha(tc.accentSoft,selected),11);
         ImU32 color=MixColor(tc.textMuted,tc.accent,selected);
         DrawNavIcon(dl,i,shell.p(28,top+36.5f+i*49),17*s,color);
@@ -547,6 +565,8 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     shell.text(side+72,top+23,11,tc.textFaint,subtitles[st.tab]);
     if(st.visualTab!=st.tab){st.visualTab=st.tab;st.pageReveal=0;}
     st.pageReveal=ios::Damp(st.pageReveal,1,24);
+    if(st.pageReveal<.999f)st.animationActive=true;
+    else st.pageReveal=1.0f;
     float bodyX=side+20,bodyY=top+titleH+16,bodyW=baseW-side-40,bodyH=baseH-bodyY-18;
     ImVec2 body0=shell.p(bodyX,bodyY),body1=shell.p(bodyX+bodyW,bodyY+bodyH);
     bool block=disabled||ios::UpdateScroll(st,body0,body1,s,bodyH);
@@ -580,12 +600,13 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     if(st.resizing){
         float dx=(io.MousePos.x-st.resizeStartMouse.x)/st.resizeStartHalfSize.x;
         float dy=(io.MousePos.y-st.resizeStartMouse.y)/st.resizeStartHalfSize.y;
-        st.uiScale=ImClamp(st.resizeStartScale*(1+2*(std::fabs(dx)>std::fabs(dy)?dx:dy)),kPanelScaleMinimum,kPanelScaleMaximum);
-        st.configDirty=true;ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+        const float next=ImClamp(st.resizeStartScale*(1+(hosted?1.0f:2.0f)*(std::fabs(dx)>std::fabs(dy)?dx:dy)),kPanelScaleMinimum,kPanelScaleMaximum);
+        if(std::fabs(next-st.uiScale)>.00001f){st.uiScale=next;st.configDirty=true;}
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
     }else st.resizeCorner=-1;
     dl->AddLine(shell.p(baseW-16,baseH-9),shell.p(baseW-9,baseH-16),WithAlpha(tc.textFaint,130),1.5f*s);
     dl->AddLine(shell.p(baseW-11,baseH-9),shell.p(baseW-9,baseH-11),WithAlpha(tc.textFaint,130),1.5f*s);
     if(disabled)ImGui::EndDisabled();
     ImGui::End();ImGui::PopStyleVar(2);
-    ios::DrawIsland(st,screenSize,font);
+    if(!hosted)ios::DrawIsland(st,screenSize,font);
 }

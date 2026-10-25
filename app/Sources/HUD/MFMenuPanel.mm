@@ -4,7 +4,7 @@
 //  设计要点：
 //    · UIState 是唯一的界面状态，页面代码（ios_pages.h）只读它
 //    · 与 MFSettings 双向：首帧从设置灌入，用户动了就写回并落盘（去抖 0.8s）
-//    · 触摸命中：展开时报面板窗口矩形，收起时报灵动岛矩形，其余区域穿透到游戏
+//    · 触摸命中：上报面板本地矩形，灵动岛由独立 UIKit 窗口接收触摸
 //
 #import "MFMenuPanel.h"
 #import "MFMenuUI.h"
@@ -23,7 +23,11 @@ static BOOL    gLoadedFromSettings = NO;
 static int  sReal = 0, sBot = 0, sLoot = 0, sObservers = 0;
 static BOOL sCameraOK = NO;
 
-static __weak MFOverlayView *sOverlay = nil;
+static CGSize sLogicalScreen = CGSizeZero;
+static CGPoint sIslandCenter = CGPointZero;
+static BOOL sHasIslandCenter = NO;
+static void (^sPresentationChangeHandler)(void) = nil;
+static NSUInteger sSettingsRevision = 0;
 
 #pragma mark - 设置同步
 
@@ -46,7 +50,14 @@ static void MFPanelStoreToSettings(void) {
     s.fontPerson     = 13.0f * gUI.espFontScale;
     s.fontInfo       = 13.0f * gUI.espFontScale;
     s.captureProtectionEnabled = gUI.excludeFromRecording;
-    [s save];
+    // Apply settings immediately, but persist only after the gesture settles.
+    // This timer also fires when the panel has been minimized and rendering is
+    // paused; no plist write belongs in the per-frame rendering path.
+    const NSUInteger revision = ++sSettingsRevision;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (revision == sSettingsRevision) [s save];
+    });
 }
 
 static void MFPanelLoadFromSettings(void) {
@@ -74,14 +85,14 @@ static void MFPanelLoadFromSettings(void) {
 static void MFPanelInitOnce(void) {
     if (gInitDone) return;
     gInitDone = YES;
-    /* [M5.186] 启动即展开面板（原版行为），点灵动岛可收起 */
+    /* 首次启动展开；窗口的显隐与原生灵动岛由宿主管理。 */
     gUI.expanded     = true;
     gUI.anim         = 1.0f;
     gUI.tab          = 0;
     /* [M5.185] 默认放大到 1.15（上限 1.212）—— 原来的 1.0 在 iPad 上偏小 */
     gUI.uiScale      = 1.15f;
     gUI.uiScaleVisual= 1.15f;
-    /* 灵动岛默认往下压 40，不再贴着状态栏；外观页滑杆可再调（0~600） */
+    /* 保留导入面板的外观状态；原生灵动岛位置由宿主发布。 */
     gUI.islandYOffset= 40.0f;
     gUI.islandAlpha  = 1.0f;
     gUI.panelCenterXRatio = 0.5f;
@@ -93,20 +104,44 @@ static void MFPanelInitOnce(void) {
 
 void MFMenuPanelSetExpanded(BOOL expanded) { MFPanelInitOnce(); gUI.expanded = expanded ? true : false; }
 BOOL MFMenuPanelExpanded(void)             { MFPanelInitOnce(); return gUI.expanded ? YES : NO; }
+BOOL MFMenuPanelConsumeExitRequest(void) {
+    MFPanelInitOnce();
+    const BOOL requested = gUI.wantExit ? YES : NO;
+    gUI.wantExit = false;
+    return requested;
+}
+
+CGSize MFMenuPanelPreferredSize(CGSize logicalScreen) {
+    MFPanelInitOnce();
+    if (!std::isfinite(logicalScreen.width) || !std::isfinite(logicalScreen.height) ||
+        logicalScreen.width <= 1.0 || logicalScreen.height <= 1.0) return CGSizeZero;
+    sLogicalScreen = logicalScreen;
+    const UIPanelLayout layout = ComputePanelLayout(
+        ImVec2((float)logicalScreen.width, (float)logicalScreen.height), gUI.uiScale);
+    return CGSizeMake(layout.size.x, layout.size.y);
+}
+
+void MFMenuPanelSetPresentationChangeHandler(void (^handler)(void)) {
+    sPresentationChangeHandler = [handler copy];
+}
+
+void MFMenuPanelSetIslandCenter(CGPoint center) {
+    if (!std::isfinite(center.x) || !std::isfinite(center.y)) return;
+    sIslandCenter = center;
+    sHasIslandCenter = YES;
+}
 
 void MFMenuPanelReportStats(int real, int bot, int loot, BOOL cameraOK, int observers) {
     sReal = real; sBot = bot; sLoot = loot; sCameraOK = cameraOK; sObservers = observers;
 }
 
 ImVec2 MFMenuPanelIslandCenter(ImVec2 screen) {
-    MFPanelInitOnce();
-    const IslandLayout layout = ComputeIslandLayout(screen, gUI.islandYOffset);
-    return ImVec2(screen.x * 0.5f, layout.top + layout.height * 0.5f);
+    if (sHasIslandCenter) return ImVec2((float)sIslandCenter.x, (float)sIslandCenter.y);
+    return ImVec2(screen.x * 0.5f, 12.0f + 34.0f * 0.5f);
 }
 
 void MFMenuPanelRender(MFOverlayView *overlay, ImVec2 screen) {
     MFPanelInitOnce();
-    sOverlay = overlay;
 
     ImFont *font = ImGui::GetFont();
     if (font == NULL || screen.x <= 1.0f || screen.y <= 1.0f) return;
@@ -120,43 +155,43 @@ void MFMenuPanelRender(MFOverlayView *overlay, ImVec2 screen) {
     gUI.renderFps     = ImGui::GetIO().Framerate;
     gUI.time          = (float)ImGui::GetTime();
 
-    /* ② 页面里的开关改完 → 写回设置 */
-    MFPanelStoreToSettings();
+    /* The native host owns positioning, expansion and the independent island.
+     * Render only local panel content, using the full-screen layout once. */
+    CGSize logicalScreen = sLogicalScreen;
+    if (logicalScreen.width <= 1.0 || logicalScreen.height <= 1.0)
+        logicalScreen = overlay.window.screen.bounds.size;
+    if (logicalScreen.width <= 1.0 || logicalScreen.height <= 1.0)
+        logicalScreen = CGSizeMake(screen.x, screen.y);
+    const UIPanelLayout layout = ComputePanelLayout(
+        ImVec2((float)logicalScreen.width, (float)logicalScreen.height), gUI.uiScale);
+    const float previousScale = gUI.uiScale;
 
-    /* ③ 画：外框 + 分页 + 当前页；收起态只画灵动岛
-     * RenderUI 在 ui.h 里是【全局函数】（不在 ios 命名空间内）
-     *
-     * [M5.186] 前三帧打点：万一又死在渲染里，hud.log 会明确停在"开始"还是"结束"。
-     */
+    // Keep both diagnostics inside the same first-three-frames condition.
     static int sFrameLog = 0;
-    if (sFrameLog < 3) {
+    const BOOL logFrame = sFrameLog < 3;
+    if (logFrame) {
         sFrameLog++;
         MFHUDLogLine(@"[面板] 第%d帧 开始 %.0fx%.0f scale=%.2f anim=%.2f font=%p",
                      sFrameLog, screen.x, screen.y, gUI.uiScale, gUI.anim, (void *)font);
     }
-    RenderUI(gUI, screen, font, (ImTextureID)0, nullptr, 0);
-    if (sFrameLog <= 3) {
+    RenderUI(gUI, screen, font, (ImTextureID)0, nullptr, 0, &layout);
+    if (logFrame) {
         MFHUDLogLine(@"[面板] 第%d帧 结束", sFrameLog);
     }
 
-    /* ④ 触摸命中：展开报面板矩形，收起报灵动岛矩形
-     * ★ [M5.190] 关键是 captureRect ★
-     * MFOverlayView 的命中判定是「上报矩形 ∩ captureRect」——
-     * 老代码在 buildPanel 里设它，我换掉之后没人设，一直保持 CGRectNull，
-     * 交集永远为空 → 面板怎么点都没反应。这里补上。
-     */
-    if (gUI.anim > 0.01f) {
-        ImGuiWindow *w = ImGui::FindWindowByName("##ios_panel");
-        if (w != NULL) {
-            const CGRect r = CGRectMake(w->Pos.x, w->Pos.y, w->Size.x, w->Size.y);
-            [overlay addInteractiveRect:r];
-            overlay.captureRect = r;
-        }
-    } else {
-        const IslandLayout layout = ComputeIslandLayout(screen, gUI.islandYOffset);
-        const float islW = 108.0f * layout.scale;
-        const CGRect r = CGRectMake((screen.x - islW) * 0.5f, layout.top, islW, layout.height);
-        [overlay addInteractiveRect:r];
-        overlay.captureRect = r;
-    }
+    MFPanelStoreToSettings();
+    if (gUI.animationActive) [overlay requestRedraw];
+
+    const float scale = ImMin(screen.x / layout.baseWidth, screen.y / layout.baseHeight);
+    const CGRect panelRect = CGRectMake(0, 0, layout.baseWidth * scale,
+                                       layout.baseHeight * scale);
+    [overlay addInteractiveRect:panelRect];
+    overlay.captureRect = panelRect;
+    overlay.headerDragRect = CGRectMake(0, 0, (layout.baseWidth - 214.0f) * scale,
+                                        60.0f * scale);
+
+    // Do this after publishing this frame's geometry.  The host can resize
+    // synchronously, while the next frame fits its new viewport exactly once.
+    if (std::fabs(previousScale - gUI.uiScale) > .00001f && sPresentationChangeHandler)
+        sPresentationChangeHandler();
 }

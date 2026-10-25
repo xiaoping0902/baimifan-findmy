@@ -23,8 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)setGlobalVisible:(BOOL)visible;
 + (BOOL)globalVisible;
 
-/// 面板「收起成小圆球」状态。收起后只有球体那一小块参与命中，
-/// 其余位置照常穿透；点球体恢复面板。
+/// 收起面板窗口。独立的顶部灵动岛保持可见，轻点可恢复面板。
 + (BOOL)collapsed;
 + (void)setCollapseChangeHandler:(void (^_Nullable)(BOOL collapsed))handler;
 + (void)setCollapsed:(BOOL)collapsed;

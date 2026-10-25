@@ -11,6 +11,10 @@ trap 'rm -rf "$(dirname "$binary")"' EXIT
 clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD \
     -framework Foundation -framework QuartzCore "${sources[@]}" -o "$binary"
 "$binary"
+clang++ -std=c++17 tests/hud_floating_layout_regressions.cpp \
+    -o "$(dirname "$binary")/hud-floating-layout-regressions"
+"$(dirname "$binary")/hud-floating-layout-regressions"
+python3 tests/run_uipanel_regressions.py
 clang++ -fobjc-arc -std=c++17 -Iapp/Sources/HUD -Iapp/Sources/Kernel \
     -framework Foundation -lproc tests/hud_binding_native_regressions.mm \
     app/Sources/Kernel/MFModuleLocator.mm app/Sources/HUD/MFHUDPassiveState.mm \

@@ -211,7 +211,8 @@ static const float kMFMenuBallSize = 56.0f;
     sRectTarget = nil;
     [overlay beginInteractiveRects];
 
-    if (!gVisible) {
+    if (!gVisible || gCollapsed) {
+        MFMenuPanelSetExpanded(!gCollapsed);
         [overlay endInteractiveRects];
         overlay.captureRect = CGRectNull;
         overlay.headerDragRect = CGRectNull;
@@ -224,15 +225,14 @@ static const float kMFMenuBallSize = 56.0f;
 
     /*
      * ★ [M5.183] 换成小玉原版面板 ★
-     * 布局、分页、开关、滑块、颜色、缩放、灵动岛全部来自 UIPort/（原样搬运），
-     * 不再用这个文件里那套简化菜单。
+     * UIPort 构建七页面板；宿主管理实际窗口拖动、缩放和独立原生灵动岛。
      */
     MFMenuPanelSetExpanded(!gCollapsed);
     MFMenuPanelRender(overlay, screen);
-    /* 点灵动岛会自己展开/收起 —— 把状态同步回来，下一帧才不会被覆盖 */
+    /* 面板最小化按钮通过统一 setter 通知宿主播放收起动画。 */
     {
         const BOOL want = MFMenuPanelExpanded();
-        if (gCollapsed == want) gCollapsed = !want;
+        if (gCollapsed == want) [MFMenuUI setCollapsed:!want];
     }
 
     // Popups own their visible surface, including color pickers and combo
@@ -241,10 +241,15 @@ static const float kMFMenuBallSize = 56.0f;
     for (ImGuiWindow *window : current->Windows) {
         if (!window->Active || !(window->Flags & ImGuiWindowFlags_Popup)) continue;
         const ImRect &r = window->OuterRectClipped;
-        [overlay addInteractiveRect:CGRectMake(r.Min.x, r.Min.y, r.GetWidth(), r.GetHeight())];
+        CGRect popup = CGRectIntersection(overlay.bounds,
+            CGRectMake(r.Min.x, r.Min.y, r.GetWidth(), r.GetHeight()));
+        [overlay addInteractiveRect:popup];
+        if (!CGRectIsNull(popup) && !CGRectIsEmpty(popup))
+            overlay.captureRect = CGRectIsNull(overlay.captureRect) ? popup : CGRectUnion(overlay.captureRect, popup);
     }
     [overlay endInteractiveRects];
     sRectTarget = nil;
+    if (MFMenuPanelConsumeExitRequest()) [MFHUDControl requestExit];
 }
 
 #pragma mark - 收起态：小圆球

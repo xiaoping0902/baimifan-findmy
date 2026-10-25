@@ -111,6 +111,8 @@ def main():
                             for name in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets")]
                 if args.suite == "menu":
                     sources += [ROOT / "app/Sources/HUD/MFMenuUI.mm",
+                                ROOT / "app/Sources/HUD/MFMenuPanel.mm",
+                                ROOT / "app/Sources/HUD/MFHUDIslandView.mm",
                                 ROOT / "app/Sources/Game/MFSettings.mm",
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]
@@ -118,12 +120,16 @@ def main():
                     # Real UDP receiver, drawing delegate, settings and projection.
                     # The fixture keeps local readers unbound and fails on any
                     # remote read; no kernel or game process is part of this suite.
+                    # Link the production panel stats/tracer-origin and item-name
+                    # helpers used by the current drawing delegate as well.
                     sources += [ROOT / "app/Sources/HUD/MFDrawingLayer.mm",
-                                ROOT / "app/Sources/HUD/MFRadar.mm"]
+                                ROOT / "app/Sources/HUD/MFRadar.mm",
+                                ROOT / "app/Sources/HUD/MFMenuPanel.mm"]
                     sources.append(ROOT / "app/Sources/Game/MFBones.mm")
                     sources += [ROOT / f"app/Sources/Game/{name}.mm" for name in (
                         "MFGameReader", "MFUEReader", "MFUEOffsets", "MFProjection", "Offsets",
-                        "MFSettings", "MFGearCatalog", "MFGearReader", "MFUEGNames", "MFItemTable")]
+                        "MFSettings", "MFGearCatalog", "MFGearReader", "MFUEGNames", "MFItemTable",
+                        "MFItemNames")]
                     sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
                                 ROOT / "app/Sources/Read/MFExternalFeed.mm",
                                 ROOT / "tests/mfpt_page_table_stubs.c"]

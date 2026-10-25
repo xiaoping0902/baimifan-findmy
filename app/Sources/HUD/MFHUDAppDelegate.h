@@ -2,7 +2,7 @@
 //  MFHUDAppDelegate.h — HUD 角色应用代理
 //
 //  由主进程 posix_spawn 自己、附 `-hud` 参数拉起（见 main.mm）。
-//  职责：建两个窗口（菜单窗 + 透明绘制窗）并交给系统辅助窗口托管。
+//  职责：托管菜单、顶部灵动岛、透明绘制三个窗口。
 //
 #import <UIKit/UIKit.h>
 

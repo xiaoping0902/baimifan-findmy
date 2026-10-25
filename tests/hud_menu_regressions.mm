@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "MFMenuUI.h"
+#import "MFMenuPanel.h"
+#import "MFHUDIslandView.h"
 #import "MFHUDCaptureShieldView.h"
 #import "../app/Sources/Game/MFSettings.h"
 #import "../app/Sources/Render/MFOverlayView.h"
@@ -28,179 +30,160 @@ static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
     Frame(menu, overlay); Frame(menu, overlay);
 }
 
-static CGPoint FirstSwitchPoint(MFOverlayView *overlay) {
-    const CGFloat x = overlay.bounds.size.width * 0.5;
-    for (CGFloat y = 108; y < MIN(overlay.bounds.size.height - 40, 300); y += 1.0) {
-        if ([overlay acceptsInteractionAtPoint:CGPointMake(x, y)]) return CGPointMake(x, y + 18.0);
-    }
-    return CGPointMake(-1, -1);
+static CGFloat PanelScale(MFOverlayView *overlay) {
+    return overlay.bounds.size.width / 640.0;
 }
-
-static void TestSwitchInteractionAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overlay) {
+static CGPoint NavPoint(MFOverlayView *overlay, int tab) {
+    const CGFloat scale = PanelScale(overlay);
+    return CGPointMake(42 * scale, (96.5 + tab * 49) * scale);
+}
+static void DrainSettingsSave(void) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.1];
+    while (deadline.timeIntervalSinceNow > 0)
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
+static void TestDrawingTileAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overlay) {
     MFSettings *settings = [MFSettings shared];
-    const BOOL initial = settings.masterEnabled;
-    CGPoint point = FirstSwitchPoint(overlay);
-    CHECK(point.x >= 0, "the first iOS-style setting switch must publish a real touch target");
-    ClickMenu(menu, overlay, point);
-    CHECK(settings.masterEnabled != initial,
-          "tapping the whole first setting row must change its production setting");
-
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.15];
-    while (deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
-    }
+    const BOOL initial = settings.showBot;
+    ClickMenu(menu, overlay, NavPoint(overlay, 1));
+    const CGFloat scale = PanelScale(overlay);
+    // Actual seven-page renderer: second tile in the first drawing grid row.
+    const CGPoint botTile = CGPointMake(296.25 * scale, 189 * scale);
+    CHECK([overlay acceptsInteractionAtPoint:botTile],
+          "the visible production drawing tile must accept input");
+    ClickMenu(menu, overlay, botTile);
+    CHECK(settings.showBot != initial,
+          "tapping the active drawing page must change its production setting");
+    DrainSettingsSave();
     MFSettings *reloaded = [[MFSettings alloc] init];
-    NSString *settingsPath = [settings valueForKey:@"filePath"];
-    NSDictionary *persisted = [NSDictionary dictionaryWithContentsOfFile:settingsPath];
-    NSString *settingsDirectory = [settingsPath stringByDeletingLastPathComponent];
-    BOOL isDirectory = NO;
-    BOOL directoryExists = [[NSFileManager defaultManager] fileExistsAtPath:settingsDirectory
-                                                                 isDirectory:&isDirectory];
-    BOOL manualSaveSucceeded = [settings save];
-    NSLog(@"[TEST] auto-save initial=%d live=%d reloaded=%d dirExists=%d isDirectory=%d "
-          @"fileExists=%d persisted=%@ manualSave=%d",
-          initial, settings.masterEnabled, reloaded.masterEnabled,
-          directoryExists, isDirectory,
-          [[NSFileManager defaultManager] fileExistsAtPath:settingsPath], persisted[@"masterEnabled"],
-          manualSaveSucceeded);
-    CHECK(reloaded.masterEnabled == settings.masterEnabled,
-          "an idle setting change must persist without pressing a save button");
-
-    point = FirstSwitchPoint(overlay);
-    ClickMenu(menu, overlay, point);
-    deadline = [NSDate dateWithTimeIntervalSinceNow:1.15];
-    while (deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
-    }
+    CHECK(reloaded.showBot == settings.showBot,
+          "an idle drawing edit must persist without a manual save");
+    ClickMenu(menu, overlay, botTile);
+    DrainSettingsSave();
     reloaded = [[MFSettings alloc] init];
-    CHECK(reloaded.masterEnabled == initial,
-          "the second switch change must also be saved after the user restores the original value");
+    CHECK(settings.showBot == initial && reloaded.showBot == initial,
+          "restoring a drawing preference must persist the restored value");
+    ClickMenu(menu, overlay, NavPoint(overlay, 0));
 }
-
 static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield,
                                 MFOverlayView *overlay, CGSize panel, CGFloat angle) {
-    BOOL landscape = fabs(angle) > 0.1;
-    CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
+    const BOOL landscape = fabs(angle) > .1;
+    const CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
     window.bounds = (CGRect){CGPointZero, physical};
     window.rootViewController.view.frame = window.bounds;
+    shield.transform = CGAffineTransformIdentity;
     shield.bounds = (CGRect){CGPointZero, panel};
-    shield.center = CGPointMake(physical.width/2, physical.height/2);
+    shield.center = CGPointMake(physical.width / 2, physical.height / 2);
     shield.transform = CGAffineTransformMakeRotation(angle);
-    // Match the production delegate's order: set overlay geometry BEFORE
-    // flushing parent layout, to catch delayed canvas/autoresize interference.
     overlay.frame = shield.bounds;
     [window layoutIfNeeded]; [overlay layoutIfNeeded];
     CHECK(CGRectEqualToRect(overlay.frame, shield.contentView.bounds) &&
           CGSizeEqualToSize(overlay.bounds.size, panel),
-          "production layout order must keep the nested Metal view exactly panel-sized");
+          "the nested Metal view must remain exactly the size of its native panel host");
 }
-
-static void TestButtonsAndBallAtNativeSize(void) {
-    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 100, 348, 520)];
+static void InitializeImGui(void) {
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
+    unsigned char *pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+}
+static void TestProductionMenuLayoutAndControls(void) {
+    const CGSize panel = MFMenuPanelPreferredSize(CGSizeMake(390, 844));
+    UIWindow *window = [[UIWindow alloc] initWithFrame:(CGRect){CGPointMake(0, 100), panel}];
     window.rootViewController = [UIViewController new];
-    NSString *captureError = nil;
-    MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:window.bounds
-                                                                          error:&captureError];
-    CHECK(shield && !captureError, "production menu cycles require the real secure canvas");
-    CHECK([shield setCaptureProtectionEnabled:YES error:&captureError] && !captureError,
-          "protected menu cycles must explicitly opt into capture protection");
+    window.rootViewController.view.frame = window.bounds;
+    NSString *error = nil;
+    MFHUDCaptureShieldView *shield = [[MFHUDCaptureShieldView alloc] initWithFrame:window.bounds error:&error];
+    CHECK(shield && !error, "production layout must use the real capture shield");
+    CHECK([shield setCaptureProtectionEnabled:YES error:&error] && !error,
+          "layout regression must also cover the secure canvas");
     [window.rootViewController.view addSubview:shield];
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:window.bounds interactive:YES];
     overlay.automaticallyStartsRendering = NO;
     [shield.contentView addSubview:overlay]; window.hidden = NO;
     MFMenuUI *menu = [MFMenuUI new];
-    [MFMenuUI setCollapsed:NO];
-    __block BOOL resizePending = NO;
-    [MFMenuUI setCollapseChangeHandler:^(BOOL collapsed) { resizePending = YES; }];
-    ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
-    unsigned char *pixels; int width, height;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-    Frame(menu, overlay); Frame(menu, overlay);
-    // These are the actual production buttons, not a replacement ball widget.
-    const int tabSequence[] = {1, 2, 0, 2, 1, 0};
-    for (int tab : tabSequence) {
-        ClickMenu(menu, overlay, CGPointMake(64 + tab * 110, 80));
-        CHECK([[menu valueForKey:@"tab"] intValue] == tab,
-              "each production tab click must select its page without a stuck press");
+    [MFMenuUI setGlobalVisible:YES]; [MFMenuUI setCollapsed:NO];
+    __block NSUInteger collapseChanges = 0;
+    [MFMenuUI setCollapseChangeHandler:^(BOOL collapsed) { collapseChanges++; }];
+    InitializeImGui(); Frame(menu, overlay); Frame(menu, overlay);
+    CHECK(fabs(overlay.captureRect.size.width - panel.width) < 1.1 &&
+          fabs(overlay.captureRect.size.height - panel.height) < 1.1,
+          "active UIPort must fill the native host without a second 66-percent size reduction");
+    const CGRect header = overlay.headerDragRect;
+    CHECK(!CGRectIsNull(header) && !CGRectIsEmpty(header) &&
+          CGRectGetMaxX(header) < panel.width && CGRectGetMaxY(header) < panel.height / 4,
+          "the active menu must publish a bounded native title drag area excluding its buttons");
+    const int tabs[] = {1,2,3,4,5,6,0};
+    for (int tab : tabs) {
+        const CGPoint point = NavPoint(overlay, tab);
+        CHECK([overlay acceptsInteractionAtPoint:point], "each of seven navigation targets must be reachable");
+        ClickMenu(menu, overlay, point);
+        CHECK(ImGui::GetDrawData()->TotalVtxCount > 100 && ImGui::GetActiveID() == 0,
+              "page selection must render content and release its touch owner");
     }
-    TestSwitchInteractionAndAutomaticSave(menu, overlay);
+    TestDrawingTileAndAutomaticSave(menu, overlay);
     for (int cycle = 0; cycle < 3; cycle++) {
-        ClickMenu(menu, overlay, CGPointMake(220, 28));
-        CHECK([MFMenuUI collapsed] && resizePending,
-              "the production collapse button must request a native-window resize");
-        resizePending = NO;
-        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(56, 56), 0);
+        const CGFloat scale = PanelScale(overlay);
+        ClickMenu(menu, overlay, CGPointMake((640 - 78) * scale, 30 * scale));
+        CHECK([MFMenuUI collapsed] && collapseChanges == (NSUInteger)(cycle * 2 + 1),
+              "the active minimize button must notify the native presentation owner once");
         Frame(menu, overlay); Frame(menu, overlay);
-        CHECK(CGSizeEqualToSize(overlay.captureRect.size, CGSizeMake(56, 56)) &&
-              [overlay acceptsInteractionAtPoint:CGPointMake(28, 28)] &&
-              ![overlay acceptsInteractionAtPoint:CGPointMake(100, 100)] &&
-              ImGui::GetDrawData()->TotalVtxCount > 20,
-              "the 56pt native window must contain a drawn, hittable ball and release the old panel area");
-        CHECK([shield hitTest:CGPointMake(28, 28) withEvent:nil] == overlay &&
-              [shield hitTest:CGPointMake(100, 100) withEvent:nil] == nil,
-              "secure canvas must preserve actual ImGui ball hits and reject the old panel area");
-        ClickMenu(menu, overlay, CGPointMake(28, 28));
-        CHECK(![MFMenuUI collapsed] && resizePending,
-              "one tap on the real small ball must restore the production menu");
-        resizePending = NO;
-        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(348, 520), 0);
+        CHECK(CGRectIsNull(overlay.captureRect) || CGRectIsEmpty(overlay.captureRect),
+              "a collapsed panel must release its former touch surface to the separate island");
+        [MFMenuUI setCollapsed:NO];
         Frame(menu, overlay); Frame(menu, overlay);
-        CHECK(overlay.captureRect.size.width == 348 && !CGRectIsEmpty(overlay.headerDragRect),
-              "restored native window must draw the reachable full menu on every cycle");
-        CHECK([shield hitTest:CGPointMake(64, 80) withEvent:nil] == overlay &&
-              [shield hitTest:CGPointMake(2, 200) withEvent:nil] == nil,
-              "expanded secure canvas must retain tab hits and transparent menu margins");
+        CHECK(collapseChanges == (NSUInteger)(cycle * 2 + 2) &&
+              !CGRectIsEmpty(overlay.headerDragRect) && !CGRectIsNull(overlay.captureRect),
+              "native island expansion must restore the same complete, draggable panel");
     }
-    const CGFloat angles[] = { (CGFloat)M_PI_2, (CGFloat)-M_PI_2, (CGFloat)0 };
+    const CGFloat angles[] = {(CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0};
     for (CGFloat angle : angles) {
-        ResizeProtectedMenu(window, shield, overlay, CGSizeMake(348, 520), angle);
+        ResizeProtectedMenu(window, shield, overlay, panel, angle);
         Frame(menu, overlay); Frame(menu, overlay);
-        CGPoint tab = [overlay convertPoint:CGPointMake(64, 80) toView:window];
+        const CGPoint tab = [overlay convertPoint:NavPoint(overlay, 1) toView:window];
         CHECK([window hitTest:tab withEvent:nil] == overlay,
-              "protected menu must retain visible tab coordinates in both landscape orientations");
+              "secure hosted content must preserve visible navigation hits in both landscape directions");
+        CHECK(CGRectEqualToRect(header, overlay.headerDragRect),
+              "rotating the host must not alter the panel's logical title drag area");
     }
     [MFMenuUI setCollapseChangeHandler:nil];
     ImGui::DestroyContext(); window.hidden = YES;
 }
 
-static void TestProductionMenuLayout(void) {
-    MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:CGRectMake(0, 0, 348, 520)
-                                                     interactive:YES];
-    overlay.automaticallyStartsRendering = NO;
-    MFMenuUI *menu = [MFMenuUI new];
-    [MFMenuUI setGlobalVisible:YES];
-    [MFMenuUI setCollapsed:NO];
-    ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    unsigned char *pixels; int width, height;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-    Frame(menu, overlay); Frame(menu, overlay);
-    CHECK(![overlay pointInside:CGPointMake(2, 200) withEvent:nil],
-          "panel inner margin must remain a hole, not the whole tab content rectangle");
-    CGRect header = overlay.headerDragRect;
-    CHECK(!CGRectIsEmpty(header) && header.size.height < 90,
-          "the menu must expose a bounded visible title drag handle");
-    // Scroll the real production windows to the end; fixed chrome must survive.
-    ImGuiContext *context = ImGui::GetCurrentContext();
-    for (ImGuiWindow *window : context->Windows) {
-        if (window->Active && window->ScrollMax.y > 0) window->Scroll.y = window->ScrollMax.y;
-    }
-    Frame(menu, overlay); Frame(menu, overlay);
-    CHECK(CGRectEqualToRect(header, overlay.headerDragRect),
-          "scrolling long settings must not scroll the title, collapse or exit out of reach");
-    [MFMenuUI setCollapsed:YES];
-    Frame(menu, overlay); Frame(menu, overlay);
-    CHECK(overlay.captureRect.size.width == 56 && overlay.captureRect.size.height == 56,
-          "collapsed menu must publish only the ball surface");
-    CHECK(![overlay pointInside:CGPointMake(100, 200) withEvent:nil],
-          "the previous expanded panel must stop accepting touches after collapse");
-    [MFMenuUI setCollapsed:NO];
-    Frame(menu, overlay); Frame(menu, overlay);
-    CHECK(overlay.captureRect.size.width == 348 && !CGRectIsEmpty(overlay.headerDragRect),
-          "expansion restores the complete reachable menu");
-    ImGui::DestroyContext();
+@interface IslandFixtureTouch : NSObject
+@property CGPoint point;
+@end
+@implementation IslandFixtureTouch
+- (CGPoint)locationInView:(UIView *)view { return self.point; }
+@end
+static void TestNativeIslandInputAndAccessibility(void) {
+    MFHUDIslandView *island = [[MFHUDIslandView alloc] initWithFrame:(CGRect){CGPointZero, MFHUDIslandView.preferredSize}];
+    [island layoutIfNeeded];
+    CHECK(CGSizeEqualToSize(island.intrinsicContentSize, CGSizeMake(142,36)) &&
+          [island.accessibilityIdentifier isEqual:@"hud.dynamicIsland"],
+          "the native island must keep its compact, accessible touch surface");
+    [island setExpanded:YES animated:NO];
+    CHECK(island.isExpanded && [island.accessibilityValue isEqual:@"已展开"],
+          "island accessibility must reflect the current expanded state");
+    [island setExpanded:NO animated:NO];
+    CHECK(!island.isExpanded && [island.accessibilityValue isEqual:@"已收起"],
+          "island accessibility must reflect the current collapsed state");
+    __block NSUInteger activations = 0;
+    island.activationHandler = ^{ activations++; };
+    IslandFixtureTouch *touch = [IslandFixtureTouch new]; touch.point = CGPointMake(71,18);
+    NSSet<UITouch *> *touches = (NSSet<UITouch *> *)[NSSet setWithObject:touch];
+    [island touchesBegan:touches withEvent:nil];
+    CHECK(island.isPressed && activations == 0, "UIKit fallback must wait for touch release before toggling");
+    [island touchesEnded:touches withEvent:nil];
+    CHECK(!island.isPressed && activations == 1, "UIKit fallback must activate once on release inside");
+    island.usesExternalTouchInput = YES;
+    [island touchesBegan:touches withEvent:nil]; [island touchesEnded:touches withEvent:nil];
+    CHECK(!island.isPressed && activations == 1,
+          "native touch delivery must be suppressed when the HID bridge owns island input");
+    CHECK([island accessibilityActivate] && activations == 2,
+          "VoiceOver activation must remain available when external touch routing is enabled");
+    island.hidden = YES;
+    CHECK(![island accessibilityActivate] && activations == 2, "hidden island accessibility must not toggle a panel");
 }
 
 // Capture the actual Metal-rendered production menu after the CPU layout
@@ -210,7 +193,9 @@ static MFOverlayView *sPreviewOverlay;
 static MFMenuUI *sPreviewMenu;
 static BOOL sPreviewFinished;
 static void PreviewProductionMenu(void) {
-    sPreviewWindow = [[UIWindow alloc] initWithFrame:CGRectMake(16, 90, 348, 520)];
+    const CGSize size = MFMenuPanelPreferredSize(UIScreen.mainScreen.fixedCoordinateSpace.bounds.size);
+    [MFMenuUI setCollapsed:NO];
+    sPreviewWindow = [[UIWindow alloc] initWithFrame:(CGRect){CGPointMake(16, 90), size}];
     sPreviewWindow.rootViewController = [UIViewController new];
     sPreviewWindow.rootViewController.view.frame = sPreviewWindow.bounds;
     sPreviewOverlay = [[MFOverlayView alloc] initWithFrame:sPreviewWindow.bounds interactive:YES];
@@ -249,8 +234,8 @@ static void PreviewProductionMenu(void) {
 @implementation MenuRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
-        TestProductionMenuLayout();
-        TestButtonsAndBallAtNativeSize();
+        TestProductionMenuLayoutAndControls();
+        TestNativeIslandInputAndAccessibility();
         PreviewProductionMenu();
     });
     return YES;
