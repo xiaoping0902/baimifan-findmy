@@ -96,11 +96,13 @@ def main():
                 sources = [ROOT / "tests/game_reader_base_regressions.mm"]
                 sources += [ROOT / f"app/Sources/Game/{name}.mm"
                             for name in ("MFGameReader", "MFProjection", "Offsets", "MFSettings")]
-                sources.append(ROOT / "app/Sources/Read/MFReadBackend.mm")
+                sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
+                            ROOT / "tests/mfpt_page_table_stubs.c"]
             else:
                 sources = [ROOT / f"tests/hud_{args.suite}_regressions.mm",
                            ROOT / "app/Sources/Render/MFOverlayView.mm",
                            ROOT / "app/Sources/Render/MFImGuiContext.mm",
+                           ROOT / "app/Sources/Render/MFStyle.mm",
                            ROOT / "app/Sources/Render/imgui/backends/imgui_impl_metal.mm",
                            ROOT / "app/Sources/HUD/MFHUDCaptureShieldView.mm",
                            ROOT / "app/Sources/HUD/MFHUDLog.m"]
@@ -120,7 +122,8 @@ def main():
                         "MFGameReader", "MFUEReader", "MFUEOffsets", "MFProjection", "Offsets",
                         "MFSettings", "MFGearCatalog", "MFGearReader", "MFUEGNames", "MFItemTable")]
                     sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
-                                ROOT / "app/Sources/Read/MFExternalFeed.mm"]
+                                ROOT / "app/Sources/Read/MFExternalFeed.mm",
+                                ROOT / "tests/mfpt_page_table_stubs.c"]
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-x", "objective-c++", "-fobjc-arc", "-std=c++17",
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
