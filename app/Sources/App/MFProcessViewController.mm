@@ -25,6 +25,7 @@
 
 /* [M5.112] 自动挂载：不需要用户去列表里找进程 */
 @property (nonatomic, strong) NSTimer *autoTimer;
+@property (nonatomic, strong) UIBarButtonItem *kernelItem;   /* [M5.118] 标题随状态变 */
 @property (nonatomic, assign) int  autoAttachedPid;   /* 已经连上的 pid，0=未连 */
 @property (nonatomic, assign) int  autoTryPid;        /* 正在重试的 pid */
 @property (nonatomic, assign) int  autoTryCount;      /* 该 pid 连续失败次数 */
@@ -36,6 +37,7 @@
 - (void)startAuto;
 - (void)stopAuto;
 - (void)attachToProcess:(MFProcessInfo *)cand;
+- (void)refreshKernelItem;
 
 @end
 
@@ -60,10 +62,10 @@
                                         target:self action:@selector(showKernelLog)],
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
                                                       target:nil action:nil],
-        [[UIBarButtonItem alloc] initWithTitle:@"启动内核" style:UIBarButtonItemStyleDone
-                                        target:self action:@selector(startKernel)],
+        self.kernelItem,
     ];
     self.navigationController.toolbarHidden = NO;
+    [self refreshKernelItem];
 
     // 顶部：搜索 + 状态
     UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 0, 96)];
@@ -196,7 +198,30 @@
  */
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self refreshKernelItem];
     [self startAuto];
+}
+
+/*
+ * ★ [M5.118] 底部那个按钮的标题必须跟着内核状态走。
+ *
+ * 用户报的问题："内核已经启动成功了，右下角还写着启动内核"。
+ * 之前只有行为是切换的，标题是写死的 —— 点了之后看起来像没生效。
+ */
+- (UIBarButtonItem *)kernelItem {
+    if (!_kernelItem) {
+        _kernelItem = [[UIBarButtonItem alloc] initWithTitle:@"启动内核"
+                                                       style:UIBarButtonItemStyleDone
+                                                      target:self
+                                                      action:@selector(startKernel)];
+    }
+    return _kernelItem;
+}
+
+- (void)refreshKernelItem {
+    BOOL open = [MFKernel shared].isOpen;
+    self.kernelItem.title = open ? @"关闭内核" : @"启动内核";
+    self.kernelItem.style = open ? UIBarButtonItemStylePlain : UIBarButtonItemStyleDone;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -244,6 +269,7 @@
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self refreshKernelItem];   /* 自动连接会自己开/关内核，标题跟着走 */
             /* 列表变了才刷 UI，避免每 2 秒跳一次 */
             NSInteger sig = (NSInteger)list.count * 1000003;
             for (MFProcessInfo *p in list) {
@@ -303,6 +329,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimating];
             self.autoBusy = NO;
+            [self refreshKernelItem];
 
             BOOL ok = [report containsString:@"RESULT OK"];
             if (ok) {
@@ -387,6 +414,7 @@
      */
     if ([MFKernel shared].isOpen) {
         [[MFKernel shared] stop];
+        [self refreshKernelItem];
         self.autoAttachedPid = 0;
         self.autoTryCount = 0;
         [self reload];
@@ -595,6 +623,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimating];
             [self reload];
+            [self refreshKernelItem];   /* 校准会关会话，标题要变回「启动内核」 */
 
             UIAlertController *a = [UIAlertController
                 alertControllerWithTitle:@"校准结果"

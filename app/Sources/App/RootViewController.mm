@@ -76,7 +76,7 @@ extern char **environ;
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.title = @"复刻版 · 控制台";
+    self.title = @"白米饭";
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
@@ -163,55 +163,47 @@ extern char **environ;
                                   ok:(lsd != nil)]];
     [secs addObject:s0];
 
-    // ---------- 1 功能 ----------
+    // ---------- 1 主线（只放真正要点的）----------
     MFSection *s1 = [[MFSection alloc] init];
-    s1.header = @"功能";
-    s1.footer = @"「启动内核」走后端 KFD 链：漏洞 → root → 内核端口 → 枚举全系统 task。";
+    s1.header = @"主线";
+    s1.footer = @"顺序：开游戏 → 点「启动内核」→ 进进程页自动连上 → 启动悬浮窗。"
+                @"内核是唯一可走的路（task_for_pid 已被 PPL 封死）。";
     /*
-     * ★ [M5.15] 一键开始放最前面 —— 这是主线路径。
+     * ★ [M5.118] 精简：这一屏只留四个按钮。
      *
-     * 走查确认：读取链完全不依赖 KFD（详见 actOneClick 的注释）。
-     * 而 KFD 已经让设备 panic 过一次、App 崩过两次。
-     * 所以主流程就是：找进程 → task_for_pid → 模块定位 → UE4 解析。
-     */
-    [s1.rows addObject:[self actionRow:@"★ 一键开始"
-                                detail:@"查找并验证游戏进程、模块和 UE4 数据链"
-                                action:@"actOneClick"]];
-    /*
-     * ★ [M5.87] 「启动内核」的文案改过 —— 原来写的是「⛔️ 别点！…主线不需要它」。
+     * 用户的反馈很直接："布局很麻烦不简洁"。原来这一节有 11 行，
+     * 其中 7 行是排查用的（环境检测/模块定位/UE4 链解析/…），
+     * 常态使用一个都用不上，却把主线按钮淹掉了。全部挪到「诊断」里。
      *
-     * 那个判断基于一个**已经被真机推翻**的假设：
-     *     "task port 来自 task_for_pid + entitlement，所以主线不需要内核"
-     * 实测（无越狱 / iPad14,4 / 16.1）：
-     *     task_for_pid(游戏)    kr=0x5 KERN_FAILURE   （PPL 按 CS_HARD 拒）
-     *     task_for_pid(launchd) kr=0x5
-     *     processor_set_tasks   kr=0x4
-     * 三条路全断。entitlement 本身是生效的（自己 task port=0x203 拿得到）。
-     *
-     * 结论：内核不是"可选优化"，它是**唯一还能走的路**。
-     * 所以文案必须改成引导用户去点，而不是劝退 ——
-     * 之前那段"别点"，直接导致用户反复点「一键开始」并反复看到失败。
+     * 另外「★ 一键开始」这行直接删了：它走 task_for_pid，对正版游戏
+     * 必然 kr=0x5（PPL 按 CS_HARD 拒），点了只会得到一次失败 —— 留着只会误导。
      */
     [s1.rows addObject:[self actionRow:@"启动内核"
-                                detail:@"⚠️ 必点：task_for_pid 已被 PPL 封死，内核是唯一出路（可能 panic）"
+                                detail:@"内核 + 进程自动连接，都在下一页"
                                 action:@"actStartKernel"]];
-    [s1.rows addObject:[self actionRow:@"内核设置" detail:@"landa / smith / physpuppet / 纯巨魔" action:@"actKernelSettings"]];
     [s1.rows addObject:[self actionRow:(self.hudStopping ? @"正在结束悬浮窗" :
             (self.hudStarting ? @"取消悬浮窗启动" : (hudUp ? @"结束悬浮窗" : @"启动悬浮窗")))
             detail:(self.hudStarting ? @"正在初始化，点击可取消" : @"菜单、绘制、收起与退出") action:@"actStartHUD"]];
-    [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"子进程从 main() 到建窗的每一步" action:@"actShowHUDLog"]];
-    [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media，电脑一条命令拉走" action:@"actExportDiagnostics"]];
-    [s1.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒/权限/fd/越狱/内核链 一次性体检" action:@"actEnvCheck"]];
-    [s1.rows addObject:[self actionRow:@"模块定位" detail:@"找游戏进程 + 取主模块基址（UE4 链的起点）" action:@"actLocateModule"]];
-    [s1.rows addObject:[self actionRow:@"UE4 链解析" detail:@"GWorld → 玩家 → 相机 → Actors 逐级验证" action:@"actUEResolve"]];
-    [s1.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
-    [s1.rows addObject:[self actionRow:@"扫描游戏模块"
-                                detail:@"列出游戏 App 里所有 Mach-O：大小 / 架构 / 有没有加密"
-                                action:@"actScanGameModules"]];
-    [s1.rows addObject:[self actionRow:@"导出游戏模块"
-                                detail:@"把 libUE4 之类的大模块拷到 Media，电脑一条命令拉走"
-                                action:@"actExportGameModules"]];
+    [s1.rows addObject:[self actionRow:@"HUD 日志" detail:@"悬浮窗从启动到建窗的每一步" action:@"actShowHUDLog"]];
+    [s1.rows addObject:[self actionRow:@"导出诊断" detail:@"日志+状态+截图 → Media" action:@"actExportDiagnostics"]];
     [secs addObject:s1];
+
+    // ---------- 1b 诊断（排查时才用）----------
+    MFSection *s1b = [[MFSection alloc] init];
+    s1b.header = @"诊断";
+    s1b.footer = @"平时不用动。每一项都会把结果写进 /var/mobile/Media/mf-debug/。";
+    [s1b.rows addObject:[self actionRow:@"内核设置" detail:@"查看/改 PUAF 参数（默认 physpuppet/1024）" action:@"actKernelSettings"]];
+    [s1b.rows addObject:[self actionRow:@"环境检测" detail:@"沙盒 / 权限 / fd / 越狱 一次性体检" action:@"actEnvCheck"]];
+    [s1b.rows addObject:[self actionRow:@"模块定位" detail:@"找游戏进程 + 取主模块基址" action:@"actLocateModule"]];
+    [s1b.rows addObject:[self actionRow:@"UE4 链解析" detail:@"GWorld → 玩家 → 相机 → Actors 逐级验证" action:@"actUEResolve"]];
+    [s1b.rows addObject:[self actionRow:@"游戏数据自检" detail:@"读取链 / 偏移 / 投影 状态" action:@"actGameDataCheck"]];
+    [s1b.rows addObject:[self actionRow:@"扫描游戏模块"
+                                 detail:@"列出游戏 App 里所有 Mach-O：大小 / 架构 / 是否加密"
+                                 action:@"actScanGameModules"]];
+    [s1b.rows addObject:[self actionRow:@"导出游戏模块"
+                                 detail:@"把 libUE4 之类的大模块拷到 Media"
+                                 action:@"actExportGameModules"]];
+    [secs addObject:s1b];
 
     // ---------- 2 清理与防封 ----------
     MFSection *s2 = [[MFSection alloc] init];
