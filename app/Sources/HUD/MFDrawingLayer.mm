@@ -893,14 +893,35 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
      *     bodyPx = 人体高(cm) × focal / 距离(cm)
      * 不同 FOV / 分辨率下都能贴合。
      */
-    const float focal = (screen.x * 0.5f) / tanf(cam.fov * (float)M_PI / 360.0f);
-    float bodyPx = (focal > 0.0f)
-                 ? (180.0f * focal / MAX(e.distanceMeters * 100.0f, 1.0f))
-                 : (2200.0f / MAX(e.distanceMeters, 1.0f));
-    bodyPx = MIN(MAX(bodyPx, 8.0f), screen.y * 0.8f);
+    /*
+     * ★ [M5.138] 直接用投影求「身体上下两端」，不再靠 FOV 估算。
+     *
+     * 位置是胶囊中心，±88cm 就是胶囊顶/底。把这两点各投影一次，
+     * 得到的两条 Y 就是身体在屏幕上的真实高度 —— 与 FOV、分辨率、距离全部自洽。
+     * 上一版按 180cm×焦距/距离 估，实测框比人高了将近一倍（真机截图确认）。
+     */
+    MFScreen psc = [MFProjection screenWithSize:CGSizeMake(screen.x, screen.y) fov:cam.fov];
+    float topXYZ[3] = { e.worldX, e.worldY, e.worldZ + 88.0f };
+    float botXYZ[3] = { e.worldX, e.worldY, e.worldZ - 88.0f };
+    MFPoint2D tp = [MFProjection projectTarget:topXYZ camera:cam screen:psc];
+    MFPoint2D bp = [MFProjection projectTarget:botXYZ camera:cam screen:psc];
+
+    float topY = 0.0f, botY = 0.0f;
+    if (tp.valid && bp.valid && bp.y > tp.y) {
+        topY = tp.y;
+        botY = bp.y;
+    } else {
+        /* 退化情况（深度太近 / FOV 异常）：退回按焦距估算，并且居中 */
+        float focal = (psc.focal > 0.0f) ? psc.focal : (screen.x * 0.5f);
+        float est = 180.0f * focal / MAX(e.distanceMeters * 100.0f, 1.0f);
+        est = MIN(MAX(est, 8.0f), screen.y * 0.8f);
+        topY = pt.y - est * 0.5f;
+        botY = pt.y + est * 0.5f;
+    }
+    float bodyPx = MAX(botY - topY, 8.0f);
     float w = bodyPx * 0.45f;
-    ImVec2 p1(pt.x - w * 0.5f, pt.y - bodyPx * 0.5f);
-    ImVec2 p2(pt.x + w * 0.5f, pt.y + bodyPx * 0.5f);
+    ImVec2 p1(pt.x - w * 0.5f, topY);
+    ImVec2 p2(pt.x + w * 0.5f, botY);
 
     /* ── 主色：人机用「队伍色」提示、真人用「人物信息色」──
      * 队伍颜色槽 [M5.2] 接线：编队模式下用队员色，未校准时 teamId=0 → 走人物信息色。
@@ -1013,7 +1034,9 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
     if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
-        [self drawSkeleton:e drawList:dl settings:st camera:cam at:pt height:bodyPx];
+        /* 骨骼与框严格对齐：中心取框中心，身高取框高 */
+        [self drawSkeleton:e drawList:dl settings:st camera:cam
+                        at:ImVec2(pt.x, (topY + botY) * 0.5f) height:bodyPx];
     }
 }
 

@@ -216,6 +216,14 @@ static NSString *gUEReport = nil;
             if (!MFUEIsValidPtr(actor)) continue;
 
             /*
+             * [M5.138] 跳过自己。
+             * r.pawn 是 PlayerController+controller_pawn（AController::Pawn）读出来的本机 Pawn，
+             * 它同样躺在 ULevel::Actors 里。以前不过滤，结果给自己也画框、还画一条指向屏幕
+             * 底部的射线，背敌提示里那个"1m"多半也是自己。
+             */
+            if (r.pawn != 0 && actor == r.pawn) continue;
+
+            /*
              * [M5.135] 坐标必须两跳，而且要用世界坐标：
              *     Actor + 0x180        → RootComponent
              *     RootComponent + 0x220 → ComponentToWorld.Translation（世界坐标）
