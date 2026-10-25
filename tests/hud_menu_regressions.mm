@@ -83,6 +83,15 @@ static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield
     shield.transform = CGAffineTransformMakeRotation(angle);
     overlay.frame = shield.bounds;
     [window layoutIfNeeded]; [overlay layoutIfNeeded];
+    fprintf(stderr, "TRACE: angle=%.17g panel=%s window=%s root=%s shieldBounds=%s shieldFrame=%s content=%s overlayFrame=%s overlayBounds=%s\n",
+            (double)angle, NSStringFromCGSize(panel).UTF8String,
+            NSStringFromCGRect(window.bounds).UTF8String,
+            NSStringFromCGRect(window.rootViewController.view.bounds).UTF8String,
+            NSStringFromCGRect(shield.bounds).UTF8String,
+            NSStringFromCGRect(shield.frame).UTF8String,
+            NSStringFromCGRect(shield.contentView.bounds).UTF8String,
+            NSStringFromCGRect(overlay.frame).UTF8String,
+            NSStringFromCGRect(overlay.bounds).UTF8String);
     CHECK(CGRectEqualToRect(overlay.frame, shield.contentView.bounds) &&
           CGSizeEqualToSize(overlay.bounds.size, panel),
           "the nested Metal view must remain exactly the size of its native panel host");
