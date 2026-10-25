@@ -610,21 +610,38 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             [log appendString:@"[kopen] 会话已存在，复用\n"];
         }
 
-        /* ② 找游戏进程（这个 API 的错误参数是 NSString **，不是 NSError **） */
-        NSString *err = nil;
-        NSArray<MFProcessInfo *> *list = [[MFKernel shared]
-            enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
+        /*
+         * ② 等游戏出现（[M5.131] 循环等待，不再一次落空就退出）。
+         *
+         * 用户的实际顺序经常是"先起悬浮窗、再开游戏"，之前那种写法会让整个
+         * 引导直接结束，连持续读取都不会启动。现在内核开着，每 3 秒扫一次，
+         * 最多等 3 分钟；游戏一出现就接上。
+         */
         MFProcessInfo *game = nil;
-        for (MFProcessInfo *p in list) {
-            if (MFHUDLooksLikeGame(p.name, p.path)) { game = p; break; }
+        for (int attempt = 0; attempt < 60 && !game; attempt++) {
+            NSString *err = nil;
+            NSArray<MFProcessInfo *> *list = [[MFKernel shared]
+                enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
+            for (MFProcessInfo *p in list) {
+                if (MFHUDLooksLikeGame(p.name, p.path)) { game = p; break; }
+            }
+            if (game) {
+                [log appendFormat:@"[find] %@ pid=%d（第 %d 次扫描）\n",
+                 game.name, game.pid, attempt + 1];
+                break;
+            }
+            if (attempt == 0) {
+                [log appendFormat:@"[find] 还没看到游戏（%lu 个进程），每 3 秒重试，最多 3 分钟\n",
+                 (unsigned long)list.count];
+                [self writeHUDKernelLog:log];
+            }
+            usleep(3 * 1000 * 1000);
         }
         if (!game) {
-            [log appendFormat:@"[find] 没找到游戏（枚举 %lu 个进程）\n",
-             (unsigned long)list.count];
+            [log appendString:@"[find] 3 分钟内没等到游戏，引导结束（内核保持开启，重开悬浮窗即可）\n"];
             [self writeHUDKernelLog:log];
             return;
         }
-        [log appendFormat:@"[find] %@ pid=%d\n", game.name, game.pid];
 
         /* ③ 解析 pmap 并接管读取 */
         if (![[MFReadBackend shared] attachKFDPid:game.pid]) {
