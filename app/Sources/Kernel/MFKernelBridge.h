@@ -233,7 +233,7 @@ int mf_pid_chain(int pid, uint64_t *proc, uint64_t *task, uint64_t *map,
  *
  * kfd 的 KRKW 后端是有状态的，且本桥接用一对全局 setjmp 落点兜断言 ——
  * 同一进程里两个线程同时读，后果是 longjmp 跳到别人的栈帧，或者直接 abort()。
- * 所有 mf_kread*/mf_kwrite* 入口已经内部加锁（递归锁，可嵌套）。
+ * 所有 mf_kread / mf_kwrite 入口已经内部加锁（递归锁，可嵌套）。
  *
  * 这里额外暴露一对，是给"需要多次 kread 保持原子"的调用方用的：
  * 例如页表遍历（mfpt_translate / mfpt_read）和跨进程取链，它们内部会反复

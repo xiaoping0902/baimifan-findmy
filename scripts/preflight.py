@@ -163,6 +163,65 @@ def strip_code(src):
     return "\n".join(out)
 
 
+def stray_comment_close(src):
+    """
+    找第一个"不在注释里却出现 */"的位置，返回行号（1 起）；没有则 None。
+
+    为什么需要：块注释里混进一个 */ 会把注释提前闭合，后面的中文注释就被当成
+    代码解析。构建 #135 就是这么炸的 ——
+
+        * 所有 mf_kread*/mf_kwrite* 入口已经内部加锁   ← 这里的 */ 闭合了注释
+          ...
+        */                                            ← 这一行变成"多余的 */"
+
+    报错是 "unknown type name 'mf_kwrite'" + 一串"字符不允许出现在标识符里"，
+    完全指不到真正的位置。这个检查一次就能定位。
+    """
+    i, n, line = 0, len(src), 1
+    in_block = False
+    while i < n:
+        ch = src[i]
+        if ch == "\n":
+            line += 1
+            i += 1
+            continue
+        if in_block:
+            if src.startswith("*/", i):
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        # 行注释：整行跳过（里面的 */ 是文本，合法）
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if src.startswith("/*", i):
+            in_block = True
+            i += 2
+            continue
+        # 字符串 / 字符字面量
+        if ch in "\"'":
+            quote = ch
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    i += 2
+                    continue
+                if src[i] == quote:
+                    i += 1
+                    break
+                if src[i] == "\n":
+                    line += 1
+                i += 1
+            continue
+        if src.startswith("*/", i):
+            return line
+        i += 1
+    return None
+
+
 def header_search_dirs():
     """从 project.yml 读 HEADER_SEARCH_PATHS，把 $(SRCROOT) 解析成 app/"""
     proj = os.path.join(APP, "project.yml")
@@ -207,6 +266,12 @@ def check_sources():
             n += 1
             with open(p, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
+
+            # 注释里混进 */ 会提前闭合注释，后面的中文被当成代码（构建 #135 踩过）
+            stray = stray_comment_close(raw)
+            if stray:
+                err(f"{rel}:{stray}: 多余的 */ —— 注释被提前闭合，后面整段会被当成代码")
+
             body = strip_code(raw)
 
             # 括号配平
