@@ -602,9 +602,9 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         [MFUEReader shared].libBase = base;
 
         /* ⑤ GWorld 那一跳：成功就说明整条读取链在 HUD 进程里成立 */
+        uint64_t gw = 0;
         {
             const uint64_t slot = base + 0x178B44E0ULL;
-            uint64_t gw = 0;
             int r = mfpt_read(root, slot, &gw, sizeof(gw));
             [log appendFormat:@"[gworld] read(%#llx) rc=%d val=%#llx\n",
              (unsigned long long)slot, r, (unsigned long long)gw];
@@ -612,6 +612,33 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                 char trace[1024];
                 int trc = mfpt_walk_trace(root, slot, trace, sizeof(trace));
                 [log appendFormat:@"[gworld] 失败，walk trace rc=%d\n%s", trc, trace];
+            }
+        }
+
+        /*
+         * ⑥ [M5.127] GWorld 到手之后，顺着偏移表往下走：玩家链 400/56/48/928。
+         * 每一跳都写 rc 和值，断了哪一级一目了然；坐标按 +544 的 3 个 float 试读。
+         */
+        if (gw > 0x100000000ULL && gw < 0x8000000000ULL) {
+            uint64_t hops[] = { 400, 56, 48, 928 };
+            uint64_t cur = gw;
+            [log appendString:@"[chain] 玩家链 400/56/48/928：\n"];
+            for (unsigned int i = 0; i < sizeof(hops) / sizeof(hops[0]); i++) {
+                uint64_t nxt = 0;
+                int r = mfpt_read(root, cur + hops[i], &nxt, sizeof(nxt));
+                BOOL ok = (r == 0 && nxt > 0x100000000ULL && nxt < 0x8000000000ULL);
+                [log appendFormat:@"  %#llx + %llu → %#llx (rc=%d)%@\n",
+                 (unsigned long long)cur, (unsigned long long)hops[i],
+                 (unsigned long long)nxt, r, ok ? @"" : @"  断在这里"];
+                if (!ok) break;
+                cur = nxt;
+            }
+            /* 坐标：+544 处三个 float（X/Y/Z），读不到就不写 */
+            {
+                float xyz[3] = {0, 0, 0};
+                int r = mfpt_read(root, cur + 544, xyz, sizeof(xyz));
+                [log appendFormat:@"[xyz] %#llx + 544 rc=%d → %.2f, %.2f, %.2f\n",
+                 (unsigned long long)cur, r, xyz[0], xyz[1], xyz[2]];
             }
         }
 
