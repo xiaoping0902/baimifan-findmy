@@ -901,7 +901,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                     continue;
                 }
                 float v[3] = {0, 0, 0};
-                if (mfpt_read(root, comp + 0x168, v, sizeof(v)) != 0) {
+                /* [M5.143] 0x168 是 RelativeLocation（局部），改用 ComponentToWorld.Translation */
+                if (mfpt_read(root, comp + 0x220, v, sizeof(v)) != 0) {
                     continue;
                 }
                 if (!isfinite(v[0]) || !isfinite(v[1]) || !isfinite(v[2])) {
@@ -918,9 +919,32 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                 valid++;
                 if (enc) encrypted++;
                 BOOL usable = (v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f);
-                if (shown < 10 && usable) {
-                    [s appendFormat:@"    A[%d] %#llx  pos=%.1f, %.1f, %.1f  idx=%u enc=%u\n",
-                     i, (unsigned long long)a, v[0], v[1], v[2], idx, enc];
+
+                /*
+                 * [M5.143] 把「判断人机/队伍/骨骼」需要的数据全部落盘。
+                 * 没有 Frida 也能拿到同样的东西：队伍(Pawn+0x10C0 → +0x108)、
+                 * 人机标志(+0xE60)、Mesh(+0x3D0) 与骨数(Mesh+0xA18+8)。
+                 */
+                if (usable && shown < 40) {
+                    uint64_t mesh = 0, bdata = 0, teamComp = 0;
+                    uint32_t boneNum = 0, team = 0;
+                    uint8_t ai = 0;
+                    (void)mfpt_read(root, a + 0x3D0, &mesh, sizeof(mesh));
+                    if (mesh) {
+                        (void)mfpt_read(root, mesh + 0xA18, &bdata, sizeof(bdata));
+                        (void)mfpt_read(root, mesh + 0xA18 + 8, &boneNum, sizeof(boneNum));
+                        if (bdata == 0) boneNum = 0;
+                    }
+                    (void)mfpt_read(root, a + 0x10C0, &teamComp, sizeof(teamComp));
+                    if (teamComp) {
+                        (void)mfpt_read(root, teamComp + 0x108, &team, sizeof(team));
+                    }
+                    (void)mfpt_read(root, a + 0xE60, &ai, sizeof(ai));
+
+                    [s appendFormat:
+                     @"    A[%d] %#llx pos=%.1f,%.1f,%.1f idx=%u enc=%u team=%u ai=%u bone=%u\n",
+                     i, (unsigned long long)a, v[0], v[1], v[2], idx, enc,
+                     team, (unsigned)ai, boneNum];
                     shown++;
                 }
             }
