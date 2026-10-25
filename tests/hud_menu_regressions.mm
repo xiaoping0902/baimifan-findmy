@@ -50,6 +50,12 @@ static void TestSwitchInteractionAndAutomaticSave(MFMenuUI *menu, MFOverlayView 
         [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
     }
     MFSettings *reloaded = [[MFSettings alloc] init];
+    NSString *settingsPath = [settings valueForKey:@"filePath"];
+    NSDictionary *persisted = [NSDictionary dictionaryWithContentsOfFile:settingsPath];
+    NSLog(@"[TEST] auto-save initial=%d live=%d reloaded=%d fileExists=%d persisted=%@",
+          initial, settings.masterEnabled, reloaded.masterEnabled,
+          [[NSFileManager defaultManager] fileExistsAtPath:settingsPath],
+          persisted[@"masterEnabled"]);
     CHECK(reloaded.masterEnabled == settings.masterEnabled,
           "an idle setting change must persist without pressing a save button");
 

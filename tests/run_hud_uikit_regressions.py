@@ -97,7 +97,8 @@ def main():
                 sources += [ROOT / f"app/Sources/Game/{name}.mm"
                             for name in ("MFGameReader", "MFProjection", "Offsets", "MFSettings")]
                 sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
-                            ROOT / "tests/mfpt_page_table_stubs.c"]
+                            ROOT / "tests/mfpt_page_table_stubs.c",
+                            ROOT / "tests/mfue_game_reader_stubs.mm"]
             else:
                 sources = [ROOT / f"tests/hud_{args.suite}_regressions.mm",
                            ROOT / "app/Sources/Render/MFOverlayView.mm",
@@ -118,6 +119,7 @@ def main():
                     # The fixture keeps local readers unbound and fails on any
                     # remote read; no kernel or game process is part of this suite.
                     sources.append(ROOT / "app/Sources/HUD/MFDrawingLayer.mm")
+                    sources.append(ROOT / "app/Sources/Game/MFBones.mm")
                     sources += [ROOT / f"app/Sources/Game/{name}.mm" for name in (
                         "MFGameReader", "MFUEReader", "MFUEOffsets", "MFProjection", "Offsets",
                         "MFSettings", "MFGearCatalog", "MFGearReader", "MFUEGNames", "MFItemTable")]
