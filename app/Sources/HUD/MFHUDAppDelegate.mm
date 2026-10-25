@@ -804,6 +804,40 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                 }
                 [d writeToFile:@"/var/mobile/Media/mf-debug/mf-gworld-dump.txt"
                     atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+                /*
+                 * [M5.132] 再深一层：GWorld 里每个指针，读它的目标前 0x200 字节，
+                 * 找真正的 TArray {ptr, num, cap}，且 num 在 [16, 20000]。
+                 * Actors 数组通常有几百个元素，这一条就能把它筛出来。
+                 */
+                NSMutableString *deep = [NSMutableString stringWithFormat:
+                    @"deep scan of GWorld %#llx  module %#llx..%#llx\n",
+                    (unsigned long long)gw, (unsigned long long)modBase,
+                    (unsigned long long)modEnd];
+                for (uint64_t o1 = 0; o1 < 0x400; o1 += 8) {
+                    uint64_t p1 = 0;
+                    if (mfpt_read(root, gw + o1, &p1, sizeof(p1)) != 0) continue;
+                    if (!(p1 > 0x100000000ULL && p1 < 0x8000000000ULL && p1 % 8 == 0)) continue;
+                    for (uint64_t o2 = 0; o2 < 0x200; o2 += 8) {
+                        uint64_t data = 0, tail = 0;
+                        if (mfpt_read(root, p1 + o2, &data, sizeof(data)) != 0) continue;
+                        if (mfpt_read(root, p1 + o2 + 8, &tail, sizeof(tail)) != 0) continue;
+                        uint32_t num = (uint32_t)(tail & 0xffffffffu);
+                        uint32_t cap = (uint32_t)((tail >> 32) & 0xffffffffu);
+                        if (!(data > 0x100000000ULL && data < 0x8000000000ULL)) continue;
+                        if (num < 16 || num > 20000 || cap < num || cap > 40000) continue;
+                        uint64_t first = 0, vt = 0;
+                        if (mfpt_read(root, data, &first, sizeof(first)) != 0) continue;
+                        BOOL obj = (mfpt_read(root, first, &vt, sizeof(vt)) == 0 &&
+                                    vt >= modBase && vt < modEnd);
+                        [deep appendFormat:@"  world+%03llx → %#llx  +%03llx ARRAY data=%#llx num=%u cap=%u%@\n",
+                         (unsigned long long)o1, (unsigned long long)p1,
+                         (unsigned long long)o2, (unsigned long long)data, num, cap,
+                         obj ? @"  ★元素是 UObject" : @""];
+                    }
+                }
+                [deep writeToFile:@"/var/mobile/Media/mf-debug/mf-gworld-deep.txt"
+                     atomically:YES encoding:NSUTF8StringEncoding error:NULL];
             }
 
             NSString *dir = @"/var/mobile/Media/mf-debug";
