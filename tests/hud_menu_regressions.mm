@@ -71,17 +71,27 @@ static void TestDrawingTileAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overl
         });
     });
 }
+static BOOL RectMatchesAtDisplayScale(CGRect actual, CGRect expected) {
+    // UIKit's secure text canvas snaps fractional point sizes to physical
+    // pixels. Preserve subpixel geometry checks without requiring bit equality.
+    const CGFloat tolerance = 0.5 / UIScreen.mainScreen.scale + 1e-6;
+    return fabs(actual.origin.x - expected.origin.x) <= tolerance &&
+           fabs(actual.origin.y - expected.origin.y) <= tolerance &&
+           fabs(actual.size.width - expected.size.width) <= tolerance &&
+           fabs(actual.size.height - expected.size.height) <= tolerance;
+}
 static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield,
                                 MFOverlayView *overlay, CGSize panel, CGFloat angle) {
     const BOOL landscape = fabs(angle) > .1;
     const CGSize physical = landscape ? CGSizeMake(panel.height, panel.width) : panel;
     window.bounds = (CGRect){CGPointZero, physical};
     window.rootViewController.view.frame = window.bounds;
-    shield.transform = CGAffineTransformIdentity;
     shield.bounds = (CGRect){CGPointZero, panel};
     shield.center = CGPointMake(physical.width / 2, physical.height / 2);
     shield.transform = CGAffineTransformMakeRotation(angle);
-    overlay.frame = shield.bounds;
+    // Match the production host's layout, including while already rotated.
+    overlay.bounds = shield.bounds;
+    overlay.center = CGPointMake(panel.width / 2, panel.height / 2);
     [window layoutIfNeeded]; [overlay layoutIfNeeded];
     fprintf(stderr, "TRACE: angle=%.17g panel=%s window=%s root=%s shieldBounds=%s shieldFrame=%s content=%s overlayFrame=%s overlayBounds=%s\n",
             (double)angle, NSStringFromCGSize(panel).UTF8String,
@@ -92,9 +102,9 @@ static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield
             NSStringFromCGRect(shield.contentView.bounds).UTF8String,
             NSStringFromCGRect(overlay.frame).UTF8String,
             NSStringFromCGRect(overlay.bounds).UTF8String);
-    CHECK(CGRectEqualToRect(overlay.frame, shield.contentView.bounds) &&
-          CGSizeEqualToSize(overlay.bounds.size, panel),
-          "the nested Metal view must remain exactly the size of its native panel host");
+    CHECK(RectMatchesAtDisplayScale(overlay.frame, shield.contentView.bounds) &&
+          RectMatchesAtDisplayScale(overlay.bounds, (CGRect){CGPointZero, panel}),
+          "the nested Metal view must fill its native host within physical pixel rounding");
 }
 static void InitializeImGui(void) {
     ImGui::CreateContext();
@@ -158,7 +168,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
             const CGPoint tab = [overlay convertPoint:NavPoint(overlay, 1) toView:window];
             CHECK([window hitTest:tab withEvent:nil] == overlay,
                   "secure hosted content must preserve visible navigation hits in both landscape directions");
-            CHECK(CGRectEqualToRect(header, overlay.headerDragRect),
+            CHECK(RectMatchesAtDisplayScale(header, overlay.headerDragRect),
                   "rotating the host must not alter the panel's logical title drag area");
         }
         [MFMenuUI setCollapseChangeHandler:nil];
