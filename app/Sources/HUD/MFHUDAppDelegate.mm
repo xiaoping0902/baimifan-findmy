@@ -134,9 +134,14 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
 /* [M5.124] 内核在 HUD 进程里常驻 */
 @property (nonatomic) BOOL kernelViaKFD;   /* KFD 就绪后停用 task port 老路 */
 @property (nonatomic, strong) NSTimer *liveReadTimer;   /* [M5.128] 持续读取 */
+/* [M5.135] 当前绑定：游戏重启会换 pid + 换 pmap，root 不能只在 attach 时捕获一次 */
+@property (nonatomic) uint64_t liveRoot;
+@property (nonatomic) int livePid;
+@property (nonatomic) int liveFailStreak;
 - (void)bootstrapKernelInHUD;
 - (void)writeHUDKernelLog:(NSString *)text;
 - (void)startLiveReadTimerWithRoot:(uint64_t)root;
+- (BOOL)rebindLiveTargetWithLog:(NSMutableString *)log;
 @property (nonatomic, strong) MFOverlayView *menuOverlay;
 @property (nonatomic, strong) MFOverlayView *drawingOverlay;
 @property (nonatomic, strong) NSMutableDictionary *startupReport;
@@ -563,6 +568,20 @@ static void MFHUDInstallKernelCleanup(void)
     signal(SIGHUP, MFHUDKernelSignalCleanup);
 }
 
+/*
+ * [M5.135] 持续读取的"上一轮还没跑完"闸门。
+ *
+ * 3 秒一拍，但读 600 个 Actor 要上千次内核读；慢的时候一轮会超过 3 秒。
+ * 不设闸门的话 global queue 会一拍一拍地堆上去，把内核锁的争用放大。
+ * tryLock 失败就丢掉这一拍 —— 下一拍还有机会。
+ */
+static NSLock *MFHUDLiveReadLock(void) {
+    static NSLock *lock = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSLock alloc] init]; });
+    return lock;
+}
+
 static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     NSString *hay = [NSString stringWithFormat:@"%@ %@",
                      name.lowercaseString ?: @"", path.lowercaseString ?: @""];
@@ -664,6 +683,20 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         [log appendFormat:@"[attach] root=%#llx（读取后端已切到 KFD）\n",
          (unsigned long long)root];
 
+        /*
+         * ★ [M5.135] 就在这里停掉 task-port 那条老绑定。
+         *
+         * refreshTargetBinding 每秒跑一次，直到 kernelViaKFD 为真才返回；
+         * 它的失败分支会执行 unbindReader：modeFlag = NO、libBase = 0。
+         * 原来 kernelViaKFD 是在整个引导【最后】才置位的，于是 attach 成功
+         * 之后到引导结束之前，只要定时器插进来一次，就会把刚设好的 libBase
+         * 清零 —— 持续读取还活着（它捕获了 root），但绘制层的 gateOpen /
+         * libBase 检查直接判死，表现是「有时画得出来，有时一片空白」。
+         * 所以就绪即置位，不等日志和自检跑完。
+         */
+        self.kernelViaKFD = YES;
+        self.livePid = game.pid;      /* [M5.135] 看门狗用它判断"pid 有没有变" */
+
         /* ④ 自证：读游戏 Mach-O 头 */
         uint64_t base = 0;
         if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
@@ -701,9 +734,16 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
          *   UWorld +0xF8 → ULevel +0x98 → Actors{data, num}
          *   AActor +0x180 → USceneComponent +0x168 → FEncVector
          */
+        /*
+         * 把链上每一步的结果提到块外：下面的 RESULT 行要按【实际读到了什么】
+         * 来写，不能无条件写 OK（旧版无论 GWorld / Level / Actors 是否读通，
+         * 都会写 RESULT OK 并启动持续读取，日志因此会骗人）。
+         */
+        BOOL actorChainOK = NO;
+        uint64_t level = 0, actorsData = 0;
+        int32_t num = 0, maxc = 0;
+        int valid = 0;
         if (gw > 0x100000000ULL && gw < 0x8000000000ULL) {
-            uint64_t level = 0, actorsData = 0;
-            int32_t num = 0, maxc = 0;
             mfpt_read(root, gw + 0xF8, &level, sizeof(level));
             if (level) {
                 mfpt_read(root, level + 0x98, &actorsData, sizeof(actorsData));
@@ -715,7 +755,7 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
              (unsigned long long)gw, (unsigned long long)level,
              (unsigned long long)actorsData, num, maxc];
 
-            int valid = 0, shown = 0;
+            int shown = 0;
             for (int i = 0; i < num && i < 200 && actorsData; i++) {
                 uint64_t a = 0, comp = 0;
                 float v[3] = {0, 0, 0};
@@ -731,12 +771,21 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                     shown++;
                 }
             }
-            [log appendFormat:@"[actors] 有效=%d / %d\n", valid, num];
+            [log appendFormat:@"[actors] 有效=%d / %d（有效只表示三次读都成功，不代表坐标可信）\n",
+             valid, num];
+            actorChainOK = (level != 0 && actorsData != 0 && num > 0 && valid > 0);
         }
 
-        [log appendString:@"\nRESULT OK —— 内核与读取都在常驻的 HUD 进程里\n"];
+        if (actorChainOK) {
+            [log appendFormat:@"\nRESULT OK —— 内核、读取、Actor 链都在常驻的 HUD 进程里"
+                                @"（level=%#llx num=%d valid=%d）\n",
+             (unsigned long long)level, num, valid];
+        } else {
+            [log appendString:
+                @"\nRESULT PARTIAL —— 内核与 Mach-O 自检通过，但 Actor 链没有读到东西。\n"
+                @"  这条日志不能当成「链已通」：往上翻 [chain] 行，看 level / actors / num 哪一步是 0。\n"];
+        }
         [self writeHUDKernelLog:log];
-        self.kernelViaKFD = YES;      /* [M5.125] 从此刻起不再碰 task port */
 
         /* [M5.128] 会话不关，改成持续读取 */
         [self startLiveReadTimerWithRoot:root];
@@ -748,14 +797,25 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
  * /mf-debug/mf-live.txt。这就是"一直读取"的形态 —— 会话开着，读循环跑着，
  * 只有进程被硬杀才会中断（那时靠 atexit/signal 兜底释放）。
  */
-- (void)startLiveReadTimerWithRoot:(uint64_t)root {
-    if (self.liveReadTimer) return;
-    __weak MFHUDAppDelegate *weakSelf = self;
-    self.liveReadTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t) {
+- (void)startLiveReadTimerWithRoot:(uint64_t)initialRoot {
+    /*
+     * ★ [M5.135] 这个方法是从 bootstrapKernelInHUD 的【后台队列】里调的。
+     * NSRunLoop 不是线程安全的，从后台线程往 mainRunLoop 里塞 timer 属于
+     * 未定义行为（可能不触发，也可能和 shutdown 里的 invalidate 撞车）。
+     * 统一回主线程建。
+     */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.liveReadTimer) return;
+        self.liveRoot = initialRoot;
+        __weak MFHUDAppDelegate *weakSelf = self;
+        self.liveReadTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             if (!mf_is_open()) { return; }
             MFHUDAppDelegate *me = weakSelf;
             if (!me) { return; }
+            if (![MFHUDLiveReadLock() tryLock]) { return; }
+            uint64_t root = me.liveRoot;
+            if (root == 0) { [MFHUDLiveReadLock() unlock]; return; }
 
             NSMutableString *s = [NSMutableString string];
             NSDateFormatter *f = [[NSDateFormatter alloc] init];
@@ -768,6 +828,32 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             uint64_t gw = 0;
             int r = mfpt_read(root, base + 0x178B44E0ULL, &gw, sizeof(gw));
             [s appendFormat:@"  gworld rc=%d %#llx\n", r, (unsigned long long)gw];
+
+            /*
+             * ★ [M5.135] 目标失效看门狗。
+             *
+             * root 是 attach 那一刻从游戏 pmap 拿的。游戏一重启就换了 pid 和 pmap，
+             * 旧 root 会稳定翻译失败 —— 以前这里只会每 3 秒打一行 rc=-11，永远不重连。
+             * 现在连续两拍读不到就重新枚举进程；pid 变了才重挂，同一个 pid 只清计数，
+             * 避免关卡加载时反复 attach。
+             */
+            if (r != 0 || gw == 0) {
+                me.liveFailStreak = me.liveFailStreak + 1;
+            } else {
+                me.liveFailStreak = 0;
+            }
+            if (me.liveFailStreak >= 2) {
+                [s appendFormat:@"  [rebind] 连续 %d 拍读不到 GWorld，检查目标\n",
+                 me.liveFailStreak];
+                if ([me rebindLiveTargetWithLog:s]) {
+                    root = me.liveRoot;
+                    base = [MFUEReader shared].libBase;
+                    mfpt_read(root, base + 0x178B44E0ULL, &gw, sizeof(gw));
+                    [s appendFormat:@"  [rebind] 新 gworld=%#llx base=%#llx\n",
+                     (unsigned long long)gw, (unsigned long long)base];
+                }
+                me.liveFailStreak = 0;
+            }
 
             /*
              * ★ [M5.133] 这里换成 SDK + 二进制双向验证过的链，不再用旧表的
@@ -795,7 +881,16 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
              (unsigned long long)actorsData, num, maxc];
 
             /* 遍历 Actors：每个取 RootComponent 的位置，并统计 EncHandler 是否非 0 */
-            int valid = 0, encrypted = 0, shown = 0;
+            /*
+             * ★ [M5.135] 三个指标全部重做，旧口径会骗人：
+             *   ① handler 读失败时变量还是 0，被算进「未加密」；
+             *   ② NaN 与 0.0f 比较不相等，能穿过 != 0 的过滤被当成有效坐标；
+             *   ③ handler 是 FEncHandler{uint16 Index; int8 bEncrypted; ...}，
+             *      「整体非 0」只说明 Index 有值 —— 它不是加密标志。
+             * 另外：二进制侧已证坐标在内存里是明文（DecVector 只做原样拷贝），
+             * encrypted 这个数只当参考，不要再拿它决定要不要解密。
+             */
+            int valid = 0, encrypted = 0, nonFinite = 0, shown = 0;
             for (int i = 0; i < num && i < 600 && actorsData; i++) {
                 uint64_t a = 0;
                 if (mfpt_read(root, actorsData + (uint64_t)i * 8, &a, sizeof(a)) != 0 || !a) {
@@ -806,21 +901,31 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                     continue;
                 }
                 float v[3] = {0, 0, 0};
-                uint32_t handler = 0;
                 if (mfpt_read(root, comp + 0x168, v, sizeof(v)) != 0) {
                     continue;
                 }
-                mfpt_read(root, comp + 0x174, &handler, sizeof(handler));
+                if (!isfinite(v[0]) || !isfinite(v[1]) || !isfinite(v[2])) {
+                    nonFinite++;
+                    continue;
+                }
+
+                uint32_t handler = 0;
+                BOOL haveHandler =
+                    (mfpt_read(root, comp + 0x174, &handler, sizeof(handler)) == 0);
+                unsigned idx = haveHandler ? (handler & 0xFFFFu) : 0;        /* +0x00 Index     */
+                unsigned enc = haveHandler ? ((handler >> 16) & 0xFFu) : 0;  /* +0x02 bEncrypted */
+
                 valid++;
-                if (handler) encrypted++;
-                if (shown < 10 && v[0] != 0.0f && v[1] != 0.0f && v[2] != 0.0f) {
-                    [s appendFormat:@"    A[%d] %#llx  pos=%.1f, %.1f, %.1f  handler=%u\n",
-                     i, (unsigned long long)a, v[0], v[1], v[2], handler];
+                if (enc) encrypted++;
+                BOOL usable = (v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f);
+                if (shown < 10 && usable) {
+                    [s appendFormat:@"    A[%d] %#llx  pos=%.1f, %.1f, %.1f  idx=%u enc=%u\n",
+                     i, (unsigned long long)a, v[0], v[1], v[2], idx, enc];
                     shown++;
                 }
             }
-            [s appendFormat:@"  scan: valid=%d  encrypted=%d  (num=%d)\n",
-             valid, encrypted, num];
+            [s appendFormat:@"  scan: valid=%d  encrypted=%d  nonFinite=%d  (num=%d)\n",
+             valid, encrypted, nonFinite, num];
 
             /*
              * [M5.130] GWorld 结构 dump（只跑一次）。
@@ -902,10 +1007,68 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             NSString *dir = @"/var/mobile/Media/mf-debug";
             [s writeToFile:[dir stringByAppendingPathComponent:@"mf-live.txt"]
                 atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            [MFHUDLiveReadLock() unlock];
         });
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:self.liveReadTimer forMode:NSRunLoopCommonModes];
-    MFHUDLogLine(@"[M5.128] 持续读取已启动（3 秒一次）");
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:self.liveReadTimer forMode:NSRunLoopCommonModes];
+        MFHUDLogLine(@"[M5.128] 持续读取已启动（3 秒一次）");
+    });
+}
+
+/*
+ * [M5.135] 目标失效后的重挂。
+ *
+ * 判据只看 pid：同一个 pid 说明游戏没重启，重挂没有意义（多半是世界还没加载完）。
+ * 真的换了 pid 才走完整流程：枚举 → attach（重取 pmap 根表）→ 重新找模块基址 →
+ * 校验 Mach-O 头 → 更新 livePid / liveRoot / MFUEReader.libBase。
+ */
+- (BOOL)rebindLiveTargetWithLog:(NSMutableString *)log {
+    NSString *err = nil;
+    NSArray<MFProcessInfo *> *list =
+        [[MFKernel shared] enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
+    MFProcessInfo *game = nil;
+    for (MFProcessInfo *p in list) {
+        if (MFHUDLooksLikeGame(p.name, p.path)) { game = p; break; }
+    }
+    if (game == nil) {
+        [log appendFormat:@"  [rebind] 没找到游戏进程（%@）\n", err ?: @"列表为空"];
+        return NO;
+    }
+    if (game.pid == self.livePid) {
+        [log appendFormat:@"  [rebind] pid=%d 没变，先不动（可能还在加载关卡）\n", game.pid];
+        return NO;
+    }
+    /*
+     * 先在"不动共享后端"的前提下把整条链验完，再提交。
+     * 顺序反过来的话，attach 成功但后面校验失败，会留下
+     * 「后端指向新进程、libBase 还是旧的」这种半吊子状态，绘制会读到垃圾。
+     */
+    uint64_t root = 0;
+    char why[192] = {0};
+    if (mf_pid_chain(game.pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why)) != 0 || root == 0) {
+        [log appendFormat:@"  [rebind] pid=%d 取 pmap 失败：%s\n", game.pid, why];
+        return NO;
+    }
+    uint64_t base = 0;
+    if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
+        [log appendString:@"  [rebind] 找不到模块基址\n"];
+        return NO;
+    }
+    uint32_t magic = 0;
+    if (mfpt_read(root, base, &magic, sizeof(magic)) != 0 || magic != 0xfeedfacf) {
+        [log appendFormat:@"  [rebind] 基址 0x%llx 不是 Mach-O\n", (unsigned long long)base];
+        return NO;
+    }
+    if (![[MFReadBackend shared] attachKFDPid:game.pid]) {
+        [log appendFormat:@"  [rebind] attach pid=%d 失败\n", game.pid];
+        return NO;
+    }
+    self.livePid = game.pid;
+    self.liveRoot = root;
+    [MFUEReader shared].libBase = base;
+    [log appendFormat:@"  [rebind] 已重挂 pid=%d root=%#llx base=%#llx\n",
+     game.pid, (unsigned long long)root, (unsigned long long)base];
+    return YES;
 }
 
 - (void)refreshTargetBinding {
@@ -1100,6 +1263,15 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     self.menuHost = nil;
     self.drawingHost = nil;
     [self publishStartupState:@"failed" error:error];
+    /*
+     * ★ [M5.135] 退出前必须显式释放内核。
+     * _exit() 不跑 atexit，所以报告里那「三道兜底」在这条路径上一道都不生效；
+     * 不关会话 = perfmon 被占住，下次 kopen 直接 perf.dev.fd > 0，只能重启设备。
+     */
+    if (mf_is_open()) {
+        MFHUDLogLine(@"[M5.135] failStartup：先 kclose 再退出");
+        mf_kclose();
+    }
     // The HUD is root while the console may be mobile. Exit here rather than
     // relying on the console being allowed to signal a root process.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10),

@@ -63,6 +63,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 核心：读远程内存。返回 YES 表示成功
 - (BOOL)readRemote:(uint64_t)remote into:(void *)out size:(size_t)size;
 
+/// [M5.135] 宽松读：返回【实际读到的字节数】（0 = 一个都没读到）。
+///
+/// 给"整块指针数组"这种大读用：跨到未映射页时只丢尾巴，不整批作废。
+/// 注意返回小于 size 时，后面那段内容是未初始化的 —— 调用方自己 calloc/清零。
+- (size_t)readRemotePartial:(uint64_t)remote into:(void *)out size:(size_t)size;
+
 #pragma mark 六个字节封装（已证：唯一区别是"读多少字节"）
 
 /// 8 字节 —— 指针 / 整数。失败返回 0（对齐原 FCSEL 降级）

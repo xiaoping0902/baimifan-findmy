@@ -73,10 +73,13 @@
 #include <fcntl.h>       /* open / O_CREAT —— 给 mf_redirect_klog 用 */
 #include <unistd.h>      /* dup2 / getpid */
 #include <setjmp.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <sys/file.h>    /* flock —— 跨进程内核哨兵 */
+#include <sys/stat.h>    /* mkdir */
 #include <unistd.h>
 
 /* ================================================================ */
@@ -89,6 +92,45 @@ static struct kfd *g_kfd = NULL;
 /* 失败跳转。mf_kopen 用 setjmp 落点，断言宏 longjmp 回来。 */
 static jmp_buf g_fail_jmp;
 static volatile int g_fail_armed = 0;
+
+/*
+ * ── 串行化锁（[M5.135]）─────────────────────────────────────────────
+ *
+ * 为什么必须有：libkfd 的 kread/kwrite 后端（sem_open / dup）是有状态的
+ *   （对象喷洒 → 搜索 → 释放），【禁止并发调用】；本文件又用一对
+ *     static jmp_buf g_fail_jmp;  static volatile int g_fail_armed;
+ *   做失败落点 —— 那是【每进程一份】。两个线程同时进来时后果是：
+ *     · 后到的 setjmp 覆盖落点，先到的断言 longjmp 跳到别人的栈帧（崩溃）；
+ *     · 或者一个线程把 g_fail_armed 清 0，另一个线程的断言直接 abort()。
+ *
+ * 以前没暴露，是因为读取只在一个线程上跑；M5.124 之后 HUD 里同时有
+ *   持续读取（3 秒一次，global queue）和绘制（60Hz，_drawableQueue）。
+ *
+ * 用【递归】锁：mf_kwrite32 → mf_kread64、mfpt_translate → mf_kread32
+ * 这类嵌套调用必须能重入。
+ */
+static pthread_mutex_t g_mf_lock;
+static pthread_once_t  g_mf_lock_once = PTHREAD_ONCE_INIT;
+
+static void mf_lock_init(void)
+{
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_mf_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+void mf_lock_kernel(void)
+{
+    pthread_once(&g_mf_lock_once, mf_lock_init);
+    pthread_mutex_lock(&g_mf_lock);
+}
+
+void mf_unlock_kernel(void)
+{
+    pthread_mutex_unlock(&g_mf_lock);
+}
 
 /* 诊断缓冲。 */
 static char g_err[768];
@@ -106,6 +148,76 @@ static void mf_strlcpy(char *dst, size_t cap, const char *src)
     if (n >= cap) n = cap - 1;
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+/* ================================================================ */
+/* 1c) 跨进程内核哨兵（[M5.135]）                                    */
+/* ================================================================ */
+/*
+ * 主 App 与 HUD 是两个进程：各自的 mf_is_open() 只看自己的 g_kfd。
+ * 于是"主 App 点了启动内核 → 再开悬浮窗"这种顺序会让第二个进程直接撞
+ *     assertion failed: (kfd->perf.dev.fd > 0)
+ * 而按交接报告 §8.2，这个状态重试和换参数都无效，只能重启设备。
+ *
+ * 用共享文件上的 flock 做互斥（close 即释放，进程被杀也不会残留）：
+ *   · 拿不到 → 返回 -4，一个字节都不碰内核；
+ *   · 文件开不了（沙盒/权限）→ 降级放行，不因为诊断设施挡住主线。
+ *
+ * 注意：它只能防"同时开"，防不了"上一个进程被硬杀、perfmon 还脏"——
+ * 那种情况只有重启设备能清。
+ */
+#define MF_KERNEL_SENTINEL "/var/mobile/Media/mf-debug/kernel.owner"
+
+static int g_mf_sentinel_fd = -1;
+
+static int mf_sentinel_acquire(void)
+{
+    if (g_mf_sentinel_fd >= 0) return 0;
+
+    mkdir("/var/mobile/Media/mf-debug", 0755);
+    int fd = open(MF_KERNEL_SENTINEL, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        if (g_verbose) {
+            fprintf(stderr, "[mf] 哨兵文件打不开（errno=%d），降级放行\n", errno);
+        }
+        return 0;
+    }
+
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        char owner[64] = {0};
+        ssize_t n = read(fd, owner, sizeof(owner) - 1);
+        close(fd);
+        if (n > 0) {
+            char *nl = strchr(owner, '\n');
+            if (nl) *nl = '\0';
+            snprintf(g_err, sizeof(g_err),
+                     "内核已被另一个进程持有（owner pid=%s）。"
+                     "先把那个进程的内核关掉（悬浮窗菜单「退出」/ 主 App「关闭内核」）再试。",
+                     owner);
+        } else {
+            mf_strlcpy(g_err, sizeof(g_err),
+                       "内核已被另一个进程持有（哨兵文件已被锁）");
+        }
+        return -1;
+    }
+
+    ftruncate(fd, 0);
+    lseek(fd, 0, SEEK_SET);
+    char line[32];
+    int len = snprintf(line, sizeof(line), "%d\n", (int)getpid());
+    if (len > 0) {
+        ssize_t w = write(fd, line, (size_t)len);
+        (void)w;
+    }
+    g_mf_sentinel_fd = fd;
+    return 0;
+}
+
+static void mf_sentinel_release(void)
+{
+    if (g_mf_sentinel_fd < 0) return;
+    close(g_mf_sentinel_fd);      /* close 即释放 flock */
+    g_mf_sentinel_fd = -1;
 }
 
 static void mf_set_stage(const char *fmt, ...)
@@ -312,7 +424,7 @@ char *mf_read_klog(void)
 /* 2) 生命周期                                                       */
 /* ================================================================ */
 
-int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
+static int mf_kopen_locked(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
 {
     /* 先把 kfd 内部的 printf 诊断接进文件，失败时才能看出死在 9 个偏移里的哪一个 */
     mf_redirect_klog();
@@ -356,6 +468,15 @@ int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_
 
     mf_strlcpy(g_err, sizeof(g_err), "no error");
 
+    /*
+     * [M5.135] 先拿跨进程哨兵：主 App 和 HUD 是两个进程，mf_is_open() 互相看不见。
+     * 拿不到就返回 -4 —— 这一步失败时内核一个字节都没动，调用方可以安全重试。
+     */
+    if (mf_sentinel_acquire() != 0) {
+        mf_set_stage("kopen: REFUSED（另一个进程持有内核）");
+        return -4;
+    }
+
     mf_set_stage("kopen: start (puaf_pages=%llu, puaf_method=%d, kread=%d, kwrite=%d)",
                  (unsigned long long)puaf_pages, puaf_method, kread_method, kwrite_method);
 
@@ -376,12 +497,14 @@ int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_
         /* 从 libkfd 内部跳回来：g_err / g_site 已由钩子填好。 */
         g_fail_armed = 0;
         MF_MARK_FAILED();
+        mf_sentinel_release();
         mf_set_stage("kopen: FAILED (%s)", g_err);
         return -1;
     }
 
     if (kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "kopen returned NULL");
+        mf_sentinel_release();
         mf_set_stage("kopen: FAILED (kopen returned NULL)");
         return -1;
     }
@@ -410,7 +533,7 @@ int mf_kopen_default(void)
                     MF_DEFAULT_KWRITE_METHOD);
 }
 
-void mf_kclose(void)
+static void mf_kclose_locked(void)
 {
     if (g_kfd == NULL) {
         return;
@@ -428,10 +551,12 @@ void mf_kclose(void)
         g_fail_armed = 0;
         mf_set_stage("kclose: FAILED (%s)", g_err);
         MF_MARK_FAILED();
+        mf_sentinel_release();
         return;
     }
 
     MF_MARK_FAILED();
+    mf_sentinel_release();
     mf_set_stage("kclose: done");
 }
 
@@ -571,7 +696,7 @@ uint64_t mf_phys_to_kv(uint64_t pa)
     return 0;
 }
 
-int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
+static int mf_kread_locked(uint64_t kaddr, void *uaddr, uint64_t size)
 {
     if (g_kfd == NULL) {
         mf_strlcpy(g_err, sizeof(g_err), "mf_kread: not open");
@@ -638,7 +763,7 @@ int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
     return 0;
 }
 
-int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
+static int mf_kwrite_locked(void *uaddr, uint64_t kaddr, uint64_t size)
 {
     if (mf_addr_guard(kaddr, size, "mf_kwrite") != 0) {
         return -1;
@@ -752,7 +877,7 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
  *
  * 注意：该函数要求当前 kread 后端确实是 sem_open；否则退回普通 kread。
  */
-int mf_kread32(uint64_t kaddr, uint32_t *out)
+static int mf_kread32_locked(uint64_t kaddr, uint32_t *out)
 {
     if (mf_addr_guard(kaddr, 4, "mf_kread32") != 0) {
         return -1;
@@ -787,7 +912,7 @@ int mf_kread32(uint64_t kaddr, uint32_t *out)
     return 0;
 }
 
-int mf_kread64(uint64_t kaddr, uint64_t *out)
+static int mf_kread64_locked(uint64_t kaddr, uint64_t *out)
 {
     if (mf_addr_guard(kaddr, 8, "mf_kread64") != 0) {
         return -1;
@@ -815,7 +940,7 @@ int mf_kread64(uint64_t kaddr, uint64_t *out)
  * 32 位写。上游 kwrite 不能写 0（writeups/exploiting-puafs.md L189-192）；
  * 这里把「整 8 字节槽」读回来拼装，只有目标字段被替换，其余保留。
  */
-int mf_kwrite32(uint64_t kaddr, uint32_t value)
+static int mf_kwrite32_locked(uint64_t kaddr, uint32_t value)
 {
     if (mf_addr_guard(kaddr, 4, "mf_kwrite32") != 0) {
         return -1;
@@ -845,7 +970,7 @@ int mf_kwrite32(uint64_t kaddr, uint32_t value)
     return 0;
 }
 
-int mf_kwrite64(uint64_t kaddr, uint64_t value)
+static int mf_kwrite64_locked(uint64_t kaddr, uint64_t value)
 {
     if (mf_addr_guard(kaddr, 8, "mf_kwrite64") != 0) {
         return -1;
@@ -1248,7 +1373,7 @@ static int mf_bridge_is_kaddr(uint64_t a)
     return a >= 0xffff000000000000ULL;
 }
 
-int mf_pid_chain(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_out,
+static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_out,
                  uint64_t *pmap_out, uint64_t *root_out, char *report, size_t report_len)
 {
     uint64_t proc = 0, proc_ro = 0, task = 0, map = 0, pmap = 0;
@@ -1824,4 +1949,89 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
             out[written++] = b[i];
         }
     }
+}
+
+/* ================================================================ */
+/* 9) 串行化包装（[M5.135]）                                          */
+/* ================================================================ */
+/*
+ * 所有会碰 g_kfd / KRKW 后端的入口都从这里进：拿锁 → 原始实现 → 放锁。
+ * 加锁范围覆盖 setjmp 区域，所以断言 longjmp 回来时仍在同一线程持锁，
+ * 返回前一定会解锁（不存在"跳到别人栈帧"的路径）。
+ *
+ * 注意：mf_kwrite32_locked 内部会调 mf_kread64（公开版），mfpt_* 里会调
+ * mf_kread32 —— 都依赖递归锁，不能改成普通互斥量。
+ */
+
+int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
+{
+    mf_lock_kernel();
+    int rc = mf_kopen_locked(puaf_pages, puaf_method, kread_method, kwrite_method);
+    mf_unlock_kernel();
+    return rc;
+}
+
+void mf_kclose(void)
+{
+    mf_lock_kernel();
+    mf_kclose_locked();
+    mf_unlock_kernel();
+}
+
+int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)
+{
+    mf_lock_kernel();
+    int rc = mf_kread_locked(kaddr, uaddr, size);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
+{
+    mf_lock_kernel();
+    int rc = mf_kwrite_locked(uaddr, kaddr, size);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_kread32(uint64_t kaddr, uint32_t *out)
+{
+    mf_lock_kernel();
+    int rc = mf_kread32_locked(kaddr, out);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_kread64(uint64_t kaddr, uint64_t *out)
+{
+    mf_lock_kernel();
+    int rc = mf_kread64_locked(kaddr, out);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_kwrite32(uint64_t kaddr, uint32_t value)
+{
+    mf_lock_kernel();
+    int rc = mf_kwrite32_locked(kaddr, value);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_kwrite64(uint64_t kaddr, uint64_t value)
+{
+    mf_lock_kernel();
+    int rc = mf_kwrite64_locked(kaddr, value);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mf_pid_chain(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_out,
+                 uint64_t *pmap_out, uint64_t *root_out, char *report, size_t report_len)
+{
+    mf_lock_kernel();
+    int rc = mf_pid_chain_locked(pid, proc_out, task_out, map_out,
+                                 pmap_out, root_out, report, report_len);
+    mf_unlock_kernel();
+    return rc;
 }

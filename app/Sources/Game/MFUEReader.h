@@ -54,15 +54,13 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - 相机
 
 /// 读相机 POV。
-/// profile.cameraManager_cacheEntry == 0 时先自动扫描（见 scanCameraCacheOffset）。
+///
+/// [M5.135] 偏移已固定，不再扫描：
+///     APlayerCameraManager + 0x2D60 → FCameraCacheEntry
+///         + 0x10                   → FMinimalViewInfo POV
+///             Location@0x00 / Rotation@0x10 / FOV@0x1C
+/// FEncVector 在内存里是明文（二进制侧已证），不需要解密。
 - (BOOL)readCamera:(MFCamera *)out result:(MFUEResolveResult *)r;
-
-/// 在 CameraManager 对象里扫「CameraCacheEntry」的偏移。
-/// 判据是 FMinimalViewInfo 的布局特征（见 MFUEOffsets.h），
-/// 所以这是【自验证】的 —— 扫到的必须是合理的坐标+角度+FOV。
-/// 返回 0 表示没扫到。
-- (uint32_t)scanCameraCacheOffset:(uint64_t)cameraManager
-                           report:(NSMutableString *_Nullable)rep;
 
 #pragma mark - 敌人
 

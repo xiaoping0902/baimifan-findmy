@@ -1,13 +1,18 @@
 #import "MFUEOffsets.h"
 
 /*
- * ★ [M5.75] key 升到 v2 ★
+ * ★ [M5.135] key 升到 v3 ★
  *
- * 旧 key 里可能存着转换错误的 gworldStaticOffset（0x178B44E0）。
- * loadFromDefaults 会用存盘值覆盖默认值 —— 那样修好的默认值等于没用。
- * 换 key 让旧快照自然作废，代价只是重扫一次相机偏移。
+ * 为什么又升：v2 里存着 actor_pos（旧 AActor+0x220）、lv_data/lv_num（旧 0x1F0/0x1F8）
+ * 以及一个扫描出来的 cam_cache。loadFromDefaults 会用存盘值覆盖默认值 ——
+ * 也就是说：只改 MFUEOffsets.h 里的常量，机器上【不生效】。
+ * 换 key 让旧快照自然作废，代价只是用户需要重新跑一次（这次不再需要扫相机）。
+ *
+ * 历史：
+ *   v1 → v2  修 gworldStaticOffset 的十进制换算错误（0x178AA5E0 → 0x178B44E0）
+ *   v2 → v3  修 Actors / 坐标 / 相机三组偏移（旧值分别落在填充区与错位字段上）
  */
-static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
+static NSString *const kMFUEProfileKey = @"mf.ue.profile.v3";
 
 @implementation MFUEProfile
 
@@ -25,13 +30,13 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         _world_persistentLevel   = kMFUE_World_PersistentLevel;
         _level_actorsData        = kMFUE_Level_ActorsData;
         _level_actorsNum         = kMFUE_Level_ActorsNum;
-        _actor_worldPos          = kMFUE_Actor_WorldPos;
+        _actor_rootComponent     = kMFUE_Actor_RootComponent;
+        _scenecomponent_worldLocation = kMFUE_SceneComponent_WorldLocation;
         _actor_classID           = kMFUE_Actor_ClassID;
         _loot_level              = kMFUE_Loot_LevelOffset;
         _loot_value              = kMFUE_Loot_ValueOffset;
         _character_isAI          = kMFUE_Character_IsAI;
         _character_isDead        = kMFUE_Character_IsDead;
-        _cameraManager_cacheEntry = 0;      // 未校准 —— 用扫描自动定
     }
     return self;
 }
@@ -59,13 +64,13 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         MFUE_TAKE_U32(world_persistentLevel, @"w_level");
         MFUE_TAKE_U32(level_actorsData, @"lv_data");
         MFUE_TAKE_U32(level_actorsNum, @"lv_num");
-        MFUE_TAKE_U32(actor_worldPos, @"actor_pos");
+        MFUE_TAKE_U32(actor_rootComponent, @"actor_root");
+        MFUE_TAKE_U32(scenecomponent_worldLocation, @"scene_world");
         MFUE_TAKE_U32(actor_classID, @"actor_cls");
         MFUE_TAKE_U32(loot_level, @"loot_lv");
         MFUE_TAKE_U32(loot_value, @"loot_val");
         MFUE_TAKE_U32(character_isAI, @"char_ai");
         MFUE_TAKE_U32(character_isDead, @"char_dead");
-        MFUE_TAKE_U32(cameraManager_cacheEntry, @"cam_cache");
 
         #undef MFUE_TAKE_U64
         #undef MFUE_TAKE_U32
@@ -87,13 +92,13 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
         @"w_level":    @(self.world_persistentLevel),
         @"lv_data":    @(self.level_actorsData),
         @"lv_num":     @(self.level_actorsNum),
-        @"actor_pos":  @(self.actor_worldPos),
+        @"actor_root": @(self.actor_rootComponent),
+        @"scene_world": @(self.scenecomponent_worldLocation),
         @"actor_cls":  @(self.actor_classID),
         @"loot_lv":    @(self.loot_level),
         @"loot_val":   @(self.loot_value),
         @"char_ai":    @(self.character_isAI),
         @"char_dead":  @(self.character_isDead),
-        @"cam_cache":  @(self.cameraManager_cacheEntry),
     };
     [[NSUserDefaults standardUserDefaults] setObject:d forKey:kMFUEProfileKey];
 }
@@ -101,14 +106,16 @@ static NSString *const kMFUEProfileKey = @"mf.ue.profile.v2";
 - (NSString *)description {
     return [NSString stringWithFormat:
             @"<MFUEProfile GWorld=基址+0x%llX(=%llu) GNames=基址+0x%llX(=%llu) "
-            @"玩家链=%u/%u/%u/%u 相机=%u 敌人=%u/%u/%u 坐标=%u 类=%u 物资=%u/%u>",
+            @"玩家链=%u/%u/%u/%u 相机=%u(固定POV+0x10) "
+            @"敌人=%u/%u/%u 坐标=%u→%u 类=%u 物资=%u/%u>",
             self.gworldStaticOffset, self.gworldStaticOffset,
             self.gnamesStaticOffset, self.gnamesStaticOffset,
             self.world_gameInstance, self.gameInstance_localPlayers,
             self.localPlayer_controller, self.controller_pawn,
             self.controller_cameraManager,
             self.world_persistentLevel, self.level_actorsData,
-            self.level_actorsNum, self.actor_worldPos,
+            self.level_actorsNum, self.actor_rootComponent,
+            self.scenecomponent_worldLocation,
             self.actor_classID, self.loot_level, self.loot_value];
 }
 

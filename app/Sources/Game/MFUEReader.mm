@@ -2,6 +2,7 @@
 #import "Offsets.h"                       /* kMF_Deg2Rad / kMFBehindAngleDeg 等常量在这 */
 #import "../Read/MFReadBackend.h"
 #include <math.h>
+#include <stdlib.h>    /* calloc / free —— 宽松读要清零 */
 
 @implementation MFUEResolveResult
 - (instancetype)init {
@@ -80,17 +81,22 @@ static NSString *gUEReport = nil;
     MFUE_STEP(pawn,              r.playerController + p.controller_pawn,    @"PlayerController+0x%X → Pawn", p.controller_pawn);
     MFUE_STEP(cameraManager,     r.playerController + p.controller_cameraManager, @"PlayerController+0x%X → CameraManager", p.controller_cameraManager);
 
-    // ④ 队伍（非致命 —— 读不到不影响绘制）
+    /*
+     * ④ 队伍（非致命）—— 这条链的命名是历史遗留：
+     *     Pawn + 0x10C0     = AGPCharacterBase::TeamComp（UGPTeamComponent*），不是 PlayerState；
+     *     TeamComp + 0x108  = UGPTeamComponent::TeamID。
+     * 两跳算下来正好落在真字段上，所以功能是对的，只是名字骗人。
+     */
     r.playerState = [rb readU64:r.pawn + p.pawn_playerState];
     if (MFUEIsValidPtr(r.playerState)) {
         r.teamID = [rb readInt32:r.playerState + p.playerState_teamID];
         [r.trace addObject:[NSString stringWithFormat:
-            @"Pawn+0x%X → PlayerState = 0x%llx，+0x%X → TeamID = %d",
+            @"Pawn+0x%X → TeamComp = 0x%llx，+0x%X → TeamID = %d",
             p.pawn_playerState, r.playerState, p.playerState_teamID, r.teamID]];
     } else {
         r.teamID = 0;
         [r.trace addObject:[NSString stringWithFormat:
-            @"Pawn+0x%X → PlayerState 非法（0x%llx），队伍功能跳过",
+            @"Pawn+0x%X → TeamComp 非法（0x%llx），队伍功能跳过",
             p.pawn_playerState, r.playerState]];
     }
 
@@ -129,127 +135,50 @@ static NSString *gUEReport = nil;
 
 #pragma mark - 相机
 
-/*
- * 在 CameraManager 里扫 CameraCacheEntry 的偏移。
- *
- * 为什么需要「扫」而不是写死：
- *   mingyun 的报告里【没有这个值】—— 它只用到 CameraManager 指针，
- *   没读 POV（它靠的是投影时另外找相机）。所以这个偏移我们没有现成来源。
- *
- * 为什么扫得动：
- *   FMinimalViewInfo 的布局是 UE4 引擎级的（跨平台、跨版本基本稳定）：
- *       +0x00  FVector  Location   3×float   —— 世界坐标，量级 1e3~1e5
- *       +0x0C  FRotator Rotation   3×float   —— Pitch ∈ [-90,90]、Yaw ∈ [-180,180]
- *       +0x18  float    FOV                  —— 通常 30~120
- *   三段同时成立的偏移极少 → 这个判据是【自验证】的。
- *
- * 代价：只读 CameraManager 起始的 0x2000 字节（一次读），不会伤设备。
- */
-- (uint32_t)scanCameraCacheOffset:(uint64_t)cameraManager
-                           report:(NSMutableString *)rep {
-    const uint32_t kScanSize = 0x2000;
-    const uint32_t kStep     = 4;          // UE 结构体按 4/8 对齐，4 步进不会漏
-
-    if (!MFUEIsValidPtr(cameraManager)) {
-        if (rep) [rep appendString:@"  ✗ CameraManager 指针非法，跳过扫描\n"];
-        return 0;
-    }
-
-    MFReadBackend *rb = [MFReadBackend shared];
-    uint8_t *buf = (uint8_t *)malloc(kScanSize);
-    if (buf == NULL) return 0;
-    BOOL ok = [rb readRemote:cameraManager into:buf size:kScanSize];
-    if (!ok) {
-        free(buf);
-        if (rep) [rep appendString:@"  ✗ 读 CameraManager 失败\n"];
-        return 0;
-    }
-
-    uint32_t hits = 0;
-    uint32_t first = 0;
-    for (uint32_t off = 0; off + kMFUE_POV_Size <= kScanSize; off += kStep) {
-        float *f = (float *)(buf + off);
-        float lx = f[0], ly = f[1], lz = f[2];
-        float pitch = f[3], yaw = f[4], roll = f[5];
-        float fov = f[6];
-
-        // 坐标段：非零、有限、量级合理
-        if (!(fabsf(lx) > 1.0f && fabsf(lx) < 1e6f)) continue;
-        if (!(fabsf(ly) > 1.0f && fabsf(ly) < 1e6f)) continue;
-        if (!(fabsf(lz) > 1.0f && fabsf(lz) < 1e6f)) continue;
-        // 角度段：Pitch 必须落在 ±90，Yaw 必须在 ±180 —— 这两条最有辨识度
-        if (!(pitch >= -90.5f && pitch <= 90.5f)) continue;
-        if (!(yaw   >= -180.5f && yaw  <= 180.5f)) continue;
-        if (!(roll  >= -180.5f && roll <= 180.5f)) continue;
-        // FOV
-        if (!(fov >= kMFUE_POV_FovMin && fov <= kMFUE_POV_FovMax)) continue;
-
-        hits++;
-        if (first == 0) {
-            first = off;
-            if (rep) [rep appendFormat:
-                @"  ✓ 候选 @ +0x%X : loc(%.1f, %.1f, %.1f) rot(%.2f, %.2f, %.2f) fov=%.1f\n",
-                off, lx, ly, lz, pitch, yaw, roll, fov];
-        }
-    }
-    free(buf);
-
-    if (rep) [rep appendFormat:@"  扫描完成：%u 个候选（步进 %u 字节，范围 0x%X）\n",
-              hits, kStep, kScanSize];
-
-    if (hits == 0) return 0;
-
-    /* 多于一个候选时：取第一个。
-     * 理由：CameraCacheEntry 在 APlayerCameraManager 里通常排得很靠前，
-     *      而且它的三段时间全部命中判据，后面偶然命中的概率低于它。
-     * 若真机验证不对，改这里或用 report 里的候选列表手工指定。 */
-    if (hits > 1 && rep) [rep appendString:@"  ⚠ 多个候选，取第一个（可用诊断报告人工核对）\n"];
-    return first;
-}
-
 - (BOOL)readCamera:(MFCamera *)out result:(MFUEResolveResult *)r {
-    MFUEProfile *p = self.profile;
     MFReadBackend *rb = [MFReadBackend shared];
 
     if (!MFUEIsValidPtr(r.cameraManager)) return NO;
 
-    uint32_t cacheOff = p.cameraManager_cacheEntry;
-    if (cacheOff == 0) {
-        NSMutableString *rep = [NSMutableString stringWithString:@"[相机偏移扫描]\n"];
-        cacheOff = [self scanCameraCacheOffset:r.cameraManager report:rep];
-        NSLog(@"[MF][UE] %@", rep);
-        if (cacheOff == 0) return NO;
-        p.cameraManager_cacheEntry = cacheOff;
-        [p saveToDefaults];          // 扫到就记下来，下次不用重扫
+    /*
+     * [M5.135] 固定偏移，不再扫描。
+     *
+     *     APlayerCameraManager + 0x2D60  FCameraCacheEntry
+     *         + 0x10                    FMinimalViewInfo POV
+     *             +0x00  Location  (FEncVector：X,Y,Z,handler)
+     *             +0x10  Rotation  (Pitch,Yaw,Roll)
+     *             +0x1C  FOV
+     *
+     * 一次 48 字节读够用：readCameraStruct 返回 12 个 float，正好覆盖
+     * Location(4) + Rotation(3) + FOV + DesiredFOV + 正交参数。
+     * FEncVector 的 handler 在 f[3]，数值本身是明文（DecVector 只做原样拷贝）。
+     */
+    const uint64_t pov = r.cameraManager + kMFUE_CameraManager_CacheEntry
+                                      + kMFUE_CameraCache_POV;
+    float f[12] = {0};
+    if (![rb readCameraStruct:pov out:f]) {
+        NSLog(@"[MF][UE] 相机读失败 pov=0x%llx（CameraManager=0x%llx）",
+              (unsigned long long)pov, (unsigned long long)r.cameraManager);
+        return NO;
     }
 
-    uint64_t povAddr = r.cameraManager + cacheOff;
-    // FCameraCacheEntry 头 4 字节是 float TimeStamp，所以要再跳一层
-    // 已知 mingyun 未提供该值 → 先按「cacheOff 直接就是 POV」试，
-    // 失败再试 +0x4（TimeStamp 在前）。
-    for (int shift = 0; shift <= 1; shift++) {
-        uint64_t a = povAddr + (shift ? 4 : 0);
-        MFCamera c = {0};
-        if (![rb readRemote:a + kMFUE_POV_Location into:&c.x size:4]) continue;
-        [rb readRemote:a + kMFUE_POV_Location + 4  into:&c.y size:4];
-        [rb readRemote:a + kMFUE_POV_Location + 8  into:&c.z size:4];
-        [rb readRemote:a + kMFUE_POV_Rotation      into:&c.pitch size:4];
-        [rb readRemote:a + kMFUE_POV_Rotation + 4  into:&c.yaw   size:4];
-        [rb readRemote:a + kMFUE_POV_Rotation + 8  into:&c.roll  size:4];
-        [rb readRemote:a + kMFUE_POV_FOV           into:&c.fov   size:4];
+    MFCamera c = {0};
+    c.x = f[0]; c.y = f[1]; c.z = f[2];                 /* f[3] = EncHandler，忽略 */
+    c.pitch = f[4]; c.yaw = f[5]; c.roll = f[6];
+    c.fov = f[7];
 
-        // 校验：过不了就当这次 shift 不对
-        if (!(fabsf(c.x) > 1.0f && fabsf(c.x) < 1e6f)) continue;
-        if (!(c.fov >= kMFUE_POV_FovMin && c.fov <= kMFUE_POV_FovMax)) continue;
-        if (!(c.pitch >= -90.5f && c.pitch <= 90.5f)) continue;
+    /* 校验：坐标必须有限且量级合理；角度与 FOV 必须落在物理范围内。
+     * 读错页时通常得到 0 或垃圾，这两组判据足以拒掉。 */
+    if (!isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z)) return NO;
+    if (fabsf(c.x) > 1e6f || fabsf(c.y) > 1e6f || fabsf(c.z) > 1e6f) return NO;
+    if (!(c.fov >= kMFUE_POV_FovMin && c.fov <= kMFUE_POV_FovMax)) return NO;
+    if (!(c.pitch >= -90.5f && c.pitch <= 90.5f)) return NO;
+    if (!(c.yaw >= -180.5f && c.yaw <= 180.5f)) return NO;
 
-        if (out) *out = c;
-        NSLog(@"[MF][UE] 相机: cacheOff=0x%X shift=%d loc(%.1f,%.1f,%.1f) "
-              @"rot(%.2f,%.2f,%.2f) fov=%.1f",
-              cacheOff, shift, c.x, c.y, c.z, c.pitch, c.yaw, c.roll, c.fov);
-        return YES;
-    }
-    return NO;
+    if (out) *out = c;
+    NSLog(@"[MF][UE] 相机: loc(%.1f,%.1f,%.1f) rot(%.2f,%.2f,%.2f) fov=%.1f",
+          c.x, c.y, c.z, c.pitch, c.yaw, c.roll, c.fov);
+    return YES;
 }
 
 #pragma mark - 敌人
@@ -267,21 +196,41 @@ static NSString *gUEReport = nil;
      *   mingyun 原文：sw533...(sGamePid, v15, vActors, 8 * v16);
      *   一次系统调用拿 N 个指针，比逐个读快几十倍 —— 也大幅减少读取痕迹。
      */
+    /*
+     * [M5.135] 宽松读：指针数组可能跨到未映射页，旧写法一处失败就整批归零。
+     * calloc 先清零 —— 没读到的槽保持 0，后面 MFUEIsValidPtr 会自然跳过。
+     */
     size_t bytes = (size_t)r.actorsNum * 8;
-    uint64_t *ptrs = (uint64_t *)malloc(bytes);
+    uint64_t *ptrs = (uint64_t *)calloc((size_t)r.actorsNum, sizeof(uint64_t));
     if (ptrs == NULL) return out;
-    if (![rb readRemote:r.actorsData into:ptrs size:bytes]) {
+    size_t got = [rb readRemotePartial:r.actorsData into:ptrs size:bytes];
+    int usable = (int)(got / sizeof(uint64_t));
+    if (usable <= 0) {
         free(ptrs);
         return out;
     }
 
-    for (int i = 0; i < r.actorsNum; i++) {
+    for (int i = 0; i < usable; i++) {
         @autoreleasepool {
             uint64_t actor = ptrs[i];
             if (!MFUEIsValidPtr(actor)) continue;
 
+            /*
+             * [M5.135] 坐标必须两跳，而且要用世界坐标：
+             *     Actor + 0x180        → RootComponent
+             *     RootComponent + 0x220 → ComponentToWorld.Translation（世界坐标）
+             *
+             * 0x220 不是猜的：USceneComponent::K2_GetComponentLocation 的 native
+             * 实现就是先取 &ComponentToWorld（+0x210）、再读 +0x10 的 Translation。
+             *
+             * 旧写法 `actor + 0x220` 少跳了 RootComponent —— 那个偏移在 AActor 里
+             * 落在 Pad_1FA[0x76] 的填充区，所以永远读到 0。
+             */
+            uint64_t rootComp = 0;
+            if (![rb readU64:actor + p.actor_rootComponent out:&rootComp]) continue;
+            if (!MFUEIsValidPtr(rootComp)) continue;
             float pos[3] = {0};
-            if (![rb readFloat3:actor + p.actor_worldPos out:pos]) continue;
+            if (![rb readFloat3:rootComp + p.scenecomponent_worldLocation out:pos]) continue;
 
             // 合法性判据（对齐原文 fabsf(x) <= 10000000.0f）
             if (!(fabsf(pos[0]) <= kMFUE_PosAbsMax)) continue;
@@ -336,7 +285,7 @@ static NSString *gUEReport = nil;
             @"· 「模块基址为 0」→ 先做「模块定位」\n"
             @"· 「GWorld 不是合法指针」→ 静态偏移 0x178B44E0 随版本失效，需重取\n"
             @"· 「ULevel 非法」→ PersistentLevel 偏移失效\n"
-            @"· 「Actors 数量异常」→ 可能读到的是别的结构\n"];
+            @"· 「Actors 数量异常」→ 现在读的是 ULevel+0x98/+0xA0；先确认 level 真是 ULevel\n"];
     } else {
         [s appendFormat:
             @"✓ 全链打通\n"
@@ -351,14 +300,13 @@ static NSString *gUEReport = nil;
         // 顺手试一下相机
         MFCamera cam = {0};
         NSMutableString *crep = [NSMutableString string];
-        [crep appendFormat:@"\n相机：cacheEntry 偏移 = 0x%X%@\n",
-            self.profile.cameraManager_cacheEntry,
-            self.profile.cameraManager_cacheEntry ? @"" : @"（未校准，将自动扫描）"];
+        [crep appendFormat:@"\n相机：固定偏移 CacheEntry=0x%X  POV=+0x%X\n",
+            kMFUE_CameraManager_CacheEntry, kMFUE_CameraCache_POV];
         if ([self readCamera:&cam result:r]) {
             [crep appendFormat:@"✓ loc(%.1f, %.1f, %.1f)  rot(%.2f, %.2f, %.2f)  fov=%.1f\n",
                 cam.x, cam.y, cam.z, cam.pitch, cam.yaw, cam.roll, cam.fov];
         } else {
-            [crep appendString:@"⚠ 相机没读出来 —— 先手动跑一次「相机偏移扫描」看候选列表\n"];
+            [crep appendString:@"⚠ 相机没读出来 —— 先确认 CameraManager 有效、POV 所在页已映射\n"];
         }
         [s appendString:crep];
     }

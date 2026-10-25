@@ -167,8 +167,9 @@ extern char **environ;
     // ---------- 1 主线（只放真正要点的）----------
     MFSection *s1 = [[MFSection alloc] init];
     s1.header = @"主线";
-    s1.footer = @"顺序：开游戏 → 点「启动内核」→ 进进程页自动连上 → 启动悬浮窗。"
-                @"内核是唯一可走的路（task_for_pid 已被 PPL 封死）。";
+    s1.footer = @"顺序：先点「启动悬浮窗」（内核在悬浮窗进程里打开）→ 再打开游戏，"
+                @"悬浮窗会自动接上。主 App 的「启动内核」只用于诊断/校准 —— "
+                @"两个进程不能同时持有内核（M5.135 起会直接拒绝）。";
     /*
      * ★ [M5.118] 精简：这一屏只留四个按钮。
      *
@@ -180,7 +181,7 @@ extern char **environ;
      * 必然 kr=0x5（PPL 按 CS_HARD 拒），点了只会得到一次失败 —— 留着只会误导。
      */
     [s1.rows addObject:[self actionRow:@"启动内核"
-                                detail:@"内核 + 进程自动连接，都在下一页"
+                                detail:@"诊断/校准用；正常流程由悬浮窗开（两者互斥）"
                                 action:@"actStartKernel"]];
     [s1.rows addObject:[self actionRow:(self.hudStopping ? @"正在结束悬浮窗" :
             (self.hudStarting ? @"取消悬浮窗启动" : (hudUp ? @"结束悬浮窗" : @"启动悬浮窗")))

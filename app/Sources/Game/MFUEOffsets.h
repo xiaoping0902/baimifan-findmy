@@ -12,19 +12,20 @@
 //    · GetEnemyThread          @ 0x100010c0c   → GWorld 定位 + 敌人遍历
 //    · ESPReadMeshWorldPos     @ 0x1000118ac   → 世界坐标
 //
-//  ── 交叉验证 ──
+//  ── 交叉验证（★ 逐条用 SDK 复核过，下面标了真伪）──
 //
 //  白米饭的「根指针链」是：0x98 → 0x30 → 0x408 → 0x3A0 → 0x10C0 → 0x108 → 0xF8
 //  对照 mingyun：
-//      0x30   = ULocalPlayer + 0x30      → PlayerController       ✅
-//      0x408  = PlayerController + 0x408 → PlayerCameraManager    ✅
-//      0x3A0  = PlayerController + 0x3A0 → AcknowledgedPawn       ✅
-//      0x10C0 = Pawn + 0x10C0            → PlayerState            ✅
-//      0x108  = PlayerState + 0x108      → 阵营/队伍 ID           ✅
-//      0xF8   = UWorld + 0xF8            → PersistentLevel        ✅
-//      0x220  = AActor + 0x220           → FVector 世界坐标       ✅
+//      0x30   = UPlayer + 0x30            → PlayerController       ✅
+//      0x408  = APlayerController + 0x408 → PlayerCameraManager    ✅
+//      0x3A0  = AController + 0x3A0       → Pawn                   ✅（不是 AcknowledgedPawn，那是 0x3F0，两个都在）
+//      0x10C0 = AGPCharacterBase + 0x10C0 → UGPTeamComponent*      ⚠️ 名字叫 PlayerState 是错的
+//      0x108  = UGPTeamComponent + 0x108  → TeamID                 ✅（所以这条两跳的算术是对的）
+//      0xF8   = UWorld + 0xF8             → PersistentLevel        ✅
+//      0x220  = AActor + 0x220            → ???                    ❌ 这是 Pad_1FA[0x76] 的填充区
 //
-//  **7 个偏移全部命中。** 两个作者用的是同一套 UE4 偏移。
+//  所以："7 个全中" 是错觉 —— 前 6 个跳数成立，最后那个坐标偏移落在空档里，
+//  读出来恒为 0。坐标必须走 AActor+0x180 → USceneComponent+0x168（见下方常量）。
 //
 //  ── 版本风险（必须记住）──
 //
@@ -206,28 +207,87 @@ static const uint32_t kMFUE_Controller_Pawn = 928;          // 0x3A0
 static const uint32_t kMFUE_Controller_CameraManager = 1032;// 0x408
 
 /// APawn → PlayerState
-/// 原文：Read<u64>(gCharacter + 4288)
-static const uint32_t kMFUE_Pawn_PlayerState = 4288;        // 0x10C0
+/// ⚠ 名字是历史遗留，值是对的。
+/// SDK 里 AGPCharacterBase + 0x10C0 是 `UGPTeamComponent* TeamComp`，**不是 PlayerState**；
+/// 下一步 +0x108 才是 `UGPTeamComponent::TeamID`。两跳算下来正好命中真字段，
+/// 所以队伍功能一直是好的 —— 只是"Pawn → PlayerState"这个说法会误导后来人。
+static const uint32_t kMFUE_Pawn_PlayerState = 4288;        // 0x10C0 → TeamComp
 
-/// PlayerState → 阵营/队伍 ID（int）
-/// 原文：Read<int>(v11 + 264)
+/// UGPTeamComponent → 阵营/队伍 ID（int）
+/// SDK：class UGPTeamComponent   +0x0108  int32 TeamID
 static const uint32_t kMFUE_PlayerState_TeamID = 264;       // 0x108
 
 /// UWorld → PersistentLevel（ULevel*）
-/// 原文：Read<u64>(gGWorld + 248)
-static const uint32_t kMFUE_World_PersistentLevel = 248;    // 0xF8
+/// SDK：class UWorld   +0x00F8  class ULevel* PersistentLevel
+static const uint32_t kMFUE_World_PersistentLevel = 0x00F8;
 
-/// ULevel → Actors 数组数据指针（TArray::Data）
-/// 原文：Read<u64>(v13 + 496)
-static const uint32_t kMFUE_Level_ActorsData = 496;         // 0x1F0
+/*
+ * ULevel → Actors（TArray<AActor*>）
+ *
+ * ★ [M5.135] 从 0x1F0 / 0x1F8 改成 0x98 / 0xA0。旧值不是"过期"，是【读错了结构体位置】。
+ *
+ * 证据（MobileDumper-7，游戏 1.201.37117）：
+ *     class alignas(0x10) ULevel final : public UObject
+ *         +0x0098  TArray<class AActor*> Actors    // THIS IS THE ARRAY YOU'RE LOOKING FOR!
+ *         +0x00A8  class UWorld* OwningWorld
+ *         +0x01E5  uint8 Pad_1E5[0x5B]             // 0x1E5 .. 0x240 是填充区
+ *         +0x0240  class AWorldSettings* WorldSettings
+ *
+ * 旧的 0x1F0 / 0x1F8 正好落在 Pad_1E5 里 —— 读到的不是字段，是被清零的填充字节。
+ * 所以它不会崩、也不会报"读失败"，只会稳定拿到 0，然后在日志里伪装成
+ * 「Actors.Data 非法 / Actors 数量异常」，把人往"偏移随版本失效"的方向带。
+ */
+static const uint32_t kMFUE_Level_ActorsData = 0x0098;      // TArray::Data
+static const uint32_t kMFUE_Level_ActorsNum  = 0x00A0;      // TArray::Num（int32）
 
-/// ULevel → Actors 数量（int, TArray::Num）
-/// 原文：Read<int>(v14 + 504)
-static const uint32_t kMFUE_Level_ActorsNum  = 504;         // 0x1F8
+/*
+ * Actor 的世界坐标必须两跳，不能直接从 AActor 上抠。
+ *
+ * 证据（Engine_classes.hpp）：
+ *     AActor           +0x0180  class USceneComponent* RootComponent
+ *     USceneComponent  +0x0168  struct FEncVector RelativeLocation (0x10)
+ *     USceneComponent  +0x0178  struct FRotator  RelativeRotation  (0x0C)
+ *     USceneComponent  +0x0184  struct FVector   RelativeScale3D   (0x0C)
+ *
+ * 旧的 0x220 落在 AActor 的 Pad_1FA[0x76]（0x1FA .. 0x270）填充区里 —— 同样是空档。
+ *
+ * ★ 关于 FEncVector 到底加不加密：二进制侧已经证明【内存里就是明文】。
+ *     DecVector 的 NativeExecOffset = 0x109DFA15C，其取值的实体在 0x109880BA8：
+ *         ldr   q0, [x0]        ; 一次读 16 字节
+ *         mov   s1, v0.s[1]     ; Y
+ *         mov   s2, v0.s[2]     ; Z
+ *         ret                   ; X 已在 s0
+ *     即把 X/Y/Z 原样返回；EncHandler(+0xC) 只出现在一条 bDynamic 通知分支里
+ *     （ldrb [sp,#0xF] / tbnz bit0 / blr 全局回调），不参与任何数值变换。
+ *     EncVector（0x10FCC599C）同样是原样拷贝 12 字节。
+ *   所以 +0x168 的头 12 个字节可以直接当三个 float 用，不需要解密、也不需要判 handler。
+ */
+static const uint32_t kMFUE_Actor_RootComponent = 0x0180;   // AActor → USceneComponent*
 
-/// AActor → 世界坐标（FVector = 3 × float = 12 字节）
-/// 原文：sw533...（pid, actor + 544, &v7, 12）
-static const uint32_t kMFUE_Actor_WorldPos   = 544;         // 0x220
+/*
+ * 世界坐标 = RootComponent + 0x220 = ComponentToWorld.Translation
+ *
+ * ★ 这不是估的，是二进制里 USceneComponent::K2_GetComponentLocation 自己走的路：
+ *     thunk 0x109E13174 → 实现 0x109790348
+ *         bl  GetComponentTransform()          // 0x107C06368 → 0x10110916C
+ *         ldp s0, s1, [x0, #0x10]              // Translation.X / .Y
+ *         ldr s2,     [x0, #0x18]              // Translation.Z
+ *     而 GetComponentTransform 的存根只有两条指令：
+ *         add x0, x0, #0x210 ; ret
+ *   → ComponentToWorld 在 USceneComponent+0x210
+ *   → FTransform.Translation 在 +0x10 → 合计 **Comp+0x220**
+ *
+ * 为什么不再用 RelativeLocation（0x168）：
+ *   那是【局部坐标】。RootComponent 没挂父级时才碰巧等于世界坐标；一旦挂在
+ *   载具 / 挂点下面，读出来就是零点附近的小偏移 —— 屏幕上直接画错位置。
+ *
+ * 顺带解释一个历史疑点：旧表里的 `actor + 0x220` 数值上正好等于
+ * `RootComponent + 0x220` —— 当年是【少跳了 RootComponent 这一跳】，不是偏移算错。
+ */
+static const uint32_t kMFUE_SceneComponent_WorldLocation = 0x0220;
+
+/// 备选（局部坐标，仅当 RootComponent 未挂接时可用；留作对照）
+static const uint32_t kMFUE_SceneComponent_RelativeLocation = 0x0168;
 
 #pragma mark - 合法性判据（对齐原实现的错误处理）
 
@@ -248,15 +308,34 @@ static inline BOOL MFUEIsValidPtr(uint64_t p) {
     return (p >= kMFUE_PtrMin && p < kMFUE_PtrMax);
 }
 
-#pragma mark - FMinimalViewInfo（UE4 标准布局，跨平台一致）
+#pragma mark - 相机 POV（固定偏移，不再扫描）
 
-/// 相机 POV 结构：Location@0x0 / Rotation@0xC / FOV@0x18
-static const uint32_t kMFUE_POV_Location = 0x00;   // FVector 3×float
-static const uint32_t kMFUE_POV_Rotation = 0x0C;   // FRotator 3×float（Pitch/Yaw/Roll）
-static const uint32_t kMFUE_POV_FOV      = 0x18;   // float
-static const uint32_t kMFUE_POV_Size     = 0x1C;
+/*
+ * ★ [M5.135] 相机改成固定偏移，并把整条链算清楚。
+ *
+ * 证据（Engine_classes.hpp / Engine_structs.hpp）：
+ *     APlayerCameraManager + 0x2D60  FCameraCacheEntry CameraCachePrivate   (0xA50)
+ *     APlayerCameraManager + 0x37B0  FCameraCacheEntry LastFrameCameraCachePrivate
+ *     FCameraCacheEntry:   float Timestamp @0x00, uint8 Pad_4[0x0C], FMinimalViewInfo POV @0x10
+ *     FMinimalViewInfo:    FEncVector Location @0x00 (0x10)
+ *                          FRotator  Rotation @0x10 (Pitch/Yaw/Roll)
+ *                          float     FOV      @0x1C
+ *
+ * 旧常量是 Rotation@0x0C / FOV@0x18 —— 错位的根因是：这个 build 的 Location 是
+ * 16 字节的 FEncVector，不是 12 字节的 FVector，所以后面所有字段整体后移 4 字节。
+ * 旧代码照 12 字节排，读到的 pitch 其实是 handler 槽被当 float，fov 其实是 Roll。
+ *
+ * 也正因为偏移是确定的，`scanCameraCacheOffset:` 那套"扫 0x2000 字节取第一个命中"
+ * 全部删掉：它判据太松、会误命中，而且一旦命中就写进 NSUserDefaults 永久生效。
+ */
+static const uint32_t kMFUE_CameraManager_CacheEntry = 0x2D60;
+static const uint32_t kMFUE_CameraCache_POV          = 0x10;
+static const uint32_t kMFUE_POV_Location = 0x00;   // FEncVector：X/Y/Z + handler
+static const uint32_t kMFUE_POV_Rotation = 0x10;   // FRotator 3×float（Pitch/Yaw/Roll）
+static const uint32_t kMFUE_POV_FOV      = 0x1C;   // float
+static const uint32_t kMFUE_POV_Size     = 0x20;   // Location + Rotation + FOV
 
-/// FMinimalViewInfo 的合法性判据（用于「在 CameraManager 里扫 CameraCache 偏移」）
+/// POV 的合法性判据（readCamera 用它拒掉读错页的那一帧）
 static const float kMFUE_POV_FovMin = 20.0f;       // 视场角下限
 static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 
@@ -279,7 +358,10 @@ static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 @property (nonatomic, assign) uint32_t world_persistentLevel;
 @property (nonatomic, assign) uint32_t level_actorsData;
 @property (nonatomic, assign) uint32_t level_actorsNum;
-@property (nonatomic, assign) uint32_t actor_worldPos;
+/// Actor → USceneComponent*（RootComponent）。世界坐标要走它再跳到
+/// scenecomponent_worldLocation（ComponentToWorld.Translation），不能直接读 Actor。
+@property (nonatomic, assign) uint32_t actor_rootComponent;
+@property (nonatomic, assign) uint32_t scenecomponent_worldLocation;
 
 /// Actor → 类 ID（区分人物 / 物资 / 盒子）
 @property (nonatomic, assign) uint32_t actor_classID;
@@ -290,11 +372,6 @@ static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
 /// 角色字段（AGPCharacterBase，Dumper-7 SDK 1.201.37117）
 @property (nonatomic, assign) uint32_t character_isAI;      // bool bIsPlayerAI
 @property (nonatomic, assign) uint32_t character_isDead;    // bool LastIsDead
-
-/// CameraManager → CameraCacheEntry（FCameraCacheEntry）
-/// ★ mingyun 的报告里【没有这个值】—— 它只用到 CameraManager 指针，没读 POV。
-///   默认为 0，表示「未校准」；此时用 scanCameraCacheOffset: 自动扫描。
-@property (nonatomic, assign) uint32_t cameraManager_cacheEntry;
 
 /// 从 Documents 载入/保存运行时可改值
 + (instancetype)loadFromDefaults;

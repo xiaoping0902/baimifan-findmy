@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <time.h>      /* clock_gettime —— v2p 缓存 TTL */
 
 #define MFP_KADDR_MIN   0xffff000000000000ULL
 #define MFP_MASK_16K    0x0000ffffffffc000ULL
@@ -102,7 +103,27 @@ typedef struct {
     uint64_t root;      /* 0 = 空槽 */
     uint64_t vpage;     /* va & ~0x3fff */
     uint64_t pbase;     /* 物理页基址 */
+    uint32_t stamp;     /* [M5.135] 填充时刻（秒）；0 = 空槽 */
 } mfp_v2p_entry;
+
+/*
+ * [M5.135] 缓存 TTL。
+ *
+ * 原来条目只要 root 不变就永久有效 —— 但游戏会释放/重映射页面（关卡切换、
+ * 对象销毁）。页面被回收之后，旧条目仍会把 VA 翻到【那块物理页现在的住户】上，
+ * 读出来的就是别人的数据：幽灵框、位置乱跳，而且不报错。
+ *
+ * 给每条加一个时间戳，超过 TTL 就当未命中重新走页表。3 秒是折中：
+ * 一次遍历 3 次 kread，重走代价可接受；同时把"读到已回收页面"的窗口压到 3 秒内。
+ */
+#define MFP_V2P_TTL_SECONDS 3
+
+static uint32_t mfp_now_seconds(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint32_t)ts.tv_sec;
+}
 
 static mfp_v2p_entry g_v2p[MFP_V2P_SLOTS];
 static uint64_t g_v2p_root;
@@ -136,7 +157,7 @@ void mfpt_cache_reset(void)
     mfp_v2p_reset(0);
 }
 
-int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
+static int mfpt_translate_locked(uint64_t root, uint64_t va, uint64_t *pa)
 {
     uint64_t tt = root;
     uint64_t tte = 0;
@@ -153,7 +174,10 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
     {
         uint64_t vpage = va & ~(MFP_PAGE_SIZE - 1ULL);
         uint32_t slot = mfp_v2p_slot(root, vpage);
-        if (g_v2p[slot].root == root && g_v2p[slot].vpage == vpage) {
+        uint32_t now = mfp_now_seconds();
+        int fresh = (g_v2p[slot].stamp != 0 &&
+                     (uint32_t)(now - g_v2p[slot].stamp) <= MFP_V2P_TTL_SECONDS);
+        if (g_v2p[slot].root == root && g_v2p[slot].vpage == vpage && fresh) {
             g_v2p_hit++;
             *pa = g_v2p[slot].pbase + (va & (MFP_PAGE_SIZE - 1ULL));
             return 0;
@@ -186,10 +210,12 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
 
     {
         uint64_t pbase = tte & MFP_MASK_16K;
-        uint32_t slot = mfp_v2p_slot(root, va & ~(MFP_PAGE_SIZE - 1ULL));
+        uint64_t vpage = va & ~(MFP_PAGE_SIZE - 1ULL);
+        uint32_t slot = mfp_v2p_slot(root, vpage);
         g_v2p[slot].root = root;
-        g_v2p[slot].vpage = va & ~(MFP_PAGE_SIZE - 1ULL);
+        g_v2p[slot].vpage = vpage;
         g_v2p[slot].pbase = pbase;
+        g_v2p[slot].stamp = mfp_now_seconds();
         *pa = pbase | (va & MFP_L3_OFFMASK);
     }
     return 0;
@@ -281,7 +307,7 @@ int mfpt_walk_trace(uint64_t root, uint64_t va, char *buf, size_t cap)
 #undef MFP_EMIT
 }
 
-int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out){
+static int mfpt_probe32_locked(uint64_t root, uint64_t va, uint32_t *out){
     uint64_t pa = 0, kva = 0;
     uint32_t v = 0;
 
@@ -308,7 +334,7 @@ int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out){
  * own L1/L2/L3 tables. Bounded work: we stop at the first present L3 entry, and
  * we never probe (read) an unmapped page.
  */
-int mfpt_lowest_mapped_page(uint64_t root, uint64_t start, uint64_t *va_out)
+static int mfpt_lowest_mapped_page_locked(uint64_t root, uint64_t start, uint64_t *va_out)
 {
     uint64_t i1_first, i2_first;
 
@@ -364,11 +390,26 @@ int mfpt_lowest_mapped_page(uint64_t root, uint64_t start, uint64_t *va_out)
     return -3;
 }
 
-int mfpt_read(uint64_t root, uint64_t va, void *dst, size_t n){
-
+/*
+ * 逐页读的实现（[M5.135] 改成"能读多少读多少"）。
+ *
+ * 以前任何一页失败就 return，前面读到的字节全部作废 —— 于是
+ * "读一个 600 项的 Actor 指针数组"只要跨到一页没映射的就整批归零。
+ *
+ * 现在：失败就停，但把已经读到的长度写进 *got。
+ *   - 返回 0  → 读到了东西（got 可能小于 n）
+ *   - 返回 -2 → 参数非法
+ *   - 返回 -3 → 一个字节都没读到
+ *
+ * 严格版（mfpt_read）自己再补一刀：got != n 就算失败，保持老语义；
+ * 宽松版（mfpt_read_partial）把长度的裁量权交给调用方。
+ */
+static int mfpt_read_inner(uint64_t root, uint64_t va, void *dst, size_t n, size_t *got)
+{
     unsigned char *p = (unsigned char *)dst;
     size_t done = 0;
 
+    if (got) *got = 0;
     if (!dst || n == 0) return -2;
 
     while (done < n) {
@@ -381,24 +422,96 @@ int mfpt_read(uint64_t root, uint64_t va, void *dst, size_t n){
         if (take > n - done) take = n - done;
         if (mfpt_translate(root, page, &pa) != 0) {
             g_mfpt_failed++;
-            return -3;
+            break;
         }
         if (mfp_phys_to_kva(pa, &kva) != 0) {
             g_mfpt_failed++;
-            return -4;
+            break;
         }
         /* 4 bytes at a time: that is all the sem_open primitive guarantees. */
+        int page_ok = 1;
         for (size_t i = 0; i < take; i += 4) {
             uint32_t v = 0;
             size_t copy = take - i < 4 ? take - i : 4;
             if (mfp_k32(kva + off + i, &v) != 0) {
                 g_mfpt_failed++;
-                return -5;
+                page_ok = 0;
+                break;
             }
             memcpy(p + done + i, &v, copy);
         }
+        if (!page_ok) break;
         g_mfpt_translated++;
         done += take;
     }
-    return 0;
+
+    if (got) *got = done;
+    return done > 0 ? 0 : -3;
+}
+
+static int mfpt_read_locked(uint64_t root, uint64_t va, void *dst, size_t n)
+{
+    size_t got = 0;
+    int rc = mfpt_read_inner(root, va, dst, n, &got);
+    if (rc != 0) return rc;
+    return (got == n) ? 0 : -3;
+}
+
+static int mfpt_read_partial_locked(uint64_t root, uint64_t va, void *dst, size_t n, size_t *got)
+{
+    return mfpt_read_inner(root, va, dst, n, got);
+}
+
+/* ================================================================ */
+/* 串行化包装（[M5.135]）                                             */
+/* ================================================================ */
+/*
+ * 一次翻译 = 3 次 kread，一次 mfpt_read 还要再读页面内容。这些步骤必须
+ * 整体原子：
+ *   · 中途被 mf_kclose 插进来 → 读到已释放的 kfd 状态；
+ *   · 被另一条线程的翻译插进来 → v2p 缓存可能读到"root/vpage 已写、pbase
+ *     还没写"的半成品条目，返回错误的物理页。
+ *
+ * 锁是递归的（见 MFKernelBridge.m），所以这里的 locked 版本内部继续调
+ * mf_kread32 / mf_phys_to_kv 不会自锁。
+ */
+
+int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
+{
+    mf_lock_kernel();
+    int rc = mfpt_translate_locked(root, va, pa);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out)
+{
+    mf_lock_kernel();
+    int rc = mfpt_probe32_locked(root, va, out);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mfpt_lowest_mapped_page(uint64_t root, uint64_t start, uint64_t *va_out)
+{
+    mf_lock_kernel();
+    int rc = mfpt_lowest_mapped_page_locked(root, start, va_out);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mfpt_read(uint64_t root, uint64_t va, void *dst, size_t n)
+{
+    mf_lock_kernel();
+    int rc = mfpt_read_locked(root, va, dst, n);
+    mf_unlock_kernel();
+    return rc;
+}
+
+int mfpt_read_partial(uint64_t root, uint64_t va, void *dst, size_t n, size_t *got)
+{
+    mf_lock_kernel();
+    int rc = mfpt_read_partial_locked(root, va, dst, n, got);
+    mf_unlock_kernel();
+    return rc;
 }

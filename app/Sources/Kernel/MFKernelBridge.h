@@ -99,6 +99,14 @@ extern "C" {
  * 打开内核读写通道。
  * 成功返回 0；失败返回负值（详细原因见 mf_last_error()）。
  *
+ * [M5.135] 失败码：
+ *    -1  kopen 内部失败（断言/参数/驱动层）
+ *    -2  本进程已经打开
+ *    -3  参数非法（puaf_pages / puaf_method / kread / kwrite）
+ *    -4  另一个进程已持有内核（跨进程 flock 哨兵）。
+ *        这个码表示【内核一个字节都没动】，调用方可以放心重试，
+ *        不要像 -1 那样把进程锁死。
+ *
  * 与上游 kopen() 的关键差别：上游断言失败会 sleep(30) + exit(1)，
  * 让 App 表现为「卡 30 秒后闪退」。本实现把断言转换成
  * longjmp 回到这里，于是变成「返回错误码 + 错误字符串」，进程存活。
@@ -219,6 +227,22 @@ uint64_t mf_phys_to_kv(uint64_t pa);
  */
 int mf_pid_chain(int pid, uint64_t *proc, uint64_t *task, uint64_t *map,
                  uint64_t *pmap, uint64_t *root, char *report, size_t report_len);
+
+/*
+ * [M5.135] 串行化锁。
+ *
+ * kfd 的 KRKW 后端是有状态的，且本桥接用一对全局 setjmp 落点兜断言 ——
+ * 同一进程里两个线程同时读，后果是 longjmp 跳到别人的栈帧，或者直接 abort()。
+ * 所有 mf_kread*/mf_kwrite* 入口已经内部加锁（递归锁，可嵌套）。
+ *
+ * 这里额外暴露一对，是给"需要多次 kread 保持原子"的调用方用的：
+ * 例如页表遍历（mfpt_translate / mfpt_read）和跨进程取链，它们内部会反复
+ * 调 mf_kread32；只有在外层再套一把，整次遍历才不会被别的线程插进来。
+ *
+ * 规则：成对调用，不要跨线程持有，不要在里面调 sleep。
+ */
+void mf_lock_kernel(void);
+void mf_unlock_kernel(void);
 
 /* 被地址闸拒绝的次数与最近一个被拒地址（用于诊断，不参与逻辑）。 */
 int      mf_kaddr_denied_count(void);

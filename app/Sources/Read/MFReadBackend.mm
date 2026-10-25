@@ -201,6 +201,23 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
     return YES;
 }
 
+- (size_t)readRemotePartial:(uint64_t)remote into:(void *)out size:(size_t)size {
+    if (!out || size == 0) return 0;
+
+    if (self.kfdRoot != 0) {
+        size_t got = 0;
+        int rc = mfpt_read_partial(self.kfdRoot, remote, out, size, &got);
+        if (rc == 0 && got > 0) {
+            _readCount++;
+            return got;
+        }
+        _failCount++;
+        return got;
+    }
+
+    return [self readRemote:remote into:out size:size] ? size : 0;
+}
+
 #pragma mark - 六个字节封装
 
 - (BOOL)readU64:(uint64_t)addr out:(uint64_t *)out {

@@ -25,6 +25,15 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa);
 /* Read n bytes from the target address space into dst. 0 = ok, <0 = error. */
 int mfpt_read(uint64_t root, uint64_t va, void *dst, size_t n);
 
+/*
+ * [M5.135] 宽松读：能读多少读多少。
+ *
+ * 成功（*got > 0）返回 0；一个字节都没读到返回 -3；参数非法返回 -2。
+ * 调用方必须按 *got 决定"能用多少"—— 超出 *got 的部分是未初始化的，
+ * 不要当数据用。
+ */
+int mfpt_read_partial(uint64_t root, uint64_t va, void *dst, size_t n, size_t *got);
+
 /* Read one 32-bit word. 0 = ok. */
 int mfpt_probe32(uint64_t root, uint64_t va, uint32_t *out);
 

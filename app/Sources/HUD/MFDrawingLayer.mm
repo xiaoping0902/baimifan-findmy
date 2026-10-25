@@ -19,6 +19,7 @@
 
 #include "imgui.h"
 #include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
+#include <stdlib.h>   /* calloc —— 宽松读要清零 */
 
 static BOOL gDrawEnabled = YES;
 
@@ -521,7 +522,11 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     if (outCamera) *outCamera = cam;
 
     MFReadBackend *rb = [MFReadBackend shared];
-    const uint32_t posOffset = ue.profile.actor_worldPos;
+    // [M5.135] 坐标两跳：AActor+0x180 → RootComponent，再 +0x220 → ComponentToWorld.Translation。
+    // 0x220 是 K2_GetComponentLocation 的 native 实现自己用的偏移（ComponentToWorld@0x210 + 0x10）。
+    // 旧实现直接读 Actor+0x220，少跳了一级，落在 AActor 的填充区，恒为 0。
+    const uint32_t rootOffset = ue.profile.actor_rootComponent;
+    const uint32_t locOffset  = ue.profile.scenecomponent_worldLocation;
     // [M5.85] 注意：ue.profile.actor_classID（0x1C）已经**不再用于分类**。
     // 按 dump 日志，本作 UObject::Name 就在 0x1C，读它得到的是对象名（"XXX_C_7"）
     // 而不是类名；类名要两跳（+0x08 → UClass，再 +0x1C → 类名索引）。
@@ -535,12 +540,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         _ueAddrsAt = now;
         _ueCursor = 0;
         size_t bytes = (size_t)r.actorsNum * 8;
-        uint64_t *ptrs = (uint64_t *)malloc(bytes);
+        uint64_t *ptrs = (uint64_t *)calloc((size_t)r.actorsNum, sizeof(uint64_t));
         if (ptrs) {
-            if ([rb readRemote:r.actorsData into:ptrs size:bytes]) {
-                for (int i = 0; i < r.actorsNum; i++)
-                    if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
-            }
+            /* [M5.135] 宽松读：跨页失败时只丢尾巴，不整批作废 */
+            size_t got = [rb readRemotePartial:r.actorsData into:ptrs size:bytes];
+            int usable = (int)(got / sizeof(uint64_t));
+            for (int i = 0; i < usable; i++)
+                if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
             free(ptrs);
         }
     }
@@ -551,8 +557,11 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         NSUInteger budget = MIN(kMFUEActorBudgetPerFrame, total);
         for (NSUInteger i = 0; i < budget; i++) {
             uint64_t addr = _ueActorAddrs[(_ueCursor + i) % total].unsignedLongLongValue;
+            uint64_t rootComp = 0;
+            if (![rb readU64:addr + rootOffset out:&rootComp]) continue;
+            if (!MFUEIsValidPtr(rootComp)) continue;
             float pos[3] = {0};
-            if (![rb readFloat3:addr + posOffset out:pos]) continue;
+            if (![rb readFloat3:rootComp + locOffset out:pos]) continue;
             if (!(fabsf(pos[0]) <= kMFUE_PosAbsMax)) continue;
             if (!(fabsf(pos[1]) <= kMFUE_PosAbsMax)) continue;
             if (!(fabsf(pos[2]) <= kMFUE_PosAbsMax)) continue;

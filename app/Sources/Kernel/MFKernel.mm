@@ -341,7 +341,8 @@ static BOOL gMFKernelPoisoned = NO;
          * 注意：kread/kwrite 仍必须是 sem_open(1/1) —— 16.3+ 上 kqueue_workloop_ctl 已废。
          */
         NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
-        if (pm < 0 || pm > 2) pm = 2;      // 默认 landa
+        /* [M5.135] 兜底默认改成 physpuppet：landa 在 16.1 上会卡死 12 分钟（见 M5.113） */
+        if (pm < 0 || pm > 2) pm = 0;      // 0 = physpuppet
 
         NSLog(@"[MF][Kernel] 开始 kopen：pages=%llu method=%ld（0=physpuppet 1=smith 2=landa）",
               (unsigned long long)pages, (long)pm);
@@ -354,10 +355,18 @@ static BOOL gMFKernelPoisoned = NO;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (rc != 0) {
                 self.state = MFKernelStateFailed;
-                /* ★ 上锁：本次运行内不允许再试，见 gMFKernelPoisoned 说明 */
-                gMFKernelPoisoned = YES;
+                /*
+                 * [M5.135] rc == -4 = 另一个进程已经持有内核（跨进程哨兵）。
+                 * 这种情况内核一个字节都没动，【不能】算成失败上锁 ——
+                 * 否则用户关掉悬浮窗之后还得重启 App 才能再连。
+                 */
+                if (rc != -4) {
+                    gMFKernelPoisoned = YES;
+                }
                 self.lastError = [NSString stringWithUTF8String:mf_last_error() ?: "kopen 失败"];
-                NSLog(@"[MF][Kernel] kopen 失败: %@ —— 已上锁，需重启 App", self.lastError);
+                NSLog(@"[MF][Kernel] kopen 失败: %@ —— %@", self.lastError,
+                      (rc == -4) ? @"内核未被动过，关掉占用方后可直接重试"
+                                 : @"已上锁，需重启 App");
                 /* [M5.11] 自动把内核日志镜像到 Media —— 这样电脑侧一条命令就能拉，
                    不用再让用户「点按钮 → 复制全文 → 粘贴」 */
                 [MFDebugExport syncLogs];
