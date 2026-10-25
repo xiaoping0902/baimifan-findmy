@@ -240,7 +240,8 @@ static const float kMFMenuBallSize = 56.0f;
     const float left = ImGui::GetCursorPosX();
     const float headerY = ImGui::GetCursorPosY();
     const float right = screen.x - ImGui::GetStyle().WindowPadding.x;
-    ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1), "白米饭 · 悬浮窗");
+    /* [M5.140] 浅色面板上原来的荧光绿看不清，换成深绿 */
+    ImGui::TextColored(ImVec4(0.05f, 0.45f, 0.18f, 1), "白米饭 · 悬浮窗");
     ImGui::SetCursorPos(ImVec2(right - 136, headerY));
     bool collapse = ImGui::Button("收起", ImVec2(64, 32)); MFTrackLastItem();
     ImGui::SameLine(0, 8);
@@ -256,10 +257,14 @@ static const float kMFMenuBallSize = 56.0f;
     for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine(0, 8);
         bool selected = _tab == i;
-        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.52f, 1, 1));
+        /* [M5.140] 选中页签：蓝底 + 白字 */
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.52f, 1, 1));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+        }
         if (ImGui::Button(tabs[i], ImVec2(tabWidth, 34))) _tab = i;
         MFTrackLastItem();
-        if (selected) ImGui::PopStyleColor();
+        if (selected) { ImGui::PopStyleColor(); ImGui::PopStyleColor(); }
     }
     float footerHeight = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y + 8;
     float pageHeight = MAX(64.0f, ImGui::GetContentRegionAvail().y - footerHeight);

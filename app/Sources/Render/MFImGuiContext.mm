@@ -7,6 +7,7 @@
 #include "imgui_internal.h"           // ImLerp 等
 #include "MFImGuiInput.h"
 #include "backends/imgui_impl_metal.h"
+#import "MFStyle.h"        /* [M5.140] 浅色主题 token（参考项目 ui.h） */
 #include <cmath>
 
 @implementation MFImGuiContext {
@@ -165,6 +166,9 @@
 
     // 触屏命中盒（调研 §2.4）
     s.TouchExtraPadding = ImVec2(4, 4);
+
+    /* [M5.140] 最后统一换肤：浅色 iOS 主题（覆盖上面的暗色取值） */
+    MFApplyLightStyle(&s, MFStyleDefaultOptions());
 }
 
 #pragma mark - 字体
