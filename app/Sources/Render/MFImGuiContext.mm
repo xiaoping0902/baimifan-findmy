@@ -61,16 +61,19 @@
 
     /*
      * 4) 字体
-     * ★ [M5.186] 只用打包的 TrueType 字体 ★
+     * ★ [M5.188] 打包全量中文字体 ★
      *
-     * 前一版（185）试图改用系统 PingFang.ttc / SFProText.otf，结果 HUD 在
-     * 第一帧就没了（hud.log 停在 waiting-for-frames）。
-     * 原因：这两者都是 **CFF/OTF 轮廓**，而 ImGui 的栅格器 stb_truetype
-     * 只吃 TrueType(glyf) 轮廓 —— 文件能打开、字体对象也能建，但一取字形就崩。
-     * 所以回退到打包的 NotoSansSC-subset.ttf，靠 RasterizerDensity 提清晰度。
+     * app/Resources/NotoSansSC-full.ttf —— 思源黑体（wght=400 静态实例）裁掉
+     * 用不到的字面后 7.5MB，覆盖 ASCII + CJK 统一表意文字(U+4E00–U+9FFF) +
+     * 全角标点。这样面板文案、物品名、玩家名都不会缺字。
+     *
+     * ⚠️ 必须是 TrueType(glyf) 轮廓：ImGui 的 stb_truetype 不支持 CFF/OTF，
+     *    系统 PingFang.ttc / SFProText.otf 就是这么把 HUD 第一帧搞死的（M5.185）。
      */
-    if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
-        NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
+    if (![self loadFontNamed:@"NotoSansSC-full" size:15.0f]) {
+        if (![self loadFontNamed:@"NotoSansSC-subset" size:15.0f]) {
+            NSLog(@"[MF][ImGui] 中文字体加载失败，回退默认字体");
+        }
     }
 
     _initialized = YES;
