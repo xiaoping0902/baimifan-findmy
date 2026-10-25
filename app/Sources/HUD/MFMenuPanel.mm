@@ -74,8 +74,9 @@ static void MFPanelLoadFromSettings(void) {
 static void MFPanelInitOnce(void) {
     if (gInitDone) return;
     gInitDone = YES;
-    gUI.expanded     = false;
-    gUI.anim         = 0.0f;
+    /* [M5.186] 启动即展开面板（原版行为），点灵动岛可收起 */
+    gUI.expanded     = true;
+    gUI.anim         = 1.0f;
     gUI.tab          = 0;
     /* [M5.185] 默认放大到 1.15（上限 1.212）—— 原来的 1.0 在 iPad 上偏小 */
     gUI.uiScale      = 1.15f;
