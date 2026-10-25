@@ -152,38 +152,53 @@ NSString *MFCrossProcRun(int pid)
              (unsigned long long)macho];
 
             /*
-             * ---------- 4) 游戏读取链第一跳：模块基址 + GWorld ----------
+             * ---------- 4) 游戏读取链第一跳：候选偏移全部实测 ----------
              *
-             * 偏移取自同类产品的逆向结论（欧易 2.0：GWorld 指针存在
-             * libbase+0x15947E70）。这里只做"能不能读出像样的指针"的探测，
-             * 读不到就如实报，不做任何写操作。
+             * M5.119 实测：*(base+0x15947E70) = 0x1131fb4a1，读过去是一串字符
+             *     "ReturnValue\0WorldContextObject\0ObjectRegistryType\0AllObjects…"
+             * 也就是说那个偏移落在【名字/反射表】里，不是 GWorld。
+             *
+             * 所以不再只试一个偏移：把手上所有来源的候选都读一遍，谁指向
+             * UObject 形态（首 8 字节是指向模块/共享缓存的函数表指针）就留谁。
+             * 全部只读，不写。
              */
             g_xp_last_base = macho;
             g_xp_last_pid = pid;
             {
-                const uint64_t gwSlot = 0x15947E70ULL;
-                uint64_t gw = 0;
-                int grc = mfpt_read(root, macho + gwSlot, &gw, sizeof(gw));
-                BOOL plausible = (grc == 0 && gw > 0x100000000ULL && gw < 0x8000000000ULL);
+                struct { uint64_t off; const char *name; } cands[] = {
+                    { 0x178B44E0ULL, "our-GWorld"   },   /* 本项目旧偏移表 */
+                    { 0x173776C0ULL, "our-GNames"   },   /* 旧表里的 GNames 池 */
+                    { 0x15947E70ULL, "ouyi-libbase" },   /* 欧易 2.0 报告里的例子 */
+                };
+                [log appendFormat:@"\n[game] module base = %#llx\n", (unsigned long long)macho];
 
-                [log appendFormat:
-                    @"\n[game] module base            = %#llx\n"
-                    @"[game] *(base + %#llx)  = %#llx (rc=%d) %@\n",
-                 (unsigned long long)macho, (unsigned long long)gwSlot,
-                 (unsigned long long)gw, grc,
-                 plausible ? @"→ 像是个用户态指针" : @"→ 不是合法用户指针"];
+                for (unsigned int i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+                    uint64_t slot = macho + cands[i].off;
+                    uint64_t val = 0;
+                    int r = mfpt_read(root, slot, &val, sizeof(val));
+                    BOOL plausible = (r == 0 && val > 0x100000000ULL && val < 0x8000000000ULL);
 
-                if (plausible) {
-                    uint64_t dump[8] = {0};
-                    if (mfpt_read(root, gw, dump, sizeof(dump)) == 0) {
-                        [log appendString:@"[game] 该指针指向的前 8 个 qword：\n"];
-                        for (int i = 0; i < 8; i++) {
-                            [log appendFormat:@"     +%02X: %#llx\n", i * 8,
-                             (unsigned long long)dump[i]];
-                        }
-                    } else {
-                        [log appendString:@"[game] 该指针指向的内存不可读\n"];
+                    [log appendFormat:@"[game] %-13s base+%#-10llx = %#llx (rc=%d)%@\n",
+                     cands[i].name, (unsigned long long)cands[i].off,
+                     (unsigned long long)val, r,
+                     plausible ? @"  ← 用户态指针" : @"  (非指针)"];
+                    if (!plausible) {
+                        continue;
                     }
+
+                    uint64_t dump[8] = {0};
+                    if (mfpt_read(root, val, dump, sizeof(dump)) != 0) {
+                        [log appendString:@"         (指向的内存不可读)\n"];
+                        continue;
+                    }
+                    /* 顺手把前 16 字节当 ASCII 打出来：名字池会直接露馅 */
+                    char ascii[17] = {0};
+                    memcpy(ascii, dump, 16);
+                    for (int k = 0; k < 16; k++) {
+                        if (ascii[k] < 0x20 || ascii[k] > 0x7e) ascii[k] = '.';
+                    }
+                    [log appendFormat:@"         +00=%#llx +08=%#llx  ascii=\"%s\"\n",
+                     (unsigned long long)dump[0], (unsigned long long)dump[1], ascii];
                 }
             }
         }
