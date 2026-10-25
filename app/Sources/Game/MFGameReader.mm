@@ -343,6 +343,19 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     }
                 }
 
+                /*
+                 * ★ [M5.158] 血量：actor+0x10B8 → 血量组件 → +0x258 (float)
+                 * 真机实测自己与两个人机都是 100.0（满血）；清单写的 +0x280 读出来是垃圾。
+                 */
+                uint64_t hc = 0;
+                if ([rb readU64:item + 0x10B8 out:&hc] && hc) {
+                    float hp = 0.0f;
+                    if ([rb readRemote:hc + 0x258 into:&hp size:4] &&
+                        hp >= 0.0f && hp <= 2000.0f) {
+                        e.health = (int)lroundf(hp);
+                    }
+                }
+
                 uint64_t combat = 0;
                 if ([rb readU64:item + 0x1020 out:&combat] && combat) {
                     uint64_t wpn = 0;
