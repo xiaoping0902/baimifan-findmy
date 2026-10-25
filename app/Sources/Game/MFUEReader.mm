@@ -1,4 +1,5 @@
 #import "MFUEReader.h"
+#import "MFSettings.h"                 /* [M5.150] 队友开关 */
 #import "Offsets.h"                       /* kMF_Deg2Rad / kMFBehindAngleDeg 等常量在这 */
 #import "../Read/MFReadBackend.h"
 #include <math.h>
