@@ -2,6 +2,8 @@
 //  MFReadBackend.mm — 跨进程内存读取后端（实现）
 //
 #import "MFReadBackend.h"
+#import "../Kernel/MFKernelBridge.h"
+#import "../Kernel/MFPageTable.h"
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <dlfcn.h>
@@ -83,7 +85,46 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
 
 - (BOOL)gateOpen {
     // 对齐原 sub_10099A034：模式标记 == 1 且 端口 != 0
+    // [M5.117] 但走 KFD 页表直读时不需要 task port —— 有根表就够
+    if (self.kfdRoot != 0 && self.modeFlag) {
+        return YES;
+    }
     return self.modeFlag && self.targetTaskPort != MACH_PORT_NULL;
+}
+
+/*
+ * [M5.117] 把读取后端切到 KFD 页表直读。
+ *
+ * 原来的实现走 mach_vm_remap + 目标 task port，而 task_for_pid 对 App Store
+ * 正版（自带反作弊）必然 kr=0x5 —— 这条路在我们目标上是死的。
+ * 现在改成：pid → pmap 根表（mf_pid_chain），之后每个 readRemote 都用
+ * mfpt_read 走目标自己的页表，完全不碰 task port。
+ *
+ * 返回 YES 表示根表已就位；此后的 readU64/readInt32/followChain 等封装
+ * 全部自动走 KFD，上层 UE4 读取代码一行都不用改。
+ */
+- (BOOL)attachKFDPid:(int)pid {
+    uint64_t root = 0;
+    char why[192] = {0};
+    int rc = mf_pid_chain(pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why));
+    if (rc != 0 || root == 0) {
+        NSLog(@"[MF][Read] attachKFDPid(%d) 失败 rc=%d %s", pid, rc, why);
+        self.kfdRoot = 0;
+        self.kfdPid = 0;
+        return NO;
+    }
+    self.kfdPid = pid;
+    self.kfdRoot = root;
+    self.modeFlag = YES;
+    mfpt_cache_reset();
+    NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx", pid, (unsigned long long)root);
+    return YES;
+}
+
+- (void)detachKFD {
+    self.kfdRoot = 0;
+    self.kfdPid = 0;
+    mfpt_cache_reset();
 }
 
 - (void)setTargetTaskPort:(uint32_t)port {
@@ -96,6 +137,21 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
 
 - (BOOL)readRemote:(uint64_t)remote into:(void *)out size:(size_t)size {
     if (!out || size == 0) return NO;
+
+    /*
+     * [M5.117] KFD 页表直读优先。
+     * 目标进程的 task port 拿不到（PPL 封死），这条路是唯一可用的；
+     * 有根表时完全不碰 mach_vm_remap。
+     */
+    if (self.kfdRoot != 0) {
+        uint64_t translated = 0;
+        if (mfpt_translate(self.kfdRoot, remote, &translated) == 0) {
+            _readCount++;
+            return mfpt_read(self.kfdRoot, remote, out, size) == 0;
+        }
+        _failCount++;
+        return NO;
+    }
 
     // 门判不过 → 不进入 remap 分支（原实现同样行为）
     if (!self.gateOpen) {

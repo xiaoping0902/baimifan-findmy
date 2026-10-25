@@ -83,6 +83,58 @@ static int mfp_phys_to_kva(uint64_t pa, uint64_t *kva)
     return 0;
 }
 
+/*
+ * [M5.117] v2p 页缓存。
+ *
+ * 实测口径（与欧易 2.0 的 g_v2p_cache 同一思路）：一次翻译 = 3 次 kread，
+ * 而 sem_open 每次只保证 4 字节。若每帧读几十个字段、每个字段都从头走页表，
+ * 内核读写次数会爆炸 —— 这是"看起来能读、一上绘制就卡死"的直接原因。
+ *
+ * 结构：4096 项直接映射，键 = (root, 页号)，值 = 物理页基址。
+ *   · 同一 root 命中直接返回，不再碰内核；
+ *   · root 变化（换进程/游戏重启换了 pmap）→ 整表作废，避免读到旧页表；
+ *   · 命中率极高：游戏对象基本都落在少数几个页里。
+ */
+#define MFP_V2P_SLOTS 4096
+
+typedef struct {
+    uint64_t root;      /* 0 = 空槽 */
+    uint64_t vpage;     /* va & ~0x3fff */
+    uint64_t pbase;     /* 物理页基址 */
+} mfp_v2p_entry;
+
+static mfp_v2p_entry g_v2p[MFP_V2P_SLOTS];
+static uint64_t g_v2p_root;
+static uint64_t g_v2p_hit;
+static uint64_t g_v2p_miss;
+
+static uint32_t mfp_v2p_slot(uint64_t root, uint64_t vpage)
+{
+    uint64_t h = (root >> 12) ^ (vpage >> 14);
+    h ^= h >> 17;
+    h *= 0x9E3779B97F4A7C15ULL;
+    return (uint32_t)(h >> 40) & (MFP_V2P_SLOTS - 1);
+}
+
+static void mfp_v2p_reset(uint64_t root)
+{
+    memset(g_v2p, 0, sizeof(g_v2p));
+    g_v2p_root = root;
+    g_v2p_hit = 0;
+    g_v2p_miss = 0;
+}
+
+void mfpt_cache_stats(uint64_t *hit, uint64_t *miss)
+{
+    if (hit) *hit = g_v2p_hit;
+    if (miss) *miss = g_v2p_miss;
+}
+
+void mfpt_cache_reset(void)
+{
+    mfp_v2p_reset(0);
+}
+
 int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
 {
     uint64_t tt = root;
@@ -92,6 +144,21 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
     if (!pa) return -2;
     *pa = 0;
     if (!mfp_is_kaddr(root)) return -3;
+
+    /* ---- 缓存命中：省掉整条页表遍历 ---- */
+    if (root != g_v2p_root) {
+        mfp_v2p_reset(root);
+    }
+    {
+        uint64_t vpage = va & ~(MFP_PAGE_SIZE - 1ULL);
+        uint32_t slot = mfp_v2p_slot(root, vpage);
+        if (g_v2p[slot].root == root && g_v2p[slot].vpage == vpage) {
+            g_v2p_hit++;
+            *pa = g_v2p[slot].pbase + (va & (MFP_PAGE_SIZE - 1ULL));
+            return 0;
+        }
+        g_v2p_miss++;
+    }
 
     idx = (va & MFP_L1_INDEX) >> MFP_L1_SHIFT;
     if (mfp_k64(tt + idx * 8, &tte) != 0) return -4;
@@ -116,7 +183,14 @@ int mfpt_translate(uint64_t root, uint64_t va, uint64_t *pa)
     if ((tte & MFP_PTE_TYPE_VALID) != MFP_PTE_TYPE_VALID) return -11;
     if (tte & (MFP_PTE_COMPRESSED | MFP_PTE_COMP_ALT)) return -12;
 
-    *pa = ((tte & MFP_MASK_16K) | (va & MFP_L3_OFFMASK));
+    {
+        uint64_t pbase = tte & MFP_MASK_16K;
+        uint32_t slot = mfp_v2p_slot(root, va & ~(MFP_PAGE_SIZE - 1ULL));
+        g_v2p[slot].root = root;
+        g_v2p[slot].vpage = va & ~(MFP_PAGE_SIZE - 1ULL);
+        g_v2p[slot].pbase = pbase;
+        *pa = pbase | (va & MFP_L3_OFFMASK);
+    }
     return 0;
 }
 

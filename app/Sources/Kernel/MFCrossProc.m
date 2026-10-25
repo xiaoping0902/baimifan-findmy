@@ -165,6 +165,40 @@ NSString *MFCrossProcRun(int pid)
              pid, (unsigned long long)proc, (unsigned long long)task,
              (unsigned long long)map, (unsigned long long)pmap, (unsigned long long)root,
              (unsigned long long)macho];
+
+            /*
+             * ---------- 4) 游戏读取链第一跳：模块基址 + GWorld ----------
+             *
+             * 偏移取自同类产品的逆向结论（欧易 2.0：GWorld 指针存在
+             * libbase+0x15947E70）。这里只做"能不能读出像样的指针"的探测，
+             * 读不到就如实报，不做任何写操作。
+             */
+            {
+                const uint64_t gwSlot = 0x15947E70ULL;
+                uint64_t gw = 0;
+                int grc = mfpt_read(root, macho + gwSlot, &gw, sizeof(gw));
+                BOOL plausible = (grc == 0 && gw > 0x100000000ULL && gw < 0x8000000000ULL);
+
+                [log appendFormat:
+                    @"\n[game] module base            = %#llx\n"
+                    @"[game] *(base + %#llx)  = %#llx (rc=%d) %@\n",
+                 (unsigned long long)macho, (unsigned long long)gwSlot,
+                 (unsigned long long)gw, grc,
+                 plausible ? @"→ 像是个用户态指针" : @"→ 不是合法用户指针"];
+
+                if (plausible) {
+                    uint64_t dump[8] = {0};
+                    if (mfpt_read(root, gw, dump, sizeof(dump)) == 0) {
+                        [log appendString:@"[game] 该指针指向的前 8 个 qword：\n"];
+                        for (int i = 0; i < 8; i++) {
+                            [log appendFormat:@"     +%02X: %#llx\n", i * 8,
+                             (unsigned long long)dump[i]];
+                        }
+                    } else {
+                        [log appendString:@"[game] 该指针指向的内存不可读\n"];
+                    }
+                }
+            }
         }
     }
 
@@ -172,6 +206,12 @@ done:
     if (ownSession) {
         mf_kclose();
         [log appendString:@"[session] 已 kclose（不留悬空页）\n"];
+    }
+    {
+        uint64_t cacheHit = 0, cacheMiss = 0;
+        mfpt_cache_stats(&cacheHit, &cacheMiss);
+        [log appendFormat:@"[cache] v2p 命中=%llu 未命中=%llu\n",
+         (unsigned long long)cacheHit, (unsigned long long)cacheMiss];
     }
     mfxp_write(log);
     return log;

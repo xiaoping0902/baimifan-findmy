@@ -44,6 +44,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) uint64_t readCount;
 @property (nonatomic, readonly) uint64_t failCount;
 
+#pragma mark KFD 页表直读（M5.117）
+
+/// 目标进程 pid（0 = 未绑定 KFD 后端）
+@property (nonatomic, assign) int kfdPid;
+
+/// 目标进程的 pmap 根表（内核 VA；0 = 未绑定）
+@property (nonatomic, assign) uint64_t kfdRoot;
+
+/// 用 pid 解析目标 pmap 根表并接管读取。返回 YES 表示此后读取全走 KFD。
+- (BOOL)attachKFDPid:(int)pid;
+
+/// 解绑（目标退出 / 换目标时调用），同时作废 v2p 缓存
+- (void)detachKFD;
+
 #pragma mark 底层读取
 
 /// 核心：读远程内存。返回 YES 表示成功

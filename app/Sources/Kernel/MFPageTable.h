@@ -39,6 +39,11 @@ int mfpt_lowest_mapped_page(uint64_t root, uint64_t start, uint64_t *va_out);
 void mfpt_stats(uint64_t *translated, uint64_t *failed);
 void mfpt_stats_reset(void);
 
+/* [M5.117] v2p page-cache hit/miss counters, and manual invalidation when the
+ * target changes (the cache also invalidates itself whenever root changes). */
+void mfpt_cache_stats(uint64_t *hit, uint64_t *miss);
+void mfpt_cache_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

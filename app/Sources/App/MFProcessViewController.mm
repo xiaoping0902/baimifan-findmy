@@ -258,6 +258,7 @@
 
             if (cand == nil) {
                 self.autoAttachedPid = 0;      /* 游戏没了：等他再开 */
+                [[MFReadBackend shared] detachKFD];
                 self.headerLabel.text = [NSString stringWithFormat:
                     @"等待游戏启动…（%lu 个进程，每 2 秒自动检测）",
                     (unsigned long)list.count];
@@ -310,6 +311,17 @@
                 [[NSUserDefaults standardUserDefaults] setInteger:pid forKey:@"mf.target.pid"];
                 [[NSUserDefaults standardUserDefaults] setObject:name forKey:@"mf.target.name"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
+
+                /*
+                 * ★ [M5.117] 把读取后端切到 KFD。
+                 *
+                 * 这一步之后 MFReadBackend 的 readU64/readInt32/followChain
+                 * 全部走目标进程自己的页表 —— UE4 读取链一行都不用改，
+                 * 但不再需要（也拿不到）task port。
+                 */
+                if (![[MFReadBackend shared] attachKFDPid:pid]) {
+                    NSLog(@"[MF][Read] attachKFDPid(%d) 失败，读取后端仍不可用", pid);
+                }
             } else {
                 /*
                  * ★ [M5.116] 失败就锁住，不再自动重试。
