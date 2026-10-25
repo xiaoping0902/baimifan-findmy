@@ -11,6 +11,8 @@
 #import "MFHUDTargetBinding.h"
 #import "MFHUDPassiveState.h"
 #import <mach/mach.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <stdlib.h>
 #import "MFHUDLog.h"
@@ -131,8 +133,10 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
 @interface MFHUDAppDelegate ()
 /* [M5.124] 内核在 HUD 进程里常驻 */
 @property (nonatomic) BOOL kernelViaKFD;   /* KFD 就绪后停用 task port 老路 */
+@property (nonatomic, strong) NSTimer *liveReadTimer;   /* [M5.128] 持续读取 */
 - (void)bootstrapKernelInHUD;
 - (void)writeHUDKernelLog:(NSString *)text;
+- (void)startLiveReadTimerWithRoot:(uint64_t)root;
 @property (nonatomic, strong) MFOverlayView *menuOverlay;
 @property (nonatomic, strong) MFOverlayView *drawingOverlay;
 @property (nonatomic, strong) NSMutableDictionary *startupReport;
@@ -513,6 +517,41 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 
 #pragma mark - [M5.124] HUD 进程内的内核引导
 
+/*
+ * [M5.128] 会话的"临终释放"。
+ *
+ * 用户的原话：「不应该是一直读取吗，然后进程退出了这个东西一起退出，这样才能持久」——
+ * 完全正确。持久读取就必须一直开着会话；真正要防的是【进程被硬杀，来不及释放】，
+ * 那样内核的 perfmon 会一直停在"被占用"，下一次 kopen 直接
+ *     assertion failed: (kfd->perf.dev.fd > 0)
+ * 所以这里挂三层兜底：atexit、SIGTERM/SIGINT/SIGHUP、以及退出菜单里的显式 kclose。
+ */
+static void MFHUDKernelAtExit(void)
+{
+    if (mf_is_open()) {
+        mf_kclose();
+    }
+}
+
+static void MFHUDKernelSignalCleanup(int sig)
+{
+    if (mf_is_open()) {
+        mf_kclose();
+    }
+    _exit(128 + sig);
+}
+
+static void MFHUDInstallKernelCleanup(void)
+{
+    static BOOL installed = NO;
+    if (installed) return;
+    installed = YES;
+    atexit(MFHUDKernelAtExit);
+    signal(SIGTERM, MFHUDKernelSignalCleanup);
+    signal(SIGINT, MFHUDKernelSignalCleanup);
+    signal(SIGHUP, MFHUDKernelSignalCleanup);
+}
+
 static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     NSString *hay = [NSString stringWithFormat:@"%@ %@",
                      name.lowercaseString ?: @"", path.lowercaseString ?: @""];
@@ -549,10 +588,24 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
              rc == 0 ? @"OK"
                      : [NSString stringWithFormat:@"失败：%s", err ? err : "(no detail)"]];
             if (rc != 0) {
-                [log appendString:@"  → 不再重试。杀掉 HUD 与 App 后重开，或重启设备。\n"];
+                /*
+                 * [M5.128] 最常见的失败不是"参数不对"，而是上一次会话没死透：
+                 *     assertion failed: (kfd->perf.dev.fd > 0) at perf.h:87
+                 * 这种情况重试、换参数都无效，只能重启设备把 perfmon 清掉。
+                 * 说清楚原因，别再让用户反复点。
+                 */
+                if (err && strstr(err, "perf.dev.fd") != NULL) {
+                    [log appendString:
+                        @"  → 内核被上一次会话占用（perfmon 独占）。\n"
+                        @"    重试和换参数都没用，只能【重启设备】清掉。\n"
+                        @"    以后请用悬浮窗菜单里的「退出」关闭，不要上滑硬杀。\n"];
+                } else {
+                    [log appendString:@"  → 不再重试。杀掉 HUD 与 App 后重开，或重启设备。\n"];
+                }
                 [self writeHUDKernelLog:log];
                 return;
             }
+            MFHUDInstallKernelCleanup();
         } else {
             [log appendString:@"[kopen] 会话已存在，复用\n"];
         }
@@ -645,7 +698,60 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         [log appendString:@"\nRESULT OK —— 内核与读取都在常驻的 HUD 进程里\n"];
         [self writeHUDKernelLog:log];
         self.kernelViaKFD = YES;      /* [M5.125] 从此刻起不再碰 task port */
+
+        /* [M5.128] 会话不关，改成持续读取 */
+        [self startLiveReadTimerWithRoot:root];
     });
+}
+
+/*
+ * [M5.128] 持续读取：每 3 秒把 GWorld + 玩家链 + 坐标重新读一遍，写到
+ * /mf-debug/mf-live.txt。这就是"一直读取"的形态 —— 会话开着，读循环跑着，
+ * 只有进程被硬杀才会中断（那时靠 atexit/signal 兜底释放）。
+ */
+- (void)startLiveReadTimerWithRoot:(uint64_t)root {
+    if (self.liveReadTimer) return;
+    __weak MFHUDAppDelegate *weakSelf = self;
+    self.liveReadTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            if (!mf_is_open()) { return; }
+            MFHUDAppDelegate *me = weakSelf;
+            if (!me) { return; }
+
+            NSMutableString *s = [NSMutableString string];
+            NSDateFormatter *f = [[NSDateFormatter alloc] init];
+            f.dateFormat = @"HH:mm:ss";
+            [s appendFormat:@"[%s] session=%@\n", f.stringFromDate.description.UTF8String,
+             mf_is_open() ? @"open" : @"closed"];
+
+            uint64_t base = [MFUEReader shared].libBase;
+            uint64_t gw = 0;
+            int r = mfpt_read(root, base + 0x178B44E0ULL, &gw, sizeof(gw));
+            [s appendFormat:@"  gworld rc=%d %#llx\n", r, (unsigned long long)gw];
+
+            uint64_t cur = gw;
+            uint64_t hops[] = { 400, 56, 48, 928 };
+            for (unsigned int i = 0; i < sizeof(hops) / sizeof(hops[0]); i++) {
+                if (cur < 0x100000000ULL || cur > 0x8000000000ULL) break;
+                uint64_t nxt = 0;
+                int rr = mfpt_read(root, cur + hops[i], &nxt, sizeof(nxt));
+                [s appendFormat:@"  +%-4llu → %#llx (rc=%d)\n",
+                 (unsigned long long)hops[i], (unsigned long long)nxt, rr];
+                if (rr != 0 || nxt < 0x100000000ULL || nxt > 0x8000000000ULL) break;
+                cur = nxt;
+            }
+            float xyz[3] = {0, 0, 0};
+            int rx = mfpt_read(root, cur + 544, xyz, sizeof(xyz));
+            [s appendFormat:@"  xyz rc=%d → %.2f, %.2f, %.2f\n",
+             rx, xyz[0], xyz[1], xyz[2]];
+
+            NSString *dir = @"/var/mobile/Media/mf-debug";
+            [s writeToFile:[dir stringByAppendingPathComponent:@"mf-live.txt"]
+                atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        });
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.liveReadTimer forMode:NSRunLoopCommonModes];
+    MFHUDLogLine(@"[M5.128] 持续读取已启动（3 秒一次）");
 }
 
 - (void)refreshTargetBinding {
@@ -858,6 +964,21 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 - (void)shutdownForExitRequest {
     if (self.exitRequested) return;
     self.exitRequested = YES;
+
+    /*
+     * [M5.128] 退出前必须显式释放内核会话。
+     * 这是"常驻 + 持久读取"能反复重开的唯一前提：只要走正常退出（菜单里的退出），
+     * perfmon 就会被释放；只有硬杀（上滑 / jetsam）才需要重启设备。
+     */
+    if (self.liveReadTimer) {
+        [self.liveReadTimer invalidate];
+        self.liveReadTimer = nil;
+    }
+    if (mf_is_open()) {
+        mf_kclose();
+        MFHUDLogLine(@"[M5.128] 内核会话已释放（kclose）");
+    }
+
     _targetBinding.reset(MFMakeTargetBindingHooks());
     self.boundTargetPID = 0; self.boundTargetIdentity = nil;
 
