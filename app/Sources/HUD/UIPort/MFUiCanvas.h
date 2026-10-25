@@ -179,7 +179,8 @@ struct Canvas {
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,tc.accentSoft);
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,tc.accentSoft);
         if(ImGui::BeginPopup("##color")){
-            ImGui::SetWindowFontScale(14*s/font->FontSize);
+            /* 新版 ImGui 删掉了 ImFont::FontSize；统一用 14px 与当前字号的比例 */
+            ImGui::SetWindowFontScale(ImMax(0.6f, 14.0f * s / ImMax(1.0f, ImGui::GetFontSize())));
             ImGui::TextUnformatted(label);
             ImGui::PushItemWidth(252*s);
             /* [M5.178] 原版直接对 &value.x 取址；ObjC++ 下对成员取址要走局部数组 */

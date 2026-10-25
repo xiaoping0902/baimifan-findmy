@@ -119,8 +119,9 @@ void MFMenuPanelRender(MFOverlayView *overlay, ImVec2 screen) {
     /* ② 页面里的开关改完 → 写回设置 */
     MFPanelStoreToSettings();
 
-    /* ③ 画：外框 + 分页 + 当前页；收起态只画灵动岛 */
-    ios::RenderUI(gUI, screen, font, (ImTextureID)0, nullptr, 0);
+    /* ③ 画：外框 + 分页 + 当前页；收起态只画灵动岛
+     * RenderUI 在 ui.h 里是【全局函数】（不在 ios 命名空间内） */
+    RenderUI(gUI, screen, font, (ImTextureID)0, nullptr, 0);
 
     /* ④ 触摸命中：展开报面板矩形，收起报灵动岛矩形 */
     if (gUI.anim > 0.01f) {
