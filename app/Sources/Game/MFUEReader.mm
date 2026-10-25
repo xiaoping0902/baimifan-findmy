@@ -1,5 +1,9 @@
 #import "MFUEReader.h"
 #import "MFSettings.h"                 /* [M5.150] 队友开关 */
+
+/* [M5.155] 供 MFGameReader（真正用于绘制的实体循环）使用的本地玩家信息 */
+uint64_t gMFUELocalPawn = 0;
+uint32_t gMFUELocalTeam = 0;
 #import "Offsets.h"                       /* kMF_Deg2Rad / kMFBehindAngleDeg 等常量在这 */
 #import "../Read/MFReadBackend.h"
 #include <math.h>
@@ -91,6 +95,16 @@ static NSString *gUEReport = nil;
      * 两跳算下来正好落在真字段上，所以功能是对的，只是名字骗人。
      */
     r.playerState = [rb readU64:r.pawn + p.pawn_playerState];
+
+    /* [M5.155] 把本地 Pawn / 队伍号交给 MFGameReader（绘制走的是它的实体循环） */
+    gMFUELocalPawn = r.pawn;
+    gMFUELocalTeam = 0;
+    if (MFUEIsValidPtr(r.playerState)) {
+        uint32_t teamLocal = 0;
+        if ([rb readRemote:r.playerState + p.playerState_teamID into:&teamLocal size:4]) {
+            gMFUELocalTeam = teamLocal;
+        }
+    }
     if (MFUEIsValidPtr(r.playerState)) {
         r.teamID = [rb readInt32:r.playerState + p.playerState_teamID];
         [r.trace addObject:[NSString stringWithFormat:

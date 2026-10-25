@@ -4,6 +4,7 @@
 #import "MFGameReader.h"
 #import "Offsets.h"
 #import "MFSettings.h"
+#import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
 #import "../Read/MFReadBackend.h"
 #import <mach/mach.h>
 #include <sys/sysctl.h>
@@ -235,10 +236,103 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             // 已证：坐标在 +0x220（3 float）
             float pos[3] = {0};
             if (![rb readFloat3:item + off.current.entityPositionOffset out:pos]) {
-                [out addObject:e];                       // 保留但标不可见（对齐原实现：读失败不跳过解析）
-                continue;
+                continue;        /* [M5.155] 坐标读不到就不产出实体（以前会画一个空气框） */
             }
             e.worldX = pos[0]; e.worldY = pos[1]; e.worldZ = pos[2];
+
+            /* ══════════ [M5.155] 角色判据 + 全部属性（frida 真机验证）══════════
+             *   +0x3D0 Mesh → Mesh+0x750 骨骼数组（Num≥20 才算人）
+             *   +0x390 PlayerState（空 = 人机）   +0xDC8 死亡   PS+0x4C0 bit0 观战
+             *   +0x10C0 → +0x108 队伍            +0x24E0 → +0x1D8 装备槽
+             *   +0x1020 → 0x4D8/0x588 → +0x838 武器
+             */
+            {
+                if (item == gMFUELocalPawn) continue;
+
+                uint64_t mesh = 0, boneData = 0;
+                int32_t boneNum = 0;
+                if (![rb readU64:item + 0x3D0 out:&mesh] || !mesh) continue;
+                if (![rb readU64:mesh + 0x750 out:&boneData] || !boneData) continue;
+                if (![rb readRemote:mesh + 0x750 + 8 into:&boneNum size:4]) continue;
+                if (boneNum < 20) continue;
+
+                uint8_t deadFlag = 0;
+                if ([rb readRemote:item + 0xDC8 into:&deadFlag size:1] && deadFlag != 0) continue;
+
+                uint64_t ps = 0;
+                BOOL havePS = ([rb readU64:item + 0x390 out:&ps] && ps != 0);
+                if (havePS) {
+                    uint8_t inactive = 0;
+                    if ([rb readRemote:ps + 0x4C0 into:&inactive size:1] && (inactive & 1)) continue;
+                }
+
+                uint32_t teamVal = 0;
+                uint64_t tc = 0;
+                if ([rb readU64:item + 0x10C0 out:&tc] && tc) {
+                    [rb readRemote:tc + 0x108 into:&teamVal size:4];
+                }
+                e.teamId = (int)teamVal;
+                e.isBot = havePS ? NO : YES;
+                if (gMFUELocalTeam != 0 && teamVal == gMFUELocalTeam && havePS &&
+                    ![MFSettings shared].showTeammates) {
+                    continue;
+                }
+                if (havePS) {
+                    uint64_t uinVal = 0;
+                    if ([rb readU64:ps + 0x490 out:&uinVal]) e.uin = uinVal;
+                }
+
+                uint64_t ec = 0, slots = 0;
+                if ([rb readU64:item + 0x24E0 out:&ec] && ec &&
+                    [rb readU64:ec + 0x1D8 out:&slots] && slots) {
+                    uint8_t rawSlots[10 * 0x30];
+                    size_t got = [rb readRemotePartial:slots into:rawSlots size:sizeof(rawSlots)];
+                    if (got >= 0x30) {
+                        size_t nSlot = got / 0x30;
+                        for (size_t s2 = 0; s2 < nSlot; s2++) {
+                            uint64_t itemId = 0;
+                            memcpy(&itemId, rawSlots + s2 * 0x30, 8);
+                            if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
+                            if (!e.equipRawID) e.equipRawID = itemId;
+                            char dec[24] = {0};
+                            int len = snprintf(dec, sizeof(dec), "%llu",
+                                               (unsigned long long)itemId);
+                            if (len < 8) continue;
+                            int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
+                                           (dec[3] - '0');
+                            int lv = dec[7] - '0';
+                            if (lv < 1 || lv > 6) continue;
+                            switch (typeCode) {
+                                case 101: e.helmetLevel = lv;   e.equipKnown = YES; break;
+                                case 105: e.armorLevel = lv;    e.armorKnown = YES;
+                                          e.equipKnown = YES; break;
+                                case 108: e.backpackLevel = lv; e.equipKnown = YES; break;
+                                default: break;
+                            }
+                        }
+                    }
+                }
+
+                uint64_t combat = 0;
+                if ([rb readU64:item + 0x1020 out:&combat] && combat) {
+                    uint64_t wpn = 0;
+                    if (![rb readU64:combat + 0x4D8 out:&wpn] || !wpn) {
+                        [rb readU64:combat + 0x588 out:&wpn];
+                    }
+                    if (wpn) {
+                        uint64_t wid = 0;
+                        if ([rb readU64:wpn + 0x838 out:&wid] && wid > 0) {
+                            char dec[24] = {0};
+                            int len = snprintf(dec, sizeof(dec), "%llu",
+                                               (unsigned long long)wid);
+                            if (len >= 4) {
+                                e.weaponId = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
+                                             (dec[3] - '0');
+                            }
+                        }
+                    }
+                }
+            }
 
             // ③ 投影
             float cam[3] = {camera.x, camera.y, camera.z};
