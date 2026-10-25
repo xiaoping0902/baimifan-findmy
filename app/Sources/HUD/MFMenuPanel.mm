@@ -139,16 +139,24 @@ void MFMenuPanelRender(MFOverlayView *overlay, ImVec2 screen) {
         MFHUDLogLine(@"[面板] 第%d帧 结束", sFrameLog);
     }
 
-    /* ④ 触摸命中：展开报面板矩形，收起报灵动岛矩形 */
+    /* ④ 触摸命中：展开报面板矩形，收起报灵动岛矩形
+     * ★ [M5.190] 关键是 captureRect ★
+     * MFOverlayView 的命中判定是「上报矩形 ∩ captureRect」——
+     * 老代码在 buildPanel 里设它，我换掉之后没人设，一直保持 CGRectNull，
+     * 交集永远为空 → 面板怎么点都没反应。这里补上。
+     */
     if (gUI.anim > 0.01f) {
         ImGuiWindow *w = ImGui::FindWindowByName("##ios_panel");
         if (w != NULL) {
-            [overlay addInteractiveRect:CGRectMake(w->Pos.x, w->Pos.y, w->Size.x, w->Size.y)];
+            const CGRect r = CGRectMake(w->Pos.x, w->Pos.y, w->Size.x, w->Size.y);
+            [overlay addInteractiveRect:r];
+            overlay.captureRect = r;
         }
     } else {
         const IslandLayout layout = ComputeIslandLayout(screen, gUI.islandYOffset);
         const float islW = 108.0f * layout.scale;
-        [overlay addInteractiveRect:CGRectMake((screen.x - islW) * 0.5f,
-                                               layout.top, islW, layout.height)];
+        const CGRect r = CGRectMake((screen.x - islW) * 0.5f, layout.top, islW, layout.height);
+        [overlay addInteractiveRect:r];
+        overlay.captureRect = r;
     }
 }

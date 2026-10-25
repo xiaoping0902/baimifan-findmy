@@ -303,6 +303,8 @@ static void DrawIslandBadge(ImDrawList* dl, ImFont* font, ImVec2 p0, ImVec2 p1,
 }
 
 static void DrawIsland(UIState& st,ImVec2 screen,ImFont* font) {
+    /* [M5.190] 面板已经展开时不再画灵动岛 —— 否则会浮在面板上方像个孤立的小黑条 */
+    if (st.anim > 0.02f) return;
     const IslandLayout layout=ComputeIslandLayout(screen,st.islandYOffset);
     const float scale=layout.scale,fs=14.5f*scale;
     const bool showReal=st.realCount>0,showBot=st.botCount>0;
