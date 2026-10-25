@@ -169,73 +169,118 @@ static NSString *gUEReport = nil;
 
 #pragma mark - 相机
 
-- (BOOL)readCamera:(MFCamera *)out result:(MFUEResolveResult *)r {
-    MFReadBackend *rb = [MFReadBackend shared];
+/*
+ * 读一处 POV（FMinimalViewInfo 前 0x20 字节）：
+ *     +0x00 FEncVector Location（16 字节，X/Y/Z + handler）
+ *     +0x10 FRotator  Rotation（Pitch/Yaw/Roll）
+ *     +0x1C float     FOV
+ * 先一次性读 32 字节；失败就拆成 16/12/4 三段 —— 段越小越不容易因跨页整块失败。
+ */
+static BOOL MFUEReadPOV(MFReadBackend *rb, uint64_t pov, float out[8]) {
+    memset(out, 0, sizeof(float) * 8);
+    if ([rb readRemote:pov into:out size:32]) return YES;
 
-    if (!MFUEIsValidPtr(r.cameraManager)) return NO;
+    float loc[4] = {0}, rot[3] = {0}, fov = 0.0f;
+    if (![rb readRemote:pov           into:loc size:16]) return NO;
+    if (![rb readRemote:pov + 0x10    into:rot size:12]) return NO;
+    if (![rb readRemote:pov + 0x1C    into:&fov size:4]) return NO;
+    memcpy(out,      loc, sizeof(loc));
+    memcpy(out + 4,  rot, sizeof(rot));
+    out[7] = fov;
+    return YES;
+}
 
-    /*
-     * [M5.135] 固定偏移，不再扫描。
-     *
-     *     APlayerCameraManager + 0x2D60  FCameraCacheEntry
-     *         + 0x10                    FMinimalViewInfo POV
-     *             +0x00  Location  (FEncVector：X,Y,Z,handler)
-     *             +0x10  Rotation  (Pitch,Yaw,Roll)
-     *             +0x1C  FOV
-     *
-     * 一次 48 字节读够用：readCameraStruct 返回 12 个 float，正好覆盖
-     * Location(4) + Rotation(3) + FOV + DesiredFOV + 正交参数。
-     * FEncVector 的 handler 在 f[3]，数值本身是明文（DecVector 只做原样拷贝）。
-     */
-    const uint64_t pov = r.cameraManager + kMFUE_CameraManager_CacheEntry
-                                      + kMFUE_CameraCache_POV;
-    float f[12] = {0};
-    if (![rb readCameraStruct:pov out:f]) {
-        static CFTimeInterval lastFailLog = 0;
-        const CFTimeInterval nowLog = CACurrentMediaTime();
-        if (nowLog - lastFailLog > 5.0) {     /* [M5.173] 每帧都打日志会拖慢主线程 */
-            lastFailLog = nowLog;
-            NSLog(@"[MF][UE] 相机读失败 pov=0x%llx（CameraManager=0x%llx）",
-                  (unsigned long long)pov, (unsigned long long)r.cameraManager);
-        }
-        return NO;
-    }
-
+/* 8 个 float → MFCamera，并做角度归一化与合法性校验 */
+static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
     MFCamera c = {0};
-    c.x = f[0]; c.y = f[1]; c.z = f[2];                 /* f[3] = EncHandler，忽略 */
+    c.x = f[0]; c.y = f[1]; c.z = f[2];        /* f[3] = EncHandler，忽略 */
     c.pitch = f[4]; c.yaw = f[5]; c.roll = f[6];
     c.fov = f[7];
 
-    /* ── [M5.173] 角度归一化 ──
-     * FRotator::Yaw 在不同相机路径下可能是 0..360，也可能已经归一化到 -180..180。
-     * 旧判据只接受 |yaw| <= 180.5，于是一旦引擎给出 0..360，整个屏幕就按方向
-     * "有时全有、有时全无" —— 这就是用户说的"一下子有效果一下子没有"。
-     * 这里先归一化再校验，两个约定都吃得下。
-     */
-    while (c.yaw >   180.0f) c.yaw -= 360.0f;
-    while (c.yaw <  -180.0f) c.yaw += 360.0f;
-    while (c.pitch >   180.0f) c.pitch -= 360.0f;
-    while (c.pitch <  -180.0f) c.pitch += 360.0f;
-    while (c.roll >    180.0f) c.roll -= 360.0f;
-    while (c.roll <   -180.0f) c.roll += 360.0f;
+    /* FRotator::Yaw 可能已经是 -180..180，也可能是 0..360 —— 先归一化再判 */
+    while (c.yaw   >  180.0f) c.yaw   -= 360.0f;
+    while (c.yaw   < -180.0f) c.yaw   += 360.0f;
+    while (c.pitch >  180.0f) c.pitch -= 360.0f;
+    while (c.pitch < -180.0f) c.pitch += 360.0f;
+    while (c.roll  >  180.0f) c.roll  -= 360.0f;
+    while (c.roll  < -180.0f) c.roll  += 360.0f;
 
-    /* 校验：坐标必须有限且量级合理；FOV 与俯仰必须落在物理范围内。
-     * 读错页时通常得到 0 或垃圾，这几条足以拒掉。 */
     if (!isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z)) return NO;
     if (fabsf(c.x) > 1e6f || fabsf(c.y) > 1e6f || fabsf(c.z) > 1e6f) return NO;
     if (!(c.fov >= kMFUE_POV_FovMin && c.fov <= kMFUE_POV_FovMax)) return NO;
     if (!(c.pitch >= -90.5f && c.pitch <= 90.5f)) return NO;
 
     if (out) *out = c;
+    return YES;
+}
+
+- (BOOL)readCamera:(MFCamera *)out result:(MFUEResolveResult *)r {
+    MFReadBackend *rb = [MFReadBackend shared];
+
+    if (!MFUEIsValidPtr(r.cameraManager)) return NO;
+
+    /*
+     * ★ [M5.177] 双源 + 小读 + 分段兜底 ★
+     *
+     * 真机症状：屏幕「闪一下能画、然后长时间空白」。日志每 10 秒一条
+     * 「相机读不出来（CameraCacheEntry 扫描没命中）」—— 限流后的持久失败。
+     * KFD 本身没问题（同一条日志里 GWorld/Level/Actors 每 3 秒都读得到）。
+     *
+     * 三处加固：
+     *   ① 两个相机字段都试：+0x2D60 CameraCachePrivate、+0x37B0 LastFrameCameraCachePrivate
+     *      （SDK Engine_classes.hpp 里都是 FCameraCacheEntry）；
+     *   ② 一次只读 32 字节（Location 16 + Rotation 12 + FOV 4），不再读 48；
+     *      失败再拆成 16/12/4 三段读 —— 段小，跨页/页未映射时更容易成功；
+     *   ③ 两处都不行时，把原始 8 个 float 打进日志，用来区分
+     *      「读不到」（sawData=0）还是「读到了但校验不过」（raw 有值）。
+     */
+    static const uint32_t kSources[2] = {
+        kMFUE_CameraManager_CacheEntry,          // 0x2D60
+        kMFUE_CameraManager_LastCacheEntry,      // 0x37B0
+    };
+
+    float f[8] = {0};
+    float lastBad[8] = {0};
+    uint64_t pov0 = r.cameraManager + kSources[0] + kMFUE_CameraCache_POV;
+    uint64_t pov1 = r.cameraManager + kSources[1] + kMFUE_CameraCache_POV;
+    BOOL sawData = NO;
+    int  okSource = -1;
+    MFCamera cam = {0};
+
+    for (int i = 0; i < 2; i++) {
+        const uint64_t pov = (i == 0) ? pov0 : pov1;
+        if (!MFUEReadPOV(rb, pov, f)) continue;
+        sawData = YES;
+        if (MFUEBuildCamera(f, &cam)) { okSource = i; break; }
+        memcpy(lastBad, f, sizeof(lastBad));
+    }
+
+    if (okSource < 0) {
+        static CFTimeInterval lastFailLog = 0;
+        const CFTimeInterval nowLog = CACurrentMediaTime();
+        if (nowLog - lastFailLog > 5.0) {
+            lastFailLog = nowLog;
+            NSLog(@"[MF][UE] 相机失败 cm=0x%llx pov0=0x%llx pov1=0x%llx sawData=%d "
+                  @"raw=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f | fov=%.3f]",
+                  (unsigned long long)r.cameraManager,
+                  (unsigned long long)pov0, (unsigned long long)pov1, (int)sawData,
+                  lastBad[0], lastBad[1], lastBad[2], lastBad[3],
+                  lastBad[4], lastBad[5], lastBad[6], lastBad[7]);
+        }
+        return NO;
+    }
+
+    if (out) *out = cam;
     static CFTimeInterval lastOKLog = 0;
     const CFTimeInterval nowOK = CACurrentMediaTime();
     if (nowOK - lastOKLog > 5.0) {            /* [M5.173] 限流：每 5 秒一行 */
         lastOKLog = nowOK;
-        NSLog(@"[MF][UE] 相机: loc(%.1f,%.1f,%.1f) rot(%.2f,%.2f,%.2f) fov=%.1f",
-              c.x, c.y, c.z, c.pitch, c.yaw, c.roll, c.fov);
+        NSLog(@"[MF][UE] 相机(src%d): loc(%.1f,%.1f,%.1f) rot(%.2f,%.2f,%.2f) fov=%.1f",
+              okSource, cam.x, cam.y, cam.z, cam.pitch, cam.yaw, cam.roll, cam.fov);
     }
     return YES;
 }
+
 
 #pragma mark - 敌人
 

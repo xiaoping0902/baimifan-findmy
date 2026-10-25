@@ -101,7 +101,7 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
  * 现在三条都改成"失败沿用上一份"，只有连续失败超过宽限才放弃。
  */
 static const NSTimeInterval kMFUEResolveGrace = 3.0;      // 链解析失败时沿用上次成功结果
-static const NSTimeInterval kMFUECameraGrace  = 0.5;      // 相机失败时沿用上一帧
+static const NSTimeInterval kMFUECameraGrace  = 1.5;      // [M5.177] 0.5→1.5：相机读失败时沿用上一帧更久
 static const NSTimeInterval kMFUEPersonAttrTTL = 1.2;     // 人物属性缓存（队伍/头甲/血量/武器/UIN/名字）
 static const NSTimeInterval kMFUEPersonPosInterval = 0.012; // 人物坐标（约 80Hz 上限，够跟手了）
 

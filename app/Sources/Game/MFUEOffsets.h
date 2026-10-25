@@ -432,6 +432,17 @@ static inline BOOL MFUEIsValidPtr(uint64_t p) {
  * 全部删掉：它判据太松、会误命中，而且一旦命中就写进 NSUserDefaults 永久生效。
  */
 static const uint32_t kMFUE_CameraManager_CacheEntry = 0x2D60;
+/*
+ * ★ [M5.177] 备用相机源 —— 真机上这两个字段都在（Engine_classes.hpp）：
+ *     APlayerCameraManager + 0x2D60  FCameraCacheEntry CameraCachePrivate        (0xA50)
+ *     APlayerCameraManager + 0x37B0  FCameraCacheEntry LastFrameCameraCachePrivate
+ *
+ * 为什么必须双源：真机上 0x2D60 那条会长时间读不出来（日志
+ * 「相机读不出来（CameraCacheEntry 扫描没命中）」每 10 秒一条），
+ * 于是整帧作废 → 屏幕闪一下、长时间空白。LastFrame 是引擎每帧同步的副本，
+ * 换它做后备能把这个洞补上。
+ */
+static const uint32_t kMFUE_CameraManager_LastCacheEntry = 0x37B0;
 static const uint32_t kMFUE_CameraCache_POV          = 0x10;
 static const uint32_t kMFUE_POV_Location = 0x00;   // FEncVector：X/Y/Z + handler
 static const uint32_t kMFUE_POV_Rotation = 0x10;   // FRotator 3×float（Pitch/Yaw/Roll）
