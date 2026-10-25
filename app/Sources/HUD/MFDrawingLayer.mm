@@ -84,6 +84,9 @@ typedef NS_ENUM(NSInteger, MFActorKind) {
 /* [M5.178] 朝向（雷达方向指针用）：Yaw 度 + 上次读取时间（15Hz 限流） */
 @property (nonatomic, assign) float yawDeg;
 @property (nonatomic, assign) CFTimeInterval yawAt;
+/* [M5.181] 「确认是地面物资」：actor+0x1200 的等级/价值字段读出来合理。
+ * 不依赖 GNames —— 类名解不出来时也能把物资画出来。 */
+@property (nonatomic, assign) BOOL pickupOK;
 @end
 @implementation MFUECachedActor
 @end
@@ -169,6 +172,8 @@ static const NSTimeInterval kMFUEPersonPosInterval = 0.012; // 人物坐标（�
 /// 只刷新坐标（每帧给已分类的人物用，保证框跟手）
 - (void)refreshPersonPosition:(MFUECachedActor *)a reader:(MFReadBackend *)rb
                       profile:(MFUEProfile *)p now:(CFTimeInterval)now;
+#pragma mark [M5.181] 物资（结构识别，不依赖类名）
+- (void)fillLootFields:(MFEntity *)e actor:(uint64_t)actor reader:(MFReadBackend *)rb;
 @end
 
 
@@ -813,6 +818,18 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                 }
                 if (ok && gMFUELocalMesh != 0 && vMesh == gMFUELocalMesh) ok = NO;  // 自己
                 cached.charOK = ok;
+
+                /* [M5.181] 顺便判一次是不是地面物资（结构判据，不碰 GNames） */
+                uint64_t item = 0;
+                BOOL loot = NO;
+                if ([rb readU64:addr + kMFUE_Actor_PickupInfo out:&item] && MFUEIsValidPtr(item)) {
+                    uint32_t q = 0, price = 0;
+                    const BOOL qOK = ([rb readRemote:item + kMFUE_Pickup_Quality into:&q size:4] && q <= 6);
+                    const BOOL pOK = ([rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
+                                      price < 100000000u);
+                    loot = qOK && pOK;
+                }
+                cached.pickupOK = (loot && !ok);
             }
             /*
              * ★ [M5.85] 类名必须走两跳 —— 这是分类恒失败的真正根因 ★
@@ -977,6 +994,10 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
             }
             if (e.isBot) _kindBot++; else _kindReal++;
             [ents addObject:e];
+        } else if (a.pickupOK) {
+            /* [M5.181] 结构识别出来的地面物资（不依赖类名） */
+            [self fillLootFields:e actor:a.address reader:rb];
+            [lootOut addObject:e];
         } else {
             /*
              * [M5.176] 分类不可用（或判成 Unknown）时的兜底。
@@ -1740,6 +1761,62 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     }
 
     return d;
+}
+
+#pragma mark - [M5.181] 物资（结构识别）
+
+/*
+ * 为什么要有这条：物资原本靠「类名命中 InventoryPickup」识别，而本机 GNames
+ * 解不出来（ok=0 fail=53）→ 类名永远拿不到 → 物资一个都不画。
+ *
+ * 这条通道完全不碰 GNames，只用结构判据（参考实现欧易 2.0 的读法）：
+ *     actor + 0x1200 → 物品对象
+ *     物品对象 + 0x68  → Quality（0..6）
+ *     物品对象 + 0xDC  → Price
+ *     数量：+0x18→+0x18→+0x00→+0x30→+0x20
+ *
+ * 名字暂时给「物资」；等 GNames 解码补上后自动换成真名与品质色。
+ */
+- (void)fillLootFields:(MFEntity *)e actor:(uint64_t)actor reader:(MFReadBackend *)rb {
+    if (e == nil || rb == nil) return;
+    e.isLoot = YES;
+    e.isBox  = NO;
+    if (e.name.length == 0) e.name = @"物资";
+
+    uint64_t item = 0;
+    if (![rb readU64:actor + kMFUE_Actor_PickupInfo out:&item] || !MFUEIsValidPtr(item)) return;
+
+    uint32_t quality = 0, price = 0;
+    if ([rb readRemote:item + kMFUE_Pickup_Quality into:&quality size:4] && quality <= 6)
+        e.level = (int)quality;
+    if ([rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
+        price > 0 && price < 100000000u)
+        e.value = (int)price;
+
+    /* 数量：+0x18 → +0x18 → +0x00 → +0x30，最后在 +0x20 读 u32 */
+    uint64_t p = item;
+    for (int i = 0; i < 5; i++) {
+        if (!MFUEIsValidPtr(p)) break;
+        const uint32_t off = kMFUE_PickupCountChain[i];
+        if (i == 4) {
+            uint32_t count = 0;
+            if ([rb readRemote:p + off into:&count size:4] && count > 0 && count < 100000)
+                e.count = (int)count;
+            break;
+        }
+        uint64_t next = 0;
+        if (![rb readU64:p + off out:&next] || !MFUEIsValidPtr(next)) break;
+        p = next;
+    }
+
+    /* 前 8 条把原始字段写进日志，用来核对偏移是否真的对 */
+    static NSUInteger sLogged = 0;
+    if (sLogged < 8) {
+        sLogged++;
+        MFHUDLogLine(@"[物资] actor=0x%llx item=0x%llx quality=%u price=%u count=%d",
+                     (unsigned long long)actor, (unsigned long long)item,
+                     quality, price, e.count);
+    }
 }
 
 #pragma mark - 雷达（[M5.139]，移植自参考项目）

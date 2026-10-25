@@ -344,6 +344,24 @@ static const float    kMFUE_HealthMax            = 2000.0f;
  */
 static const uint32_t kMFUE_Pawn_Controller              = 0x03A8;
 static const uint32_t kMFUE_Controller_ControlRotation   = 0x03D8;
+
+/*
+ * ★ [M5.181] 物资（不依赖 GNames 的结构识别）
+ *
+ * 参考实现（欧易 2.0，反编译）对地面物资的读法：
+ *     actor + 0x1200  → 物品对象（PickupBase 的物品信息）
+ *     物品对象 + 0x68 (104) → 等级 Quality（4B，0..6）
+ *     物品对象 + 0xDC (220) → 价值 Price（4B）
+ *     数量：+0x18 → +0x18 → +0x00 → +0x30 → +0x20 (u32)
+ *
+ * 为什么要这条：物资原本靠「类名命中 InventoryPickup」识别，而本机 GNames
+ * 解不出来（ok=0/fail=53）→ 类名永远拿不到 → 物资一个都画不出来。
+ * 结构识别用「这几个字段读出来是否合理」当判据，完全不碰 GNames。
+ */
+static const uint32_t kMFUE_Actor_PickupInfo   = 0x1200;
+static const uint32_t kMFUE_Pickup_Quality     = 0x0068;
+static const uint32_t kMFUE_Pickup_Price       = 0x00DC;
+static const uint32_t kMFUE_PickupCountChain[5] = {0x18, 0x18, 0x00, 0x30, 0x20};
 /// 名字长度上限（FString Num 的合法区间）
 static const int32_t  kMFUE_PlayerNameMaxChars   = 32;
 
