@@ -111,7 +111,9 @@ private:
         state_.module.clear();
         nextAttempt_ = 0;
     }
-    static constexpr double retryInterval_ = 5.0;
+    // [M5.173] 5.0 → 2.0：这里每失败一次，读取门就关一次、整屏空一次。
+    // 目标身份偶发读不到（进程枚举/内核瞬时繁忙）时，5 秒的间隔等于"黑屏 5 秒"。
+    static constexpr double retryInterval_ = 2.0;
     BindingState state_;
     double nextAttempt_ = 0;
 };

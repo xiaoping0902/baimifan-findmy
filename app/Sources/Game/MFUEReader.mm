@@ -86,7 +86,18 @@ static NSString *gUEReport = nil;
     MFUE_STEP(localPlayers,      r.gameInstance + p.gameInstance_localPlayers, @"GameInstance+0x%X → LocalPlayers", p.gameInstance_localPlayers);
     MFUE_STEP(localPlayer,       r.localPlayers,                            @"LocalPlayers[0] → ULocalPlayer");
     MFUE_STEP(playerController,  r.localPlayer + p.localPlayer_controller,  @"ULocalPlayer+0x%X → PlayerController", p.localPlayer_controller);
-    MFUE_STEP(pawn,              r.playerController + p.controller_pawn,    @"PlayerController+0x%X → Pawn", p.controller_pawn);
+    /*
+     * ★ [M5.173] Pawn 不再是致命步骤。
+     *
+     * 死亡 / 观战 / 换人 / 重生的一两秒里 Pawn 会短暂为 0 或非法。旧代码用 MFUE_STEP
+     * 把它当"链断"直接返回，于是那段时间【相机和 Actors 明明都能读，整屏却什么都不画】
+     * —— 这就是"一下子有效果一下子没有"的主要来源之一。
+     * 现在：Pawn 读不到只让"自己是谁"退化（自过滤改用距离兜底），不影响出图。
+     */
+    r.pawn = [rb readU64:r.playerController + p.controller_pawn];
+    [r.trace addObject:[NSString stringWithFormat:
+        @"PlayerController+0x%X → Pawn = 0x%llx%@", p.controller_pawn, r.pawn,
+        MFUEIsValidPtr(r.pawn) ? @"" : @"（非法 → 自过滤退化为距离兜底，本帧照常出图）"]];
     MFUE_STEP(cameraManager,     r.playerController + p.controller_cameraManager, @"PlayerController+0x%X → CameraManager", p.controller_cameraManager);
 
     /*
@@ -180,8 +191,13 @@ static NSString *gUEReport = nil;
                                       + kMFUE_CameraCache_POV;
     float f[12] = {0};
     if (![rb readCameraStruct:pov out:f]) {
-        NSLog(@"[MF][UE] 相机读失败 pov=0x%llx（CameraManager=0x%llx）",
-              (unsigned long long)pov, (unsigned long long)r.cameraManager);
+        static CFTimeInterval lastFailLog = 0;
+        const CFTimeInterval nowLog = CACurrentMediaTime();
+        if (nowLog - lastFailLog > 5.0) {     /* [M5.173] 每帧都打日志会拖慢主线程 */
+            lastFailLog = nowLog;
+            NSLog(@"[MF][UE] 相机读失败 pov=0x%llx（CameraManager=0x%llx）",
+                  (unsigned long long)pov, (unsigned long long)r.cameraManager);
+        }
         return NO;
     }
 
@@ -190,17 +206,34 @@ static NSString *gUEReport = nil;
     c.pitch = f[4]; c.yaw = f[5]; c.roll = f[6];
     c.fov = f[7];
 
-    /* 校验：坐标必须有限且量级合理；角度与 FOV 必须落在物理范围内。
-     * 读错页时通常得到 0 或垃圾，这两组判据足以拒掉。 */
+    /* ── [M5.173] 角度归一化 ──
+     * FRotator::Yaw 在不同相机路径下可能是 0..360，也可能已经归一化到 -180..180。
+     * 旧判据只接受 |yaw| <= 180.5，于是一旦引擎给出 0..360，整个屏幕就按方向
+     * "有时全有、有时全无" —— 这就是用户说的"一下子有效果一下子没有"。
+     * 这里先归一化再校验，两个约定都吃得下。
+     */
+    while (c.yaw >   180.0f) c.yaw -= 360.0f;
+    while (c.yaw <  -180.0f) c.yaw += 360.0f;
+    while (c.pitch >   180.0f) c.pitch -= 360.0f;
+    while (c.pitch <  -180.0f) c.pitch += 360.0f;
+    while (c.roll >    180.0f) c.roll -= 360.0f;
+    while (c.roll <   -180.0f) c.roll += 360.0f;
+
+    /* 校验：坐标必须有限且量级合理；FOV 与俯仰必须落在物理范围内。
+     * 读错页时通常得到 0 或垃圾，这几条足以拒掉。 */
     if (!isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z)) return NO;
     if (fabsf(c.x) > 1e6f || fabsf(c.y) > 1e6f || fabsf(c.z) > 1e6f) return NO;
     if (!(c.fov >= kMFUE_POV_FovMin && c.fov <= kMFUE_POV_FovMax)) return NO;
     if (!(c.pitch >= -90.5f && c.pitch <= 90.5f)) return NO;
-    if (!(c.yaw >= -180.5f && c.yaw <= 180.5f)) return NO;
 
     if (out) *out = c;
-    NSLog(@"[MF][UE] 相机: loc(%.1f,%.1f,%.1f) rot(%.2f,%.2f,%.2f) fov=%.1f",
-          c.x, c.y, c.z, c.pitch, c.yaw, c.roll, c.fov);
+    static CFTimeInterval lastOKLog = 0;
+    const CFTimeInterval nowOK = CACurrentMediaTime();
+    if (nowOK - lastOKLog > 5.0) {            /* [M5.173] 限流：每 5 秒一行 */
+        lastOKLog = nowOK;
+        NSLog(@"[MF][UE] 相机: loc(%.1f,%.1f,%.1f) rot(%.2f,%.2f,%.2f) fov=%.1f",
+              c.x, c.y, c.z, c.pitch, c.yaw, c.roll, c.fov);
+    }
     return YES;
 }
 

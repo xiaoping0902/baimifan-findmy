@@ -23,6 +23,7 @@
 #include "imgui.h"
 #include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
 #include <stdlib.h>   /* calloc —— 宽松读要清零 */
+#include <string.h>   /* [M5.173] memcpy —— 装备槽 2KB 扫描里按 8 字节取物品 ID */
 #include <math.h>     /* tanf —— 盒子高度按焦距算 */
 
 static BOOL gDrawEnabled = YES;
@@ -80,11 +81,25 @@ typedef NS_ENUM(NSInteger, MFActorKind) {
 @implementation MFUECachedActor
 @end
 
-static const NSUInteger kMFUEActorBudgetPerFrame = 320;   // 每帧最多读多少个 Actor 坐标
-static const NSTimeInterval kMFUEActorTTL = 1.0;          // 多久没更新就丢弃
+static const NSUInteger kMFUEActorBudgetPerFrame = 192;   // 每帧最多读多少个 Actor 坐标（发现用）
+static const NSTimeInterval kMFUEActorTTL = 2.0;          // 多久没更新就丢弃（[M5.173] 1.0→2.0：掉帧时
+                                                          // 轮转一圈可能超过 1 秒，旧值会让整批条目同时过期 → 闪一下全没）
 static const NSTimeInterval kMFUEResolveTTL = 1.0;        // 链结构最快多久重解一次
 static const NSTimeInterval kMFUEAddressTTL = 1.0;        // Actor 指针数组多久重读一次
 static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多久打一次日志
+
+/* ── [M5.173] 稳定化与属性读取 ──────────────────────────────
+ *
+ * 三处"一下有一帧、一下没一帧"的根因，都在下面三个宽限值里：
+ *   ① 链解析每秒重解一次，那一下失败就 return NO → 整帧空；
+ *   ② 相机读失败也 return NO → 整帧空；
+ *   ③ Actor 指针数组整批读失败会先清空再读 → 空整整一秒。
+ * 现在三条都改成"失败沿用上一份"，只有连续失败超过宽限才放弃。
+ */
+static const NSTimeInterval kMFUEResolveGrace = 3.0;      // 链解析失败时沿用上次成功结果
+static const NSTimeInterval kMFUECameraGrace  = 0.5;      // 相机失败时沿用上一帧
+static const NSTimeInterval kMFUEPersonAttrTTL = 1.2;     // 人物属性缓存（队伍/头甲/血量/武器/UIN/名字）
+static const NSTimeInterval kMFUEPersonPosInterval = 0.012; // 人物坐标（约 80Hz 上限，够跟手了）
 
 @interface MFDrawingLayer ()
 @property (nonatomic, strong) MFGameReader *reader;
@@ -136,7 +151,57 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
             settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt
               height:(float)bodyPx;
 - (ImVec2)smoothPoint:(ImVec2)raw address:(uint64_t)addr settings:(MFSettings *)st;
+#pragma mark [M5.173] 人物属性（接到现役路径上）
+/// 读一帧人物属性（缓存陈旧时才真读）；返回 NO = 这人这帧不该画（自己/队友/死亡/观战）
+- (BOOL)fillPersonFields:(MFEntity *)e actor:(uint64_t)actor
+                  reader:(MFReadBackend *)rb profile:(MFUEProfile *)p
+                     now:(CFTimeInterval)now;
+/// 真正读一次属性，返回缓存字典（t/skip/team/bot/uin/hp/h/a/b/wid/name）
+- (NSDictionary *)readPersonFields:(uint64_t)actor reader:(MFReadBackend *)rb
+                           profile:(MFUEProfile *)p now:(CFTimeInterval)now;
+/// 只刷新坐标（每帧给已分类的人物用，保证框跟手）
+- (void)refreshPersonPosition:(MFUECachedActor *)a reader:(MFReadBackend *)rb
+                      profile:(MFUEProfile *)p now:(CFTimeInterval)now;
 @end
+
+
+/// 物品 ID（十进制编码）→ 类型码 / 等级。合法区间与位序见 MFUEOffsets.h 的说明。
+static BOOL MFDecodeItemID(uint64_t itemId, int *typeCode, int *level) {
+    if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) return NO;
+    char dec[24] = {0};
+    int len = snprintf(dec, sizeof(dec), "%llu", (unsigned long long)itemId);
+    if (len < 8) return NO;
+    int lv = dec[7] - '0';
+    if (lv < 1 || lv > 6) return NO;
+    if (typeCode) *typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 + (dec[3] - '0');
+    if (level) *level = lv;
+    return YES;
+}
+
+/// PlayerState 上的名字。本作 FString 是【指针在前】（Data@0x470 / Num@0x478），
+/// 与 UE4 标准相反 —— 照标准读永远是 null，这就是"名字一直空"的老根因。
+static NSString *MFReadPlayerName(MFReadBackend *rb, uint64_t ps) {
+    uint64_t data = 0;
+    int32_t num = 0;
+    if (![rb readU64:ps + kMFUE_PlayerState_NameData out:&data]) return nil;
+    if (![rb readRemote:ps + kMFUE_PlayerState_NameNum into:&num size:4]) return nil;
+    if (num <= 0 || num > kMFUE_PlayerNameMaxChars) return nil;
+    if (!MFUEIsValidPtr(data)) return nil;
+
+    uint16_t buf[kMFUE_PlayerNameMaxChars + 2] = {0};
+    const size_t bytes = (size_t)num * 2;
+    if ([rb readRemotePartial:data into:buf size:bytes] != bytes) return nil;
+    buf[num] = 0;
+
+    NSString *s = [NSString stringWithCharacters:buf length:(NSUInteger)num];
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (s.length == 0) return nil;
+    /* 可打印性校验：读错页时通常是一串控制字符 */
+    NSCharacterSet *bad = [NSCharacterSet controlCharacterSet];
+    if ([s rangeOfCharacterFromSet:bad].location != NSNotFound) return nil;
+    return s;
+}
+
 
 /// UIKit 颜色 → ImU32（ImGui 的 ABGR 打包格式）
 static ImU32 MFU32(UIColor *c, float alphaScale = 1.0f) {
@@ -202,6 +267,14 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     CFTimeInterval _histogramAt;
     NSUInteger _kindPerson, _kindLoot, _kindBox, _kindUnknown;
     NSUInteger _kindReal, _kindBot;                         // 真人 / 人机（本帧）
+
+    /* ── [M5.173] 稳定化与人物属性 ───────────────────── */
+    NSMutableDictionary<NSNumber *, NSDictionary *> *_personAttrs;  // actor → 属性缓存
+    MFUEResolveResult *_ueResolveGood;      // 上一次成功的链解析（失败时沿用）
+    CFTimeInterval _ueResolveGoodAt;
+    MFCamera _lastCamera;                   // 上一帧的相机（读失败时沿用）
+    CFTimeInterval _lastCameraAt;
+    BOOL _classifySticky;                   // 分类一旦可用就锁定，避免整屏忽多忽少
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -215,6 +288,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         _ueActorAddrs = [NSMutableArray array];
         _classNameByID = [NSMutableDictionary dictionary];
         _kindHistogram = [NSMutableDictionary dictionary];
+        _personAttrs = [NSMutableDictionary dictionary];
 
         /*
          * [M5.85] 把「名字索引 → 字符串」接给物资读取器。
@@ -301,8 +375,21 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 /// 分类是否已经可信到可以用来过滤。
 /// 判据：解析成功过、且成功率不低于一半。不满足就退回「不分类、全画」。
 - (BOOL)classificationUsable {
+    /*
+     * [M5.173] 一次可用就锁定。
+     *
+     * 旧实现每帧重算"成功率 ≥ 一半"，随着新 Actor 不停解析成功/失败，这个布尔
+     * 会在 true/false 之间翻 —— 翻到 true 时满屏只留人物，翻到 false 时整关卡
+     * 的静态物件都画出来。屏幕上就是"一下子干净、一下子满屏框"。
+     * 解析只会越积越准，所以一旦达标就没有回头的理由。
+     */
+    if (_classifySticky) return YES;
     if (_classResolved == 0) return NO;
-    return _classResolved * 2 >= (_classResolved + _classFailed);
+    if (_classResolved * 2 >= (_classResolved + _classFailed)) {
+        _classifySticky = YES;
+        return YES;
+    }
+    return NO;
 }
 
 - (void)recordKind:(MFActorKind)kind className:(NSString *)name {
@@ -534,21 +621,38 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     const CFTimeInterval now = CACurrentMediaTime();
     if (_ueResolve == nil || now - _ueResolveAt > kMFUEResolveTTL) {
-        _ueResolve = [ue resolve];
+        MFUEResolveResult *fresh = [ue resolve];
         _ueResolveAt = now;
+        if (fresh != nil && fresh.brokenAt == nil) {
+            _ueResolve = fresh;
+            _ueResolveGood = fresh;
+            _ueResolveGoodAt = now;
+        } else if (_ueResolveGood != nil && now - _ueResolveGoodAt <= kMFUEResolveGrace) {
+            /* [M5.173] 一次读坏不再整帧作废。旧代码这里 `_ueResolve = nil; return NO;`
+             * 每秒重解一次，只要那一下碰上换图 / 重生 / 页未 fault-in，
+             * 屏幕就空一整帧，甚至空到下一次重解 —— 就是"一下有一帧一下没有"。 */
+            _ueResolve = _ueResolveGood;
+            [self noteUE4Issue:(fresh.brokenAt ?: @"链解析失败（沿用上次结果）")];
+        } else {
+            _ueResolve = nil;
+            [self noteUE4Issue:fresh.brokenAt ?: @"链解析失败"];
+            return NO;
+        }
     }
     MFUEResolveResult *r = _ueResolve;
-    if (r == nil || r.brokenAt) {
-        [self noteUE4Issue:r.brokenAt ?: @"链解析失败"];
-        _ueResolve = nil;                 // 下一帧立刻重试
-        return NO;
-    }
+    if (r == nil) return NO;
 
     // 相机每帧都要读 —— 玩家一直在动
     MFCamera cam = {0};
-    if (![ue readCamera:&cam result:r]) {
+    if ([ue readCamera:&cam result:r]) {
+        _lastCamera = cam;
+        _lastCameraAt = now;
+    } else if (now - _lastCameraAt <= kMFUECameraGrace) {
+        /* [M5.173] 单帧相机读失败沿用上一帧：0.5 秒内绝不黑屏 */
+        cam = _lastCamera;
+        [self noteUE4Issue:@"相机单帧读失败（沿用上一帧）"];
+    } else {
         [self noteUE4Issue:@"相机读不出来（CameraCacheEntry 扫描没命中）"];
-        _ueResolve = nil;
         return NO;
     }
     if (outCamera) *outCamera = cam;
@@ -568,17 +672,26 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     // ── Actor 指针数组：定期重读（一次批量读，几十 KB）──
     if (_ueActorAddrs.count == 0 || now - _ueAddrsAt > kMFUEAddressTTL) {
-        [_ueActorAddrs removeAllObjects];
         _ueAddrsAt = now;
-        _ueCursor = 0;
         size_t bytes = (size_t)r.actorsNum * 8;
         uint64_t *ptrs = (uint64_t *)calloc((size_t)r.actorsNum, sizeof(uint64_t));
         if (ptrs) {
             /* [M5.135] 宽松读：跨页失败时只丢尾巴，不整批作废 */
             size_t got = [rb readRemotePartial:r.actorsData into:ptrs size:bytes];
             int usable = (int)(got / sizeof(uint64_t));
-            for (int i = 0; i < usable; i++)
-                if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
+            /*
+             * [M5.173] 读成功才替换。
+             * 旧写法先 removeAllObjects 再读 —— 这一下若是 0 字节（换图/页未映射），
+             * 地址表就空到下一次重读（整整 1 秒），屏幕上"人全没了"。
+             */
+            if (usable > 0) {
+                [_ueActorAddrs removeAllObjects];
+                _ueCursor = 0;
+                for (int i = 0; i < usable; i++)
+                    if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
+            } else {
+                [self noteUE4Issue:@"Actor 指针数组整批读失败（沿用上一轮）"];
+            }
             free(ptrs);
         }
     }
@@ -667,8 +780,20 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
          */
         if (classify && a.kind == MFActorKindUnknown) continue;
 
+        /*
+         * [M5.173] 已分类的人物每帧刷坐标。
+         * 轮转预算（192/帧）用来"发现"新 Actor，跟不上贴身目标的移动；
+         * 人一般不超过 20 个，每帧重读一次坐标（2 次内核读）就能让框跟手。
+         */
+        if (a.kind == MFActorKindPerson) {
+            [self refreshPersonPosition:a reader:rb profile:ue.profile now:now];
+        }
+
         const float world[3] = {a.x, a.y, a.z};
         MFEntity *e = [[MFEntity alloc] init];
+        /* [M5.173] 默认"血量未知" → 画满格。旧默认是 0，于是任何没读到血量的
+         * 目标都显示成一条空血条 —— 看起来就像"血量功能坏了"。 */
+        e.health = -1;
         e.address = a.address;
         e.worldX = a.x; e.worldY = a.y; e.worldZ = a.z;
         e.distanceMeters = [MFProjection distanceMetersFrom:world to:camPos];
@@ -744,15 +869,16 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
              * ★ [M5.77] 人机 / 真人 ★
              *
              * AGPCharacterBase + 0x0E60 = bool bIsPlayerAI
-             * （Dumper-7 SDK：GPGameplay_classes.hpp，AGPCharacterBase 的字段）
-             * 1 = 人机，0 = 真人。整个角色继承链共用这个偏移。
+             * 1 = 人机，0 = 真人。读失败时保持 false（当真人画）。
              *
-             * 读失败时保持 false（当真人画）—— 宁可多画一个真人框，
-             * 也不要把真人误标成人机。
+             * ★ [M5.173] 属性在这里一次补齐（缓存 1.2s）：
+             *   自己 / 死亡 / 观战 / 队友 → 这一帧直接丢；其余填队伍、头甲、血量、
+             *   手持、UIN、名字。以前这些读数只写在不被调用的两条链里，
+             *   所以屏幕上一直是「头- 甲- 包-」「队0」「持 空手」、血条恒满。
              */
-            uint8_t isAI = 0;
-            if ([rb readRemote:a.address + ue.profile.character_isAI into:&isAI size:1]) {
-                e.isBot = (isAI != 0);
+            if (![self fillPersonFields:e actor:a.address reader:rb
+                                profile:ue.profile now:now]) {
+                continue;
             }
             if (e.isBot) _kindBot++; else _kindReal++;
             [ents addObject:e];
@@ -968,8 +1094,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
      * health < 0 = 未校准 → 按满格画（保持原占位行为，不显示假数据）
      */
     if (st.showHealth) {
-        float ratio = (e.health >= kMFHealthMin && e.health <= kMFHealthMax)
-                    ? (e.health / 100.0f) : 1.0f;
+        /*
+         * [M5.173] 血量现在真的从 healthComp+0x258 读回来了。
+         *   · health < 0  → 未知，画满格（绝不把"没读到"画成空血）
+         *   · 带甲/护盾时读数可能 >100 → 钳到满格，不越界涂出去
+         */
+        const float ratioRaw = (e.health >= kMFHealthMin) ? (e.health / 100.0f) : 1.0f;
+        const float ratio = MIN(1.0f, MAX(0.0f, ratioRaw));
         ImU32 hpCol = MFU32(ratio > 0.5f ? [UIColor systemGreenColor]
                                          : [UIColor systemRedColor], 0.92f);
 
@@ -1057,7 +1188,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
                             (unsigned long long)e.uin);
         else       snprintf(lTeam, sizeof(lTeam), "队%d", e.teamId);
 
-        if (e.health >= kMFHealthMin && e.health <= kMFHealthMax)
+        if (e.health >= kMFHealthMin)
             snprintf(lName, sizeof(lName), "%s  %d", name, e.health);
         else
             snprintf(lName, sizeof(lName), "%s", name);
@@ -1193,6 +1324,202 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         dl->AddLine(sp[a], sp[b], col, th);
     }
     return YES;
+}
+
+#pragma mark - [M5.173] 人物属性（现役路径）
+
+/*
+ * 这一段是本次修的核心，先把"为什么以前不显示"讲清楚：
+ *
+ *   属性读取（队伍 / 头甲 / 血量 / 手持 / UIN / 名字 / 剔除链）原本写在
+ *   MFUEReader.enumerateActors 和 MFGameReader.readEntitiesWithCamera 里。
+ *   这两个函数在现役代码里都没有调用点：
+ *     · enumerateActors        全仓库 0 处调用；
+ *     · readEntitiesWithCamera 只在 rootObjectBase != 0 时才会走，而生产代码
+ *                              没有任何一处给这三个绝对基址赋值（只有测试）。
+ *   真机上每帧跑的是本文件上方的 UE4 轮转，它只读坐标和类名。
+ *
+ *   所以「头甲空白 / 血量满格 / 队伍 0」不是偏移错，是读数没接上来。
+ *   这里把同一批（真机已验证的）偏移接到真正执行的那条路径上。
+ *
+ *   频率：坐标每帧；这些属性 1.2 秒一次（按 actor 缓存，TTL 按地址错开，
+ *   不会所有角色在同一帧一起刷新造成顿挫）。
+ */
+
+- (void)refreshPersonPosition:(MFUECachedActor *)a reader:(MFReadBackend *)rb
+                      profile:(MFUEProfile *)p now:(CFTimeInterval)now {
+    if (a == nil) return;
+    if (now - a.seenAt < kMFUEPersonPosInterval) return;   // 同一帧别重复读
+
+    uint64_t rootComp = 0;
+    if (![rb readU64:a.address + p.actor_rootComponent out:&rootComp]) return;
+    if (!MFUEIsValidPtr(rootComp)) return;
+
+    float pos[3] = {0};
+    if (![rb readFloat3:rootComp + p.scenecomponent_worldLocation out:pos]) return;
+    if (!isfinite(pos[0]) || !isfinite(pos[1]) || !isfinite(pos[2])) return;
+    if (fabsf(pos[0]) > kMFUE_PosAbsMax || fabsf(pos[1]) > kMFUE_PosAbsMax ||
+        fabsf(pos[2]) > kMFUE_PosAbsMax) return;
+    if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) return;
+
+    a.x = pos[0]; a.y = pos[1]; a.z = pos[2];
+    a.seenAt = now;
+}
+
+- (BOOL)fillPersonFields:(MFEntity *)e actor:(uint64_t)actor
+                  reader:(MFReadBackend *)rb profile:(MFUEProfile *)p
+                     now:(CFTimeInterval)now {
+    if (actor == 0) return NO;
+
+    /* ① 自己：按 Pawn 指针，读不到时下面还有距离兜底 */
+    if (gMFUELocalPawn != 0 && actor == gMFUELocalPawn) return NO;
+    if (e.distanceMeters >= 0.0f && e.distanceMeters < 2.0f) return NO;
+
+    NSNumber *key = @(actor);
+    NSDictionary *a = _personAttrs[key];
+    if (a == nil || now - [a[@"t"] doubleValue] > kMFUEPersonAttrTTL) {
+        a = [self readPersonFields:actor reader:rb profile:p now:now];
+        if (a) _personAttrs[key] = a;
+
+        /* 地址会被回收复用：过期足够久的条目直接清掉，避免串味与无限增长 */
+        if (_personAttrs.count > 512) {
+            NSMutableArray<NSNumber *> *dead = [NSMutableArray array];
+            for (NSNumber *k in _personAttrs) {
+                NSDictionary *v = _personAttrs[k];
+                if (now - [v[@"t"] doubleValue] > kMFUEPersonAttrTTL * 3) [dead addObject:k];
+            }
+            [_personAttrs removeObjectsForKeys:dead];
+        }
+    }
+    if (a == nil) return YES;                        // 没读到就当"未知"，照常画框
+    if ([a[@"skip"] boolValue]) return NO;           // 自己 / 队友 / 死亡 / 观战
+
+    e.isBot         = [a[@"bot"] boolValue];
+    e.teamId        = [a[@"team"] intValue];
+    e.uin           = [a[@"uin"] unsignedLongLongValue];
+    e.health        = [a[@"hp"] intValue];
+    e.helmetLevel   = [a[@"h"] intValue];
+    e.armorLevel    = [a[@"a"] intValue];
+    e.backpackLevel = [a[@"b"] intValue];
+    e.weaponRawID   = [a[@"wid"] unsignedLongLongValue];
+
+    if (e.weaponRawID) e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
+    if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
+        e.equipKnown = YES;
+        e.armorKnown = (e.armorLevel != 0);
+    }
+    NSString *nm = a[@"name"];
+    if ([nm isKindOfClass:NSString.class] && nm.length) e.name = nm;
+    return YES;
+}
+
+- (NSDictionary *)readPersonFields:(uint64_t)actor reader:(MFReadBackend *)rb
+                           profile:(MFUEProfile *)p now:(CFTimeInterval)now {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    d[@"t"]    = @(now);
+    d[@"skip"] = @NO;
+    d[@"hp"]   = @(-1);        // -1 = 未知 → 绘制层按满格画，不显示假数字
+    d[@"bot"]  = @NO;          // 读失败一律"当真人画"：宁可多一个框，也不能让人凭空消失
+    d[@"team"] = @0;
+    d[@"uin"]  = @0;
+    d[@"wid"]  = @0;
+    d[@"h"]    = @0;
+    d[@"a"]    = @0;
+    d[@"b"]    = @0;
+
+    /* ① 人机位（AGPCharacterBase+0xE60）—— 读不到就保持"当真人画" */
+    uint8_t isAI = 0;
+    if ([rb readRemote:actor + p.character_isAI into:&isAI size:1] && isAI != 0) {
+        d[@"bot"] = @YES;
+    }
+
+    /* ② 死亡：actor+0xDC8 首字节非 0 */
+    uint8_t dead = 0;
+    if ([rb readRemote:actor + kMFUE_Actor_DeadFlag into:&dead size:1] && dead != 0) {
+        d[@"skip"] = @YES;
+        return d;
+    }
+
+    /* ③ PlayerState：空 = 人机（真机判据），非空才有 UIN / 名字 / 观战位。
+     *    ★ 只有"读到了、确实是 0"才算人机；读失败保持 NO（当真人），
+     *      否则一次偶发读失败就会让人机标记翻面 → 目标时隐时现。 */
+    uint64_t ps = 0;
+    BOOL psRead = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps];
+    BOOL havePS = psRead && MFUEIsValidPtr(ps);
+    if (psRead && !havePS) d[@"bot"] = @YES;
+    if (havePS) {
+        d[@"bot"] = @NO;
+
+        /* 观战 / 未激活：PS+0x4C0 bit0 */
+        uint8_t inactive = 0;
+        if ([rb readRemote:ps + kMFUE_PlayerState_Remove into:&inactive size:1] &&
+            (inactive & 1)) {
+            d[@"skip"] = @YES;
+            return d;
+        }
+
+        uint64_t uin = 0;
+        if ([rb readU64:ps + kMFUE_PlayerState_UIN out:&uin] && uin != 0) d[@"uin"] = @(uin);
+
+        NSString *nm = MFReadPlayerName(rb, ps);
+        if (nm.length) d[@"name"] = nm;
+    }
+
+    /* ④ 队伍：TeamComp(+0x10C0) → +0x108 */
+    int32_t team = 0;
+    uint64_t tc = 0;
+    if ([rb readU64:actor + kMFUE_Pawn_PlayerState out:&tc] && MFUEIsValidPtr(tc) &&
+        [rb readRemote:tc + kMFUE_PlayerState_TeamID into:&team size:4] &&
+        team >= 0 && team < 1000) {
+        d[@"team"] = @(team);
+    }
+
+    /* ⑤ 队友：同队 + 有 PlayerState（人机 team 恒 0，不受影响），菜单可反 */
+    if (havePS && gMFUELocalTeam != 0 && [d[@"team"] intValue] == (int)gMFUELocalTeam &&
+        ![MFSettings shared].showTeammates) {
+        d[@"skip"] = @YES;
+        return d;
+    }
+
+    /* ⑥ 血量：healthComp(+0x10B8) → +0x258 float */
+    uint64_t hc = 0;
+    if ([rb readU64:actor + kMFUE_Pawn_HealthComponent out:&hc] && MFUEIsValidPtr(hc)) {
+        float hp = 0.0f;
+        if ([rb readRemote:hc + kMFUE_Health_Value into:&hp size:4] &&
+            isfinite(hp) && hp >= 0.0f && hp <= kMFUE_HealthMax) {
+            d[@"hp"] = @((int)lroundf(hp));
+        }
+    }
+
+    /* ⑦ 手持：combat(+0x1020) → +0x4D8，空则 +0x588 → +0x838 */
+    uint64_t combat = 0;
+    if ([rb readU64:actor + kMFUE_Actor_CombatComponent out:&combat] && MFUEIsValidPtr(combat)) {
+        uint64_t wpn = 0;
+        (void)[rb readU64:combat + kMFUE_Combat_WeaponA out:&wpn];
+        if (!MFUEIsValidPtr(wpn)) (void)[rb readU64:combat + kMFUE_Combat_WeaponB out:&wpn];
+        if (MFUEIsValidPtr(wpn)) {
+            uint64_t wid = 0;
+            if ([rb readU64:wpn + kMFUE_Weapon_ID out:&wid] && wid > 0) d[@"wid"] = @(wid);
+        }
+    }
+
+    /* ⑧ 头 / 甲 / 包：装备组件(+0x24E0) 整块 2KB 扫描（槽位地址会漂，不能按固定下标读） */
+    uint64_t ec = 0;
+    if ([rb readU64:actor + kMFUE_Pawn_EquipmentComponent out:&ec] && MFUEIsValidPtr(ec)) {
+        uint8_t buf[0x800];
+        size_t got = [rb readRemotePartial:ec into:buf size:sizeof(buf)];
+        for (size_t o = 0; o + 8 <= got; o += 8) {
+            uint64_t itemId = 0;
+            memcpy(&itemId, buf + o, 8);
+            int typeCode = 0, level = 0;
+            if (!MFDecodeItemID(itemId, &typeCode, &level)) continue;
+            if (typeCode == 101 && ![d[@"h"] intValue])      d[@"h"] = @(level);
+            else if (typeCode == 105 && ![d[@"a"] intValue]) d[@"a"] = @(level);
+            else if (typeCode == 108 && ![d[@"b"] intValue]) d[@"b"] = @(level);
+        }
+    }
+
+    return d;
 }
 
 #pragma mark - 雷达（[M5.139]，移植自参考项目）

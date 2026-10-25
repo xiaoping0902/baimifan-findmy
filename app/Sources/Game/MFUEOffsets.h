@@ -314,6 +314,29 @@ static const uint32_t kMFUE_Actor_DeadFlag      = 0x0DC8;
 /* 观战/未激活 = PlayerState+0x4C0 & 1 */
 static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
 
+/*
+ * [M5.173] 玩家资料与本机血量 —— 真机 Frida 已逐条验证（交接报告 §4.2 / §4.3）
+ *
+ *    UIN       PlayerState+0x320  uint64
+ *    名字 Data PlayerState+0x470  指针
+ *    名字 Num  PlayerState+0x478  int32（UTF-16 码元数）
+ *        ★ 本作是【指针在前】，UE4 标准是 Num 在前 —— 照着标准读永远是 null
+ *
+ *    血量组件  actor+0x10B8 → 组件，组件 +0x258 = float（实测 100.0）
+ *
+ * 之前这些只写在不被调用的两条链里，现役路径一个都没读 → 头甲/血量/队伍全空。
+ */
+static const uint32_t kMFUE_PlayerState_UIN      = 0x0320;
+static const uint32_t kMFUE_PlayerState_NameData = 0x0470;
+static const uint32_t kMFUE_PlayerState_NameNum  = 0x0478;
+
+static const uint32_t kMFUE_Pawn_HealthComponent = 0x10B8;
+static const uint32_t kMFUE_Health_Value         = 0x0258;
+/// 血量合理上限：超出即视为读错/未映射，不当真
+static const float    kMFUE_HealthMax            = 2000.0f;
+/// 名字长度上限（FString Num 的合法区间）
+static const int32_t  kMFUE_PlayerNameMaxChars   = 32;
+
 /* 人机/真人判定（真机验证）：人机的 PlayerState 为空，真人非空 */
 static const uint32_t kMFUE_Actor_PlayerState = 0x0390;
 
@@ -372,8 +395,12 @@ static const uint32_t kMFUE_POV_FOV      = 0x1C;   // float
 static const uint32_t kMFUE_POV_Size     = 0x20;   // Location + Rotation + FOV
 
 /// POV 的合法性判据（readCamera 用它拒掉读错页的那一帧）
-static const float kMFUE_POV_FovMin = 20.0f;       // 视场角下限
-static const float kMFUE_POV_FovMax = 150.0f;      // 视场角上限
+///
+/// [M5.173] 下限从 20 放到 5、上限从 150 放到 175。
+/// 旧区间太窄：开镜/载具/过场时 FOV 会短暂越界，整帧就被拒掉 ——
+/// 表现正是"一下子有、一下子没有"。宁可多画一帧，也别整屏空掉。
+static const float kMFUE_POV_FovMin = 5.0f;        // 视场角下限
+static const float kMFUE_POV_FovMax = 175.0f;      // 视场角上限
 
 #pragma mark - 运行时可改偏移
 
