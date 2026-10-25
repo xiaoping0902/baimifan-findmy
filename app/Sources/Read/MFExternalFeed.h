@@ -59,6 +59,16 @@ extern const NSTimeInterval MFExternalFeedStaleAfter;
 @property (nonatomic, assign) BOOL isDead;
 @property (nonatomic, assign) int kind;          // 0未知 1人物 2物资 3盒子
 @property (nonatomic, assign) uint32_t classId;
+
+/* ── [M5.160] 协议 v2 新增字段（v1 包进来时这些保持默认值）── */
+@property (nonatomic, assign) int      team;        // 队伍号
+@property (nonatomic, assign) int      helmet;      // 头等级 0-6
+@property (nonatomic, assign) int      armor;       // 甲等级 0-6
+@property (nonatomic, assign) int      bag;         // 包等级 0-6
+@property (nonatomic, assign) int      health;      // 血量
+@property (nonatomic, assign) BOOL     isSelf;      // 是否自己
+@property (nonatomic, assign) uint64_t uin;         // 玩家 ID
+@property (nonatomic, assign) uint64_t weaponId;    // 手持武器原始 ID
 @end
 
 @interface MFExternalFeed : NSObject

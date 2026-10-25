@@ -17,7 +17,9 @@ const NSTimeInterval MFExternalFeedStaleAfter = 2.0;
 
 // 协议常量（与 dfm_stream.js 必须一致）
 static const uint32_t kMFFeedMagic       = 0x4446464D;   // 'MFFD' little-endian
-static const uint16_t kMFFeedVersion     = 1;
+static const uint16_t kMFFeedVersion     = 2;   /* [M5.160] 支持 v2（48B/实体），同时兼容 v1 */
+static const uint16_t kMFFeedVersionV1   = 1;
+static const uint32_t kMFFeedEntitySizeV2 = 48;
 static const uint32_t kMFFeedHeaderSize  = 44;           // magic(4)+ver(2)+hdr(2)+count(4)+seq(4)+cam(6*4)+flags(4)
 static const uint32_t kMFFeedEntitySize  = 20;
 static const uint32_t kMFFeedMaxEntities = 2048;
@@ -165,14 +167,17 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
     uint16_t version, headerSize;
     memcpy(&version, buf + 4, 2);
     memcpy(&headerSize, buf + 6, 2);
-    if (version != kMFFeedVersion || headerSize < kMFFeedHeaderSize) { _errorCount++; return; }
+    if ((version != kMFFeedVersion && version != kMFFeedVersionV1) ||
+        headerSize < kMFFeedHeaderSize) { _errorCount++; return; }
 
     uint32_t count, seq, flags;
     memcpy(&count, buf + 8, 4);
     memcpy(&seq, buf + 12, 4);
     if (count > kMFFeedMaxEntities) { _errorCount++; return; }
 
-    NSUInteger need = headerSize + (NSUInteger)count * kMFFeedEntitySize;
+    const uint32_t entSize = (version == kMFFeedVersionV1) ? kMFFeedEntitySize
+                                                           : kMFFeedEntitySizeV2;
+    NSUInteger need = headerSize + (NSUInteger)count * entSize;
     if (len < need) { _errorCount++; return; }
 
     float cam[6];
@@ -181,7 +186,7 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
 
     NSMutableArray<MFFeedEntity *> *list = [NSMutableArray arrayWithCapacity:count];
     const uint8_t *p = buf + headerSize;
-    for (uint32_t i = 0; i < count; i++, p += kMFFeedEntitySize) {
+    for (uint32_t i = 0; i < count; i++, p += entSize) {
         MFFeedEntity *e = [[MFFeedEntity alloc] init];
         float vx, vy, vz;
         uint32_t cid;
@@ -196,6 +201,22 @@ static const uint32_t kMFFeedFlagHasCamera = 1u << 0;
         e.isDead = (p[13] != 0);
         e.kind   = p[14];
         e.classId = cid;
+
+        if (entSize >= kMFFeedEntitySizeV2) {
+            e.helmet   = p[15];
+            e.armor    = p[16];
+            e.bag      = p[17];
+            e.health   = p[18];
+            e.isSelf   = (p[19] != 0);
+            uint16_t team16 = 0;
+            memcpy(&team16, p + 20, 2);
+            e.team = (int)team16;
+            uint64_t uin = 0, wid = 0;
+            memcpy(&uin, p + 24, 8);
+            memcpy(&wid, p + 32, 8);
+            e.uin = uin;
+            e.weaponId = wid;
+        }
         [list addObject:e];
     }
 

@@ -472,6 +472,20 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         e.isVisible = e.screen.valid;
         e.isBot = fe.isBot;
 
+        /* [M5.160] 协议 v2 的字段搬进绘制实体 */
+        e.teamId        = fe.team;
+        e.helmetLevel   = fe.helmet;
+        e.armorLevel    = fe.armor;
+        e.backpackLevel = fe.bag;
+        e.health        = fe.health;
+        e.uin           = fe.uin;
+        e.weaponRawID   = fe.weaponId;
+        if (fe.helmet || fe.armor || fe.bag) {
+            e.equipKnown = YES;
+            e.armorKnown = (fe.armor != 0);
+        }
+        if (fe.weaponId) e.weaponId = (int)((fe.weaponId / 10000000ULL) % 1000ULL);
+
         {   // 方位角：只由坐标 + 相机 yaw 算
             float dx = fe.worldX - cam.x, dy = fe.worldY - cam.y;
             float ty = atan2f(dy, dx) / kMF_Deg2Rad;
