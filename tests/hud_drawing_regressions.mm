@@ -1,9 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import <objc/runtime.h>
-#import <arpa/inet.h>
-#import <sys/socket.h>
-#import <unistd.h>
 #import "MFDrawingLayer.h"
 #import "MFGameReader.h"
 #import "MFUEReader.h"
@@ -14,23 +11,56 @@
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "HUDRegressionOutput.h"
 #include <cmath>
-#include <cstring>
-#include <vector>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
-// Declare the existing delegate entry point without replacing its implementation.
 @interface MFDrawingLayer (RegressionEntryPoint)
 - (void)overlayBuildUI:(MFImGuiContext *)context overlay:(MFOverlayView *)overlay;
 @end
 
-// This fixture tests only synthetic UDP -> production drawing -> ImGui DrawData.
-// It does not attach to a game or establish that real game data can be rendered.
-// Keep readiness and the renderer real, but fail at the external memory boundary
-// if any production path unexpectedly attempts a remote read.
+// Exercise the real renderer with synthetic entities at its frame-acquisition
+// boundary. Production uses local sources; this suite must neither enable an
+// obsolete UDP source nor attach to a game. Fail on any remote memory read.
 static BOOL RejectRemoteRead(id object, SEL selector, uint64_t address, void *out, size_t size) {
     CHECK(NO, "synthetic drawing regression must not attempt any remote memory read");
     return NO;
+}
+
+static NSArray<MFEntity *> *sEntities;
+static NSArray<MFEntity *> *sLoot;
+static NSUInteger sAcquisitions;
+static BOOL SupplySyntheticFrame(id object, SEL selector, CGSize size, MFCamera *camera,
+                                  NSArray<MFEntity *> **entities, NSArray<MFEntity *> **loot,
+                                  NSInteger *source) {
+    sAcquisitions++;
+    if (!sEntities) return NO;
+    if (camera) { *camera = (MFCamera){0}; camera->fov = 90; }
+    if (entities) *entities = sEntities;
+    if (loot) *loot = sLoot ?: @[];
+    // MFDrawSource uses NSInteger as its underlying ABI. Only the acquisition
+    // method is replaced; overlayBuildUI and every drawing/filter method remain
+    // production code. A nonzero source denotes this ready synthetic frame.
+    if (source) *source = 1;
+    return YES;
+}
+
+static MFEntity *Entity(float x, float y, BOOL loot, BOOL box) {
+    MFEntity *entity = [MFEntity new];
+    entity.address = (uint64_t)(x + 10000) + (uint64_t)(y + 10000) * 100000;
+    entity.worldX = x; entity.worldY = y; entity.worldZ = 0;
+    entity.distanceMeters = hypotf(x, y) / 100.0f;
+    entity.bearingDeg = atan2f(y, x) * 180.0f / (float)M_PI;
+    entity.isBehind = x < 0;
+    entity.yawDeg = NAN;
+    entity.isLoot = loot; entity.isBox = box;
+    entity.name = box ? @"Fixture Box" : @"Fixture Item";
+    entity.level = 4; entity.value = 20000;
+    MFCamera camera = {0}; camera.fov = 90;
+    MFScreen screen = [MFProjection screenWithSize:CGSizeMake(640, 720) fov:90];
+    const float position[] = {x, y, 0};
+    entity.screen = [MFProjection projectTarget:position camera:camera screen:screen];
+    entity.isVisible = entity.screen.valid;
+    return entity;
 }
 
 static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay) {
@@ -43,48 +73,13 @@ static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay) {
     return ImGui::GetDrawData();
 }
 
-static void SendSyntheticFrame(uint16_t port, const float positions[][3],
-                               const uint8_t kinds[], uint32_t count, uint32_t sequence) {
-    // Hand-written little-endian fixture, independent of production decode:
-    // 44-byte header + N 20-byte entities. Camera at origin faces +X with FOV
-    // 90; kind 1 is a person, 2 a loot item, and 3 a box.
-    std::vector<uint8_t> packet(44 + count * 20, 0);
-    const uint32_t magic = 0x4446464D, flags = 1;
-    const uint16_t version = 1, headerSize = 44;
-    const float camera[6] = {0, 0, 0, 0, 0, 90};
-    memcpy(packet.data() + 0, &magic, sizeof(magic));
-    memcpy(packet.data() + 4, &version, sizeof(version));
-    memcpy(packet.data() + 6, &headerSize, sizeof(headerSize));
-    memcpy(packet.data() + 8, &count, sizeof(count));
-    memcpy(packet.data() + 12, &sequence, sizeof(sequence));
-    memcpy(packet.data() + 16, camera, sizeof(camera));
-    memcpy(packet.data() + 40, &flags, sizeof(flags));
-    for (uint32_t i = 0; i < count; ++i) {
-        uint8_t *entity = packet.data() + headerSize + i * 20;
-        memcpy(entity, positions[i], sizeof(float) * 3);
-        entity[14] = kinds[i];
-    }
-
-    int sender = socket(AF_INET, SOCK_DGRAM, 0);
-    CHECK(sender >= 0, "synthetic UDP sender socket must open");
-    struct sockaddr_in destination = {};
-    destination.sin_family = AF_INET;
-    destination.sin_port = htons(port);
-    destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    ssize_t sent = sendto(sender, packet.data(), packet.size(), 0,
-                          (struct sockaddr *)&destination, sizeof(destination));
-    close(sender);
-    CHECK(sent == (ssize_t)packet.size(), "complete synthetic datagram must reach the loopback socket");
-}
-
-static void TestExternalFeedWithoutLocalReadiness(void) {
+static void TestSyntheticDrawing(void) {
     MFGameReader *reader = [MFGameReader shared];
     reader.targetTaskPort = MACH_PORT_NULL;
     reader.rootObjectBase = reader.entityArrayBase = reader.lootArrayBase = 0;
     [MFUEReader shared].libBase = 0;
     CHECK(!reader.ready && ![MFReadBackend shared].gateOpen,
           "synthetic fixture must begin with no local reader readiness or target port");
-
     Method remoteRead = class_getInstanceMethod(MFReadBackend.class, @selector(readRemote:into:size:));
     CHECK(remoteRead != NULL, "production memory boundary must exist for the fail-fast guard");
     IMP originalRemoteRead = method_setImplementation(remoteRead, (IMP)RejectRemoteRead);
@@ -92,14 +87,11 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
     MFSettings *settings = [MFSettings shared];
     [settings resetToDefaults];
     settings.masterEnabled = settings.drawEnabled = YES;
-    settings.renderSelfTest = NO; // The synthetic packet, not runSelfTest:, must supply the content.
+    settings.renderSelfTest = NO;
     settings.showName = settings.showArmor = settings.showHealth = NO;
     settings.showDistance = settings.showTeam = NO;
     [MFDrawingLayer setEnabled:YES];
-
     MFExternalFeed *feed = [MFExternalFeed shared];
-    CHECK(!feed.running && feed.packetCount == 0,
-          "drawing must start the real receiver rather than rely on a prestarted feed");
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 720)
                                                                interactive:NO];
     overlay.automaticallyStartsRendering = NO;
@@ -107,100 +99,80 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
     drawing.overlay = overlay;
 
     ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    unsigned char *pixels;
-    int fontWidth, fontHeight;
+    ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
+    unsigned char *pixels; int fontWidth, fontHeight;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &fontWidth, &fontHeight);
 
-    ImDrawData *empty = Frame(drawing, overlay);
-    CHECK(empty->TotalVtxCount == 0 && !drawing.lastCameraOK,
-          "no received synthetic frame must produce no drawing content");
-    printf("TRACE: local_ready=%d libBase=%llu feed_running=%d vertices_before_packet=%d\n",
-           reader.ready, (unsigned long long)[MFUEReader shared].libBase,
-           feed.running, empty->TotalVtxCount);
-    CHECK(feed.running,
-          "drawing must start the external feed even when local reader is not ready and libBase is zero");
+    // Check the actual current source selection before injecting any frame.
+    const int unavailableVertices = Frame(drawing, overlay)->TotalVtxCount;
+    CHECK(unavailableVertices == 0 && !drawing.lastCameraOK && !feed.running,
+          "unavailable local sources must remain empty without starting the retired UDP source");
 
-    const float firstFrame[][3] = {{1000, 0, 0}};
-    const uint8_t firstKinds[] = {1};
-    SendSyntheticFrame(feed.port, firstFrame, firstKinds, 1, 73);
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
-    while (feed.packetCount == 0 && deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    }
-    CHECK(feed.packetCount == 1 && feed.errorCount == 0 && feed.lastSequence == 73 && feed.fresh,
-          "real UDP receiver must decode the complete synthetic frame before rendering");
-    ImDrawData *drawData = Frame(drawing, overlay);
+    Method acquisition = class_getInstanceMethod(MFDrawingLayer.class,
+        @selector(acquireFrameWithSize:camera:entities:loot:source:));
+    CHECK(acquisition != NULL, "the production frame acquisition boundary must exist");
+    IMP originalAcquisition = method_setImplementation(acquisition, (IMP)SupplySyntheticFrame);
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0 && !drawing.lastCameraOK,
+          "an unavailable synthetic frame must produce no drawing content");
+
+    sEntities = @[Entity(1000, 0, NO, NO)]; sLoot = @[];
+    ImDrawData *data = Frame(drawing, overlay);
     CHECK(drawing.lastCameraOK && drawing.lastEntityCount == 1 && drawing.lastLootCount == 0,
-          "production drawing must consume the synthetic camera and entity with local readiness still false");
-    CHECK(drawData->CmdLists.Size > 0 && drawData->TotalVtxCount >= 4 && drawData->TotalIdxCount >= 6,
-          "the received synthetic frame must generate actual nonempty ImGui drawing commands");
+          "production drawing must consume the synthetic camera and entity");
+    CHECK(data->CmdLists.Size > 0 && data->TotalVtxCount >= 4 && data->TotalIdxCount >= 6,
+          "a synthetic frame must generate actual nonempty ImGui drawing commands");
     BOOL visibleVertex = NO;
-    for (int list = 0; list < drawData->CmdLists.Size; list++) {
-        for (const ImDrawVert &vertex : drawData->CmdLists[list]->VtxBuffer) {
+    for (int list = 0; list < data->CmdLists.Size; list++) {
+        for (const ImDrawVert &vertex : data->CmdLists[list]->VtxBuffer) {
             CHECK(std::isfinite(vertex.pos.x) && std::isfinite(vertex.pos.y),
-                  "synthetic frame drawing coordinates must remain finite");
+                  "synthetic drawing coordinates must remain finite");
             if (vertex.pos.x > 0 && vertex.pos.x < 640 && vertex.pos.y > 0 && vertex.pos.y < 720 &&
                 (vertex.col & IM_COL32_A_MASK) != 0) visibleVertex = YES;
         }
     }
-    CHECK(visibleVertex, "synthetic frame must generate a nontransparent vertex inside the logical screen");
-    CHECK(!reader.ready && [MFUEReader shared].libBase == 0 && ![MFReadBackend shared].gateOpen,
-          "drawing synthetic feed data must not require enabling local memory access");
+    CHECK(visibleVertex, "synthetic drawing must generate a nontransparent vertex inside the logical screen");
 
-    // A behind-camera entity is intentionally off-screen. The back-enemy
-    // control must still add its directional marker to the real draw list.
+    sEntities = @[Entity(1000, 0, NO, NO), Entity(-1000, 0, NO, NO)];
     settings.backEnemyEnabled = NO;
-    const float backEnemyFrame[][3] = {{1000, 0, 0}, {-1000, 0, 0}};
-    const uint8_t backEnemyKinds[] = {1, 1};
-    SendSyntheticFrame(feed.port, backEnemyFrame, backEnemyKinds, 2, 74);
-    deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
-    while (feed.packetCount < 2 && deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    }
-    CHECK(feed.packetCount == 2, "behind-camera fixture must reach the production receiver");
-    ImDrawData *withoutBackEnemy = Frame(drawing, overlay);
+    // Copy counts: ImGui reuses its ImDrawData object on the next frame.
+    const int withoutBackEnemy = Frame(drawing, overlay)->TotalVtxCount;
     settings.backEnemyEnabled = YES;
-    ImDrawData *withBackEnemy = Frame(drawing, overlay);
-    CHECK(withBackEnemy->TotalVtxCount > withoutBackEnemy->TotalVtxCount + 8,
+    const int withBackEnemy = Frame(drawing, overlay)->TotalVtxCount;
+    CHECK(withBackEnemy > withoutBackEnemy + 8,
           "enabling back-enemy must render a marker for the behind-camera person");
 
-    // Loot visibility and its detail label are separate controls: the primary
-    // switch gates loot, while the name switch selects detail versus a marker.
     settings.backEnemyEnabled = NO;
-    settings.showLoot = NO;
+    sEntities = @[Entity(1000, 0, NO, NO)];
+    sLoot = @[Entity(1000, 80, YES, NO), Entity(1000, -80, NO, YES)];
+    settings.showLoot = NO; settings.showBox = NO; settings.showLootName = YES;
+    const int boxesHidden = Frame(drawing, overlay)->TotalVtxCount;
     settings.showBox = YES;
-    settings.showLootName = YES;
-    const float lootFrame[][3] = {{1000, 0, 0}, {1000, 80, 0}, {1000, -80, 0}};
-    const uint8_t lootKinds[] = {1, 2, 3};
-    SendSyntheticFrame(feed.port, lootFrame, lootKinds, 3, 75);
-    deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
-    while (feed.packetCount < 3 && deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    }
-    CHECK(feed.packetCount == 3, "loot fixture must reach the production receiver");
-    settings.showBox = NO;
-    ImDrawData *boxesHidden = Frame(drawing, overlay);
-    settings.showBox = YES;
-    ImDrawData *lootHidden = Frame(drawing, overlay);
+    const int lootHidden = Frame(drawing, overlay)->TotalVtxCount;
     settings.showLoot = YES;
-    ImDrawData *lootDetails = Frame(drawing, overlay);
+    const int lootDetails = Frame(drawing, overlay)->TotalVtxCount;
     settings.showLootName = NO;
-    ImDrawData *lootMarker = Frame(drawing, overlay);
-    CHECK(boxesHidden->TotalVtxCount + 8 < lootHidden->TotalVtxCount,
+    const int lootMarker = Frame(drawing, overlay)->TotalVtxCount;
+    CHECK(boxesHidden + 8 < lootHidden,
           "the box switch must control box marks independently of item visibility");
-    CHECK(lootHidden->TotalVtxCount + 8 < lootDetails->TotalVtxCount,
+    CHECK(lootHidden + 8 < lootDetails,
           "the loot switch must hide item labels while independently enabled boxes remain visible");
-    CHECK(lootMarker->TotalVtxCount + 8 < lootDetails->TotalVtxCount,
-          "the loot-name switch must reduce a detailed label to a simple marker");
+    CHECK(lootMarker + 8 < lootDetails,
+          "the loot-name switch must reduce detailed labels to simple markers");
 
-    printf("TRACE: synthetic_udp_packets=%lu entities=%lu vertices=%d indices=%d\n",
-           (unsigned long)feed.packetCount, (unsigned long)drawing.lastEntityCount,
-           drawData->TotalVtxCount, drawData->TotalIdxCount);
-    [feed stop];
-    ImGui::DestroyContext();
+    const NSUInteger acquiredBeforeDisable = sAcquisitions;
+    settings.drawEnabled = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0 && sAcquisitions == acquiredBeforeDisable,
+          "disabled drawing must clear its draw list without acquiring another frame");
+    settings.drawEnabled = YES; settings.masterEnabled = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0 && sAcquisitions == acquiredBeforeDisable,
+          "the master switch must also suppress acquisition and drawing");
+    CHECK(!reader.ready && ![MFReadBackend shared].gateOpen && !feed.running,
+          "synthetic rendering must not enable memory access or an external receiver");
+    printf("TRACE: synthetic_frames=%lu back_marker_vertices=%d loot_detail_vertices=%d\n",
+           (unsigned long)sAcquisitions, withBackEnemy - withoutBackEnemy, lootDetails - lootHidden);
+    method_setImplementation(acquisition, originalAcquisition);
     method_setImplementation(remoteRead, originalRemoteRead);
+    ImGui::DestroyContext();
 }
 
 @interface DrawingRegressionDelegate : UIResponder <UIApplicationDelegate>
@@ -209,8 +181,8 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            TestExternalFeedWithoutLocalReadiness();
-            puts("PASS: production drawing consumes synthetic UDP without local reader readiness (no game data)");
+            TestSyntheticDrawing();
+            puts("PASS: production drawing consumes synthetic frames (no game data)");
             exit(0);
         } @catch (NSException *exception) {
             fprintf(stderr, "FAIL: synthetic drawing regression raised %s: %s\n",
@@ -224,7 +196,5 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
 
 int main(int argc, char **argv) {
     MFOpenRegressionOutput();
-    @autoreleasepool {
-        return UIApplicationMain(argc, argv, nil, NSStringFromClass(DrawingRegressionDelegate.class));
-    }
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(DrawingRegressionDelegate.class)); }
 }

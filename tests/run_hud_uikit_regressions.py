@@ -117,9 +117,9 @@ def main():
                                 ROOT / "app/Sources/HUD/MFHUDControl.mm",
                                 ROOT / "app/Sources/HUD/MFHUDStartupStatus.mm"]
                 elif args.suite == "drawing":
-                    # Real UDP receiver, drawing delegate, settings and projection.
-                    # The fixture keeps local readers unbound and fails on any
-                    # remote read; no kernel or game process is part of this suite.
+                    # Production drawing, settings and projection. The fixture
+                    # injects synthetic frames at the acquisition boundary and
+                    # fails on any remote read; no kernel or game process is used.
                     # Link the production panel stats/tracer-origin and item-name
                     # helpers used by the current drawing delegate as well.
                     sources += [ROOT / "app/Sources/HUD/MFDrawingLayer.mm",
@@ -160,7 +160,7 @@ def main():
             marker = {"windows": "PASS: real UIKit", "input": "PASS: production HID bridge",
                       "menu": "PASS: production menu", "overlay": "PASS: production overlay",
                       "game-reader": "PASS: production game reader",
-                      "drawing": "PASS: production drawing consumes synthetic UDP",
+                      "drawing": "PASS: production drawing consumes synthetic frames",
                       "projection": "PASS: production projection geometry and invalid-input rejection"}[args.suite]
             report = ""
             menu_captured = False
