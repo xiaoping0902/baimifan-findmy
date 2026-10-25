@@ -278,8 +278,32 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     continue;
                 }
                 if (havePS) {
+                    /*
+                     * ★ [M5.156] 人物ID 与 名字（frida 真机解码确认）
+                     *
+                     * UIN 在 PlayerState+0x320（实测 11102077440，11 位，符合三角洲格式）。
+                     * 名字是「指针在前」的字符串：Data@+0x470，Num(int32)@+0x478，UTF-16。
+                     * 这和 UE4 常见的 Num 在前不同 —— 之前按标准布局读，永远拿到 null。
+                     */
                     uint64_t uinVal = 0;
-                    if ([rb readU64:ps + 0x490 out:&uinVal]) e.uin = uinVal;
+                    if ([rb readU64:ps + 0x320 out:&uinVal] && uinVal > 100000000ULL) {
+                        e.uin = uinVal;
+                    } else if ([rb readU64:ps + 0x490 out:&uinVal] && uinVal > 100000000ULL) {
+                        e.uin = uinVal;
+                    }
+
+                    uint64_t nameData = 0;
+                    int32_t nameNum = 0;
+                    if ([rb readU64:ps + 0x470 out:&nameData] && nameData &&
+                        [rb readRemote:ps + 0x478 into:&nameNum size:4] &&
+                        nameNum > 0 && nameNum <= 32) {
+                        unichar chars[33] = {0};
+                        if ([rb readRemote:nameData into:chars size:(size_t)nameNum * 2]) {
+                            NSString *nm = [NSString stringWithCharacters:chars
+                                                                   length:(NSUInteger)nameNum];
+                            if (nm.length) e.name = nm;
+                        }
+                    }
                 }
 
                 uint64_t ec = 0, slots = 0;
