@@ -178,6 +178,57 @@ static BOOL MFDecodeItemID(uint64_t itemId, int *typeCode, int *level) {
     return YES;
 }
 
+/// 从一张「装备记录数组」里解出头/甲/包等级，写进 d 的 h/a/b。
+///
+/// 记录数组是独立堆缓冲区（TArray::Data），所以必须按 SDK 的字段走：
+///   EquipedArmorInfoArray  stride 0x40，type@+0x00，ItemID@+0x08
+///   EquipmentInfoArray     stride 0x30，ItemID@+0x00（没有 type）
+static void MFFillEquipFromRecords(MFReadBackend *rb, uint64_t ec,
+                                   uint32_t dataOff, uint32_t numOff, uint32_t stride,
+                                   int32_t typeOff, uint32_t itemIdOff,
+                                   NSMutableDictionary *d) {
+    if (ec == 0 || stride == 0 || itemIdOff + 8 > stride) return;
+
+    uint64_t data = 0;
+    int32_t num = 0;
+    if (![rb readU64:ec + dataOff out:&data]) return;
+    if (![rb readRemote:ec + numOff into:&num size:4]) return;
+    if (!MFUEIsValidPtr(data) || num <= 0 || num > 32) return;
+
+    uint8_t buf[0x40 * 32] = {0};
+    size_t want = (size_t)num * stride;
+    if (want > sizeof(buf)) want = sizeof(buf);
+    size_t got = [rb readRemotePartial:data into:buf size:want];
+    if (got < stride) return;
+
+    for (size_t off = 0; off + stride <= got; off += stride) {
+        uint64_t itemId = 0;
+        memcpy(&itemId, buf + off + itemIdOff, sizeof(itemId));
+        if (itemId == 0) continue;
+
+        int typeCode = 0, level = 0;
+        const BOOL decoded = MFDecodeItemID(itemId, &typeCode, &level);
+        const int32_t enumType = (typeOff >= 0 && (uint32_t)typeOff < stride)
+                               ? (int32_t)buf[off + typeOff] : -1;
+
+        int slot = -1;                                    // 0=头 1=甲 2=包
+        if (decoded) {
+            if (typeCode == 101)      slot = 0;
+            else if (typeCode == 105) slot = 1;
+            else if (typeCode == 108) slot = 2;
+        }
+        if (slot < 0) {                                   // 十进制解不出就退回枚举
+            if (enumType == kMFUEEquipTypeHelmet)           slot = 0;
+            else if (enumType == kMFUEEquipTypeBreastPlate) slot = 1;
+            else if (enumType == kMFUEEquipTypeBag)         slot = 2;
+        }
+        if (slot < 0 || !decoded) continue;
+
+        NSString *key = (slot == 0) ? @"h" : (slot == 1 ? @"a" : @"b");
+        if ([d[key] intValue] == 0) d[key] = @(level);
+    }
+}
+
 /// PlayerState 上的名字。本作 FString 是【指针在前】（Data@0x470 / Num@0x478），
 /// 与 UE4 标准相反 —— 照标准读永远是 null，这就是"名字一直空"的老根因。
 static NSString *MFReadPlayerName(MFReadBackend *rb, uint64_t ps) {
@@ -1503,20 +1554,28 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         }
     }
 
-    /* ⑧ 头 / 甲 / 包：装备组件(+0x24E0) 整块 2KB 扫描（槽位地址会漂，不能按固定下标读） */
+    /*
+     * ⑧ 头 / 甲 / 包 —— [M5.174] 按 SDK 的真实布局读，不再盲扫组件
+     *
+     *   actor+0x24E0 = UCharacterEquipComponent*
+     *     +0x1E8 TArray<FArmorInfo>     每条 0x40（EquipmentType@0, ItemID@0x08）← 首选
+     *     +0x1D8 TArray<FEquipmentInfo> 每条 0x30（ItemID@0）                 ← 背包等
+     *
+     *   旧实现读组件对象本身的 2KB 去"扫物品 ID"：那两张表是独立堆缓冲区，
+     *   组件头里只有 0 和 0xFFFFFFFF → 一个都扫不到，头甲恒空白。
+     *   真机实测（三个机器人）：11010001001 / 11010005002 / 11010006002
+     *   → 101 头盔，等级 1 / 5 / 6，与 ArmorHP 20 / 45 / 55 一一对应。
+     */
     uint64_t ec = 0;
     if ([rb readU64:actor + kMFUE_Pawn_EquipmentComponent out:&ec] && MFUEIsValidPtr(ec)) {
-        uint8_t buf[0x800];
-        size_t got = [rb readRemotePartial:ec into:buf size:sizeof(buf)];
-        for (size_t o = 0; o + 8 <= got; o += 8) {
-            uint64_t itemId = 0;
-            memcpy(&itemId, buf + o, 8);
-            int typeCode = 0, level = 0;
-            if (!MFDecodeItemID(itemId, &typeCode, &level)) continue;
-            if (typeCode == 101 && ![d[@"h"] intValue])      d[@"h"] = @(level);
-            else if (typeCode == 105 && ![d[@"a"] intValue]) d[@"a"] = @(level);
-            else if (typeCode == 108 && ![d[@"b"] intValue]) d[@"b"] = @(level);
-        }
+        MFFillEquipFromRecords(rb, ec,
+                               kMFUE_Equip_ArmorArray, kMFUE_Equip_ArmorArrayNum,
+                               kMFUE_Equip_ArmorStride, (int32_t)kMFUE_Equip_ArmorTypeOff,
+                               kMFUE_Equip_ArmorItemIDOff, d);
+        MFFillEquipFromRecords(rb, ec,
+                               kMFUE_Equip_InfoArray, kMFUE_Equip_InfoArrayNum,
+                               kMFUE_Equip_InfoStride, -1,
+                               kMFUE_Equip_InfoItemIDOff, d);
     }
 
     return d;

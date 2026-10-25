@@ -345,6 +345,50 @@ static const uint32_t kMFUE_Equip_SlotsArray        = 0x01D8;
 static const uint32_t kMFUE_Equip_SlotStride        = 0x30;
 static const uint32_t kMFUE_Equip_SlotCount         = 10;
 
+/*
+ * ★ [M5.174] 装备组件真实布局 —— 真机 + Dumper-7 SDK 1.201.37117 双向确认
+ *
+ *   actor + 0x24E0 = UCharacterEquipComponent*（SDK 里的名字是 CharacterEquipComponentCache）
+ *
+ *     +0x01D8  TArray<FEquipmentInfo> EquipmentInfoArray   每条 0x30，ItemID 在 +0x00
+ *     +0x01E8  TArray<FArmorInfo>     EquipedArmorInfoArray 每条 0x40：
+ *                +0x00  EEEquipmentType（u8）  1=Helmet 5=BreastPlate 8=Bag
+ *                +0x08  ItemID（u64）
+ *                +0x18  ArmorHP（float）  +0x1C MaxArmorHP
+ *
+ *   ★ 为什么以前扫不到：这两张表是**独立的堆缓冲区**，不在组件对象内部。
+ *     旧实现读组件头的 2KB 去"扫物品 ID"，永远扫不到 —— 头甲因此恒为空白。
+ *     （真机实测：组件头 0x800 字节里只有 0 和 0xFFFFFFFF 填充）
+ *
+ *   物品 ID 是 11 位十进制：digits[1..3]=类型码（101 头 / 105 甲 / 108 包），
+ *   digits[7]=等级 1..6。真机三连验证：
+ *       11010001001 → 头 1 级，ArmorHP 20
+ *       11010005002 → 头 5 级，ArmorHP 45
+ *       11010006002 → 头 6 级，ArmorHP 55
+ */
+static const uint32_t kMFUE_Equip_InfoArray      = 0x01D8;
+static const uint32_t kMFUE_Equip_InfoArrayNum   = 0x01E0;
+static const uint32_t kMFUE_Equip_InfoStride     = 0x30;
+static const uint32_t kMFUE_Equip_InfoItemIDOff  = 0x00;
+static const uint32_t kMFUE_Equip_ArmorArray     = 0x01E8;
+static const uint32_t kMFUE_Equip_ArmorArrayNum  = 0x01F0;
+static const uint32_t kMFUE_Equip_ArmorStride    = 0x40;
+static const uint32_t kMFUE_Equip_ArmorTypeOff   = 0x00;
+static const uint32_t kMFUE_Equip_ArmorItemIDOff = 0x08;
+
+/// EEEquipmentType（Dumpspace/EnumsInfo.json 原文）
+enum {
+    kMFUEEquipTypeNone       = 0,
+    kMFUEEquipTypeHelmet     = 1,
+    kMFUEEquipTypeHeadset    = 2,
+    kMFUEEquipTypeFaceMask   = 3,
+    kMFUEEquipTypeArmband    = 4,
+    kMFUEEquipTypeBreastPlate= 5,
+    kMFUEEquipTypeGlasses    = 6,
+    kMFUEEquipTypeChestHang  = 7,
+    kMFUEEquipTypeBag        = 8,
+};
+
 /// 备选（局部坐标，仅当 RootComponent 未挂接时可用；留作对照）
 static const uint32_t kMFUE_SceneComponent_RelativeLocation = 0x0168;
 
