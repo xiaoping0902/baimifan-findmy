@@ -15,6 +15,7 @@
 #import "../Read/MFExternalFeed.h"
 #import "MFHUDLog.h"
 #import "MFRadar.h"        /* [M5.139] 圆形雷达（移植自参考项目 radar.h） */
+#import "../Game/MFBones.h"  /* [M5.141] 真骨骼（ComponentSpaceTransforms） */
 
 #import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
 
@@ -123,6 +124,8 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
                  screen:(ImVec2)screen;
+- (BOOL)drawRealBonesForEntity:(MFEntity *)e drawList:(ImDrawList *)dl
+                      settings:(MFSettings *)st camera:(MFCamera)cam screen:(ImVec2)screen;
 - (void)drawRadar:(NSArray<MFEntity *> *)ents
          drawList:(ImDrawList *)dl
          settings:(MFSettings *)st
@@ -1043,9 +1046,12 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
     if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
-        /* 骨骼与框严格对齐：中心取框中心，身高取框高 */
-        [self drawSkeleton:e drawList:dl settings:st camera:cam
-                        at:ImVec2(pt.x, (topY + botY) * 0.5f) height:bodyPx];
+        /* [M5.141] 优先画真骨骼；读不到再退回占位火柴人 */
+        if (![self drawRealBonesForEntity:e drawList:dl settings:st
+                                   camera:cam screen:screen]) {
+            [self drawSkeleton:e drawList:dl settings:st camera:cam
+                            at:ImVec2(pt.x, (topY + botY) * 0.5f) height:bodyPx];
+        }
     }
 }
 
@@ -1078,6 +1084,66 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     dl->AddLine(hip, rFoot, col, th);
     dl->AddLine(lShoulder, lFoot, col, th * 0.6f);
     dl->AddLine(rShoulder, rFoot, col, th * 0.6f);
+}
+
+#pragma mark - 真骨骼（[M5.141]）
+
+/*
+ * 骨骼读取成本：每个角色 2 次头部读 + 15 次变换读。60Hz 下会把 kread 打爆，
+ * 所以按 actor 缓存 250ms；读失败（骨数没有对应索引表 / 几何校验不过）
+ * 就回退到占位骨架，绝不画乱线。
+ */
+typedef struct {
+    uint64_t actor;
+    double   stamp;
+    BOOL     ok;
+    float    pts[kMFBoneCount][3];
+} MFBoneCacheEntry;
+static MFBoneCacheEntry gMFBoneCache[64];
+
+static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
+    MFBoneCacheEntry *reuse = &gMFBoneCache[0];
+    for (int i = 0; i < 64; i++) {
+        if (actor != 0 && gMFBoneCache[i].actor == actor) return &gMFBoneCache[i];
+        if (gMFBoneCache[i].stamp < reuse->stamp) reuse = &gMFBoneCache[i];
+    }
+    reuse->actor = actor;
+    reuse->stamp = 0;
+    reuse->ok = NO;
+    return reuse;
+}
+
+- (BOOL)drawRealBonesForEntity:(MFEntity *)e drawList:(ImDrawList *)dl
+                      settings:(MFSettings *)st camera:(MFCamera)cam screen:(ImVec2)screen {
+    if (e.address == 0) return NO;
+
+    const double now = CACurrentMediaTime();
+    MFBoneCacheEntry *c = MFBoneCacheFor(e.address);
+    if (now - c->stamp > 0.25) {
+        c->stamp = now;
+        c->ok = MFBoneReadWorld(e.address, c->pts);
+    }
+    if (!c->ok) return NO;
+
+    MFScreen sc = [MFProjection screenWithSize:CGSizeMake(screen.x, screen.y) fov:cam.fov];
+    ImVec2 sp[kMFBoneCount];
+    for (int i = 0; i < kMFBoneCount; i++) {
+        MFPoint2D p = [MFProjection projectTarget:c->pts[i] camera:cam screen:sc];
+        if (!p.valid) return NO;
+        sp[i] = ImVec2(p.x, p.y);
+    }
+
+    const int *links = NULL;
+    int linkCount = 0;
+    MFBoneLinks(&links, &linkCount);
+    ImU32 col = MFU32([st colorForSlot:MFColorSlotSkeleton], 0.9f);
+    float th = MAX(1.0f, st.skeletonThickness);
+    for (int i = 0; i < linkCount; i++) {
+        int a = links[i * 2], b = links[i * 2 + 1];
+        if (a < 0 || a >= kMFBoneCount || b < 0 || b >= kMFBoneCount) continue;
+        dl->AddLine(sp[a], sp[b], col, th);
+    }
+    return YES;
 }
 
 #pragma mark - 雷达（[M5.139]，移植自参考项目）
