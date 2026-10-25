@@ -28,6 +28,9 @@
 extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 #import "../Read/MFReadBackend.h"
 #import "../Read/MFExternalFeed.h"
+#import "../Kernel/MFKernelBridge.h"
+#import "../Kernel/MFPageTable.h"
+#import "../Kernel/MFCrossProc.h"
 #import <objc/message.h>
 #include <string.h>
 #include <math.h>
@@ -126,6 +129,9 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
 @end
 
 @interface MFHUDAppDelegate ()
+/* [M5.124] 内核在 HUD 进程里常驻 */
+- (void)bootstrapKernelInHUD;
+- (void)writeHUDKernelLog:(NSString *)text;
 @property (nonatomic, strong) MFOverlayView *menuOverlay;
 @property (nonatomic, strong) MFOverlayView *drawingOverlay;
 @property (nonatomic, strong) NSMutableDictionary *startupReport;
@@ -168,6 +174,20 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     if ([MFHUDControl exitRequested]) { [self shutdownForExitRequest]; return YES; }
     MFHUDLogLine(@"退出通道：独立控制队列 + 会话退出请求，已由引导阶段安装");
     [self refreshTargetBinding];
+
+    /*
+     * ★ [M5.124] 内核搬到 HUD 进程。
+     *
+     * 为什么必须搬：
+     *   主 App 在用户切到游戏时会被 jetsam 回收（游戏要吃 3~4 GB），进程一死，
+     *   它持有的 KFD 会话就留下悬空 PPL 页，内核随即
+     *     pmap_mark_page_as_ppl_page_internal: page still has mappings
+     *   整机 panic（15:59:39 那次就是这个）。
+     *   HUD 进程有窗口托管在 SpringBoard 上，不会被挂起 —— 所以内核应该活在
+     *   这里：开一次、常驻、读数据、绘制，全在同一个进程里。
+     */
+    [self bootstrapKernelInHUD];
+
     __weak MFHUDAppDelegate *weakTargetOwner = self;
     self.targetTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
         [weakTargetOwner refreshTargetBinding];
@@ -488,6 +508,115 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     if (self.startupToken && ![MFHUDStartupStatus writeReport:self.startupReport token:self.startupToken error:&reportError])
         MFHUDLogLine(@"防录屏状态写入失败：%@", reportError);
     [self writePassiveStateSnapshot];
+}
+
+#pragma mark - [M5.124] HUD 进程内的内核引导
+
+static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
+    NSString *hay = [NSString stringWithFormat:@"%@ %@",
+                     name.lowercaseString ?: @"", path.lowercaseString ?: @""];
+    for (NSString *k in @[@"dfm", @"tmgp", @"delta", @"三角洲"]) {
+        if ([hay containsString:k]) return YES;
+    }
+    return NO;
+}
+
+- (void)writeHUDKernelLog:(NSString *)text {
+    NSString *dir = @"/var/mobile/Media/mf-debug";
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:NULL];
+    [(text ?: @"(nil)") writeToFile:[dir stringByAppendingPathComponent:@"mf-hud-kfd.txt"]
+                         atomically:YES
+                           encoding:NSUTF8StringEncoding
+                              error:NULL];
+    MFHUDLogLine(@"内核引导报告已写入 /mf-debug/mf-hud-kfd.txt");
+}
+
+- (void)bootstrapKernelInHUD {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableString *log = [NSMutableString stringWithFormat:
+            @"[M5.124] HUD 进程接管内核  pid=%d\n", getpid()];
+
+        /* ① 开内核（只开一次；失败不重试，重试只会养脏 PUAF 页） */
+        if (!mf_is_open()) {
+            int rc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
+                              MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
+            const char *err = mf_last_error();
+            [log appendFormat:@"[kopen] rc=%d %@\n", rc,
+             rc == 0 ? @"OK"
+                     : [NSString stringWithFormat:@"失败：%s", err ? err : "(no detail)"]];
+            if (rc != 0) {
+                [log appendString:@"  → 不再重试。杀掉 HUD 与 App 后重开，或重启设备。\n"];
+                [self writeHUDKernelLog:log];
+                return;
+            }
+        } else {
+            [log appendString:@"[kopen] 会话已存在，复用\n"];
+        }
+
+        /* ② 找游戏进程 */
+        NSError *err = nil;
+        NSArray<MFProcessInfo *> *list = [[MFKernel shared]
+            enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
+        MFProcessInfo *game = nil;
+        for (MFProcessInfo *p in list) {
+            if (MFHUDLooksLikeGame(p.name, p.path)) { game = p; break; }
+        }
+        if (!game) {
+            [log appendFormat:@"[find] 没找到游戏（枚举 %lu 个进程）\n",
+             (unsigned long)list.count];
+            [self writeHUDKernelLog:log];
+            return;
+        }
+        [log appendFormat:@"[find] %@ pid=%d\n", game.name, game.pid];
+
+        /* ③ 解析 pmap 并接管读取 */
+        if (![[MFReadBackend shared] attachKFDPid:game.pid]) {
+            [log appendString:@"[attach] attachKFDPid 失败\n"];
+            [self writeHUDKernelLog:log];
+            return;
+        }
+        uint64_t root = [MFReadBackend shared].kfdRoot;
+        [log appendFormat:@"[attach] root=%#llx（读取后端已切到 KFD）\n",
+         (unsigned long long)root];
+
+        /* ④ 自证：读游戏 Mach-O 头 */
+        uint64_t base = 0;
+        if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
+            [log appendString:@"[base] 找不到最低映射页\n"];
+            [self writeHUDKernelLog:log];
+            return;
+        }
+        uint32_t magic = 0;
+        int mrc = mfpt_read(root, base, &magic, sizeof(magic));
+        [log appendFormat:@"[base] %#llx → magic=%#x (rc=%d)\n",
+         (unsigned long long)base, magic, mrc];
+        if (mrc != 0 || magic != 0xfeedfacf) {
+            [log appendString:@"[base] 不是 Mach-O，放弃\n"];
+            [self writeHUDKernelLog:log];
+            return;
+        }
+        [MFUEReader shared].libBase = base;
+
+        /* ⑤ GWorld 那一跳：成功就说明整条读取链在 HUD 进程里成立 */
+        {
+            const uint64_t slot = base + 0x178B44E0ULL;
+            uint64_t gw = 0;
+            int r = mfpt_read(root, slot, &gw, sizeof(gw));
+            [log appendFormat:@"[gworld] read(%#llx) rc=%d val=%#llx\n",
+             (unsigned long long)slot, r, (unsigned long long)gw];
+            if (r != 0) {
+                char trace[1024];
+                int trc = mfpt_walk_trace(root, slot, trace, sizeof(trace));
+                [log appendFormat:@"[gworld] 失败，walk trace rc=%d\n%s", trc, trace];
+            }
+        }
+
+        [log appendString:@"\nRESULT OK —— 内核与读取都在常驻的 HUD 进程里\n"];
+        [self writeHUDKernelLog:log];
+    });
 }
 
 - (void)refreshTargetBinding {
