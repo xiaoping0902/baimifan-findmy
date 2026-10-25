@@ -557,8 +557,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             [log appendString:@"[kopen] 会话已存在，复用\n"];
         }
 
-        /* ② 找游戏进程 */
-        NSError *err = nil;
+        /* ② 找游戏进程（这个 API 的错误参数是 NSString **，不是 NSError **） */
+        NSString *err = nil;
         NSArray<MFProcessInfo *> *list = [[MFKernel shared]
             enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
         MFProcessInfo *game = nil;
