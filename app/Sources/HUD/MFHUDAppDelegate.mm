@@ -941,10 +941,35 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                     }
                     (void)mfpt_read(root, a + 0xE60, &ai, sizeof(ai));
 
+                    /* [M5.154] 把装备槽的原始物品 ID 也写进日志 —— 不接 frida 也能核对头甲 */
+                    char eq[96] = {0};
+                    if (mesh) {
+                        uint64_t ec = 0, slots = 0;
+                        (void)mfpt_read(root, a + 0x24E0, &ec, sizeof(ec));
+                        if (ec) (void)mfpt_read(root, ec + 0x1D8, &slots, sizeof(slots));
+                        if (slots) {
+                            uint8_t rawSlot[10 * 0x30];
+                            size_t got = 0;
+                            if (mfpt_read_partial(root, slots, rawSlot, sizeof(rawSlot), &got) == 0) {
+                                size_t nSlot = got / 0x30;
+                                int w = 0, cnt = 0;
+                                for (size_t k = 0; k < nSlot && cnt < 3; k++) {
+                                    uint64_t itemId = 0;
+                                    memcpy(&itemId, rawSlot + k * 0x30, 8);
+                                    if (itemId == 0) continue;
+                                    w += snprintf(eq + w, sizeof(eq) - (size_t)w, "%s%llu",
+                                                  cnt ? "/" : "", (unsigned long long)itemId);
+                                    if (w < 0 || (size_t)w >= sizeof(eq)) break;
+                                    cnt++;
+                                }
+                            }
+                        }
+                    }
+
                     [s appendFormat:
-                     @"    A[%d] %#llx pos=%.1f,%.1f,%.1f idx=%u enc=%u team=%u ai=%u bone=%u\n",
+                     @"    A[%d] %#llx pos=%.1f,%.1f,%.1f idx=%u enc=%u team=%u ai=%u bone=%u eq=%s\n",
                      i, (unsigned long long)a, v[0], v[1], v[2], idx, enc,
-                     team, (unsigned)ai, boneNum];
+                     team, (unsigned)ai, boneNum, eq];
                     shown++;
                 }
             }
