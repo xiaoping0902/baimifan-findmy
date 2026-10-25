@@ -746,6 +746,49 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
             [s appendFormat:@"  xyz rc=%d → %.2f, %.2f, %.2f\n",
              rx, xyz[0], xyz[1], xyz[2]];
 
+            /*
+             * [M5.130] GWorld 结构 dump（只跑一次）。
+             *
+             * 玩家链 400/56/48/928 在这一版断在 +48（读到 0），说明偏移过期了。
+             * 与其继续猜，不如把 GWorld 前 0x400 字节按 8 字节逐格读出来，
+             * 并且标注每个指针"指向的对象首字段是否落在模块代码段里"
+             * （是的话就是 UObject 的 vtable，那就是我们要找的成员）。
+             */
+            static BOOL dumped = NO;
+            if (!dumped && gw > 0x100000000ULL && gw < 0x8000000000ULL) {
+                dumped = YES;
+                uint64_t modBase = base;
+                uint64_t modEnd = base + 0x1296C000ULL;
+                NSMutableString *d = [NSMutableString stringWithFormat:
+                    @"GWorld = %#llx   module = %#llx..%#llx\n",
+                    (unsigned long long)gw,
+                    (unsigned long long)modBase, (unsigned long long)modEnd];
+                for (uint64_t off = 0; off < 0x400; off += 8) {
+                    uint64_t v = 0;
+                    int rr = mfpt_read(root, gw + off, &v, sizeof(v));
+                    if (rr != 0) {
+                        [d appendFormat:@"  +%03llx  read-fail(rc=%d)\n",
+                         (unsigned long long)off, rr];
+                        continue;
+                    }
+                    BOOL isPtr = (v > 0x100000000ULL && v < 0x8000000000ULL && (v % 8) == 0);
+                    if (!isPtr) {
+                        [d appendFormat:@"  +%03llx  %#llx\n",
+                         (unsigned long long)off, (unsigned long long)v];
+                        continue;
+                    }
+                    uint64_t vt = 0;
+                    int rv = mfpt_read(root, v, &vt, sizeof(vt));
+                    BOOL obj = (rv == 0 && vt >= modBase && vt < modEnd);
+                    [d appendFormat:@"  +%03llx  %#llx →[%#llx] %@\n",
+                     (unsigned long long)off, (unsigned long long)v,
+                     (unsigned long long)vt,
+                     obj ? @"★UObject(vtable 在模块内)" : @""];
+                }
+                [d writeToFile:@"/var/mobile/Media/mf-debug/mf-gworld-dump.txt"
+                    atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            }
+
             NSString *dir = @"/var/mobile/Media/mf-debug";
             [s writeToFile:[dir stringByAppendingPathComponent:@"mf-live.txt"]
                 atomically:YES encoding:NSUTF8StringEncoding error:NULL];
