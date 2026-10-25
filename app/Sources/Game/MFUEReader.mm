@@ -315,6 +315,29 @@ static NSString *gUEReport = nil;
                 BOOL havePS = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps] &&
                               MFUEIsValidPtr(ps);
                 e.isBot = havePS ? NO : YES;
+
+                /* [M5.147] 手持武器：+0x4D8 空则用 +0x588（真机实测自己走的就是 0x588） */
+                uint64_t combat = 0;
+                if ([rb readU64:actor + kMFUE_Actor_CombatComponent out:&combat] &&
+                    MFUEIsValidPtr(combat)) {
+                    uint64_t wpn = 0;
+                    (void)[rb readU64:combat + kMFUE_Combat_WeaponA out:&wpn];
+                    if (!MFUEIsValidPtr(wpn)) {
+                        (void)[rb readU64:combat + kMFUE_Combat_WeaponB out:&wpn];
+                    }
+                    if (MFUEIsValidPtr(wpn)) {
+                        uint64_t wid = 0;
+                        if ([rb readU64:wpn + kMFUE_Weapon_ID out:&wid] && wid > 0) {
+                            char dec[24] = {0};
+                            int len = snprintf(dec, sizeof(dec), "%llu",
+                                               (unsigned long long)wid);
+                            if (len >= 4) {
+                                e.weaponId = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
+                                             (dec[3] - '0');
+                            }
+                        }
+                    }
+                }
                 if (myTeam != 0 && teamVal == myTeam && havePS) {
                     continue;      /* 队友：不画（人机即使 team 相同也照画） */
                 }
