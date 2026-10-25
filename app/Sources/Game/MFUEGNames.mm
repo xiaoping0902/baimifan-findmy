@@ -29,6 +29,7 @@
 #import "MFUEReader.h"                  /* 只用它拿 libBase / profile（不改它） */
 #import "../Read/MFReadBackend.h"
 #include <stdlib.h>
+#include <CoreFoundation/CFStringEncodingExt.h>   /* GB18030 —— 中文名解码 */
 #include <string.h>
 
 #pragma mark - 常量
@@ -107,18 +108,53 @@ static inline BOOL MFUEIsNameChar(unichar c) {
 }
 
 /// 从原始字节解出一个名字。失败（含非法字符、长度 0）返回 nil。
+/*
+ * [M5.137] 窄字符名（bIsWide == 0）不能逐字节当 Latin-1。
+ *
+ * 这个池子里同时住着两类名字：
+ *   · 类名 / 对象名 —— 纯 ASCII（"PickupBase"、"DFMPlayerCharacter"）
+ *   · 物品名 / 显示名 —— 中文
+ * 旧实现把每个字节直接塞进 unichar，中文就变成 "æ­¦å™¨" 这种乱码。
+ * 更糟的是乱码过不了 kindForClassName 的后缀匹配，分类全部落到 Unknown，
+ * 于是「分类不可用 → 全画」，屏幕上就出现一堆画在空气里的框 ——
+ * 乱码和空气框其实是同一个根因。
+ *
+ * 解码顺序：UTF-8（现代 UE 默认）→ GB18030（本地化/老资源）→ 逐字节（纯 ASCII 兜底）。
+ */
+static NSString *_Nullable MFUEDecodeNarrow(const uint8_t *src, uint32_t len) {
+    if (src == NULL || len == 0) return nil;
+
+    NSData *d = [NSData dataWithBytes:src length:len];
+    NSString *utf8 = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (utf8.length > 0) return utf8;
+
+    CFStringRef cf = CFStringCreateWithBytes(kCFAllocatorDefault, src, len,
+                                             kCFStringEncodingGB_18030_2000, false);
+    if (cf != NULL) {
+        NSString *gb = (__bridge_transfer NSString *)cf;
+        if (gb.length > 0) return gb;
+    }
+
+    unichar buf[kMFUEGMaxNameChars];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < len && n < kMFUEGMaxNameChars; i++) {
+        unichar c = (unichar)src[i];
+        if (c == 0) break;
+        if (!MFUEIsNameChar(c)) return nil;
+        buf[n++] = c;
+    }
+    return (n == 0) ? nil : [NSString stringWithCharacters:buf length:n];
+}
+
 static NSString *_Nullable MFUEDecodeName(const uint8_t *src, uint32_t len, BOOL wide) {
     if (src == NULL || len == 0 || len > kMFUEGMaxNameChars) return nil;
+
+    if (!wide) return MFUEDecodeNarrow(src, len);
 
     unichar buf[kMFUEGMaxNameChars];
     uint32_t n = 0;
     for (uint32_t i = 0; i < len; i++) {
-        unichar c;
-        if (wide) {
-            c = (unichar)((uint16_t)src[i * 2] | ((uint16_t)src[i * 2 + 1] << 8));
-        } else {
-            c = (unichar)src[i];
-        }
+        unichar c = (unichar)((uint16_t)src[i * 2] | ((uint16_t)src[i * 2 + 1] << 8));
         if (c == 0) break;                 // 提前遇到 NUL：正常（Len 通常不含 NUL）
         if (!MFUEIsNameChar(c)) return nil; // 垃圾拦截
         buf[n++] = c;

@@ -20,6 +20,7 @@
 #include "imgui.h"
 #include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
 #include <stdlib.h>   /* calloc —— 宽松读要清零 */
+#include <math.h>     /* tanf —— 盒子高度按焦距算 */
 
 static BOOL gDrawEnabled = YES;
 
@@ -122,7 +123,8 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
                settings:(MFSettings *)st
                  screen:(ImVec2)screen;
 - (void)drawSkeleton:(MFEntity *)e drawList:(ImDrawList *)dl
-            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt;
+            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt
+              height:(float)bodyPx;
 - (ImVec2)smoothPoint:(ImVec2)raw address:(uint64_t)addr settings:(MFSettings *)st;
 @end
 
@@ -880,12 +882,25 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     ImVec2 pt = [self smoothPoint:ImVec2(e.screen.x, e.screen.y)
                           address:e.address settings:st];
 
-    // 盒子尺寸：按距离缩放
-    float h = 2200.0f / MAX(e.distanceMeters, 1.0f);
-    h = MIN(MAX(h, 8.0f), screen.y * 0.6f);
-    float w = h * 0.45f;
-    ImVec2 p1(pt.x - w * 0.5f, pt.y - h);
-    ImVec2 p2(pt.x + w * 0.5f, pt.y);
+    /*
+     * ★ [M5.137] 位置是【胶囊体中心】，不是脚底。
+     *
+     * ComponentToWorld.Translation 对 ACharacter 来说就是胶囊中心（离地约 90cm）。
+     * 旧代码把 pt 当脚底（p2.y = pt.y，框只往上长），所以整框和假骨骼都高出半个身子 ——
+     * 这就是"骨骼画在人头顶上面"的直接原因。
+     *
+     * 高度也不再拍脑袋用 2200：按投影焦距算，
+     *     bodyPx = 人体高(cm) × focal / 距离(cm)
+     * 不同 FOV / 分辨率下都能贴合。
+     */
+    const float focal = (screen.x * 0.5f) / tanf(cam.fov * (float)M_PI / 360.0f);
+    float bodyPx = (focal > 0.0f)
+                 ? (180.0f * focal / MAX(e.distanceMeters * 100.0f, 1.0f))
+                 : (2200.0f / MAX(e.distanceMeters, 1.0f));
+    bodyPx = MIN(MAX(bodyPx, 8.0f), screen.y * 0.8f);
+    float w = bodyPx * 0.45f;
+    ImVec2 p1(pt.x - w * 0.5f, pt.y - bodyPx * 0.5f);
+    ImVec2 p2(pt.x + w * 0.5f, pt.y + bodyPx * 0.5f);
 
     /* ── 主色：人机用「队伍色」提示、真人用「人物信息色」──
      * 队伍颜色槽 [M5.2] 接线：编队模式下用队员色，未校准时 teamId=0 → 走人物信息色。
@@ -998,7 +1013,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
     if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
-        [self drawSkeleton:e drawList:dl settings:st camera:cam at:pt];
+        [self drawSkeleton:e drawList:dl settings:st camera:cam at:pt height:bodyPx];
     }
 }
 
@@ -1006,18 +1021,23 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 /// ⚠️ 分析明确标注「骨骼连线拓扑 + 骨骼矩阵来源」是【未证】项，
 ///    这里用「头-肩-胯」三点近似，真机拿到真实骨骼数组后替换本函数即可。
 - (void)drawSkeleton:(MFEntity *)e drawList:(ImDrawList *)dl
-            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt {
-    float scale = 2200.0f / MAX(e.distanceMeters, 1.0f);
+            settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt
+              height:(float)bodyPx {
+    /*
+     * [M5.137] 以胶囊中心为基准，上下各摊半身。
+     * 旧版把 pt 当脚底、整体往上画 —— 画面上的表现就是"骨架飘在人头顶"。
+     */
+    const float half = MAX(bodyPx, 8.0f) * 0.5f;
     ImU32 col = MFU32([st colorForSlot:MFColorSlotSkeleton], 0.9f);
     float th = MAX(1.0f, st.skeletonThickness);
 
-    ImVec2 head(pt.x, pt.y - scale);
-    ImVec2 neck(pt.x, pt.y - scale * 0.82f);
-    ImVec2 hip (pt.x, pt.y - scale * 0.45f);
-    ImVec2 lShoulder(pt.x - scale * 0.22f, pt.y - scale * 0.75f);
-    ImVec2 rShoulder(pt.x + scale * 0.22f, pt.y - scale * 0.75f);
-    ImVec2 lFoot(pt.x - scale * 0.14f, pt.y);
-    ImVec2 rFoot(pt.x + scale * 0.14f, pt.y);
+    ImVec2 head(pt.x, pt.y - half * 0.92f);
+    ImVec2 neck(pt.x, pt.y - half * 0.74f);
+    ImVec2 hip (pt.x, pt.y + half * 0.10f);
+    ImVec2 lShoulder(pt.x - half * 0.22f, pt.y - half * 0.62f);
+    ImVec2 rShoulder(pt.x + half * 0.22f, pt.y - half * 0.62f);
+    ImVec2 lFoot(pt.x - half * 0.14f, pt.y + half * 0.95f);
+    ImVec2 rFoot(pt.x + half * 0.14f, pt.y + half * 0.95f);
 
     dl->AddLine(head, neck, col, th);
     dl->AddLine(lShoulder, rShoulder, col, th);

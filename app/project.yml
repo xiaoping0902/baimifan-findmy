@@ -65,6 +65,8 @@ targets:
       - sdk: UIKit.framework
       - sdk: Foundation.framework
       - sdk: CoreGraphics.framework
+      # [M5.137] 名字解码用 CFStringCreateWithBytes（UTF-8 失败时走 GB18030 兜底）
+      - sdk: CoreFoundation.framework
       # M1：清理 Key 走 sqlite3
       - sdk: libsqlite3.tbd
       # M2：ImGui → Metal 渲染链
