@@ -19,6 +19,7 @@
 #import "../HUD/MFDrawingLayer.h"
 #import "../Kernel/MFKernel.h"
 #import "../Kernel/MFModuleLocator.h"
+#import "../Kernel/MFCrossProc.h"   // [M5.121] KFD 扫到的模块基址
 #import "../Game/Offsets.h"
 #import "../Game/MFUEReader.h"
 #import "../Game/MFGameReader.h"
@@ -700,11 +701,21 @@ extern char **environ;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         MFUEReader *ur = [MFUEReader shared];
 
-        // ASLR addresses belong to one running game instance. Resolve afresh
-        // rather than restoring an unscoped absolute address from defaults.
+        /*
+         * ★ [M5.121] 不要无条件覆盖 libBase。
+         *
+         * 这里原来写的是 ur.libBase = module ? module.base : 0 —— 而
+         * MFModuleLocator 走的是 task_for_pid，对正版游戏必然失败，
+         * 于是 libBase 被这个三元表达式清成 0，链解析永远报
+         * 「模块基址为 0」。现在：定位成功才覆盖，否则保留 KFD 填进来的值。
+         */
         NSString *pname = [MFOffsets shared].current.processName;
         MFModuleInfo *module = pname.length ? [MFModuleLocator locateProcess:pname error:NULL] : nil;
-        ur.libBase = module ? module.base : 0;
+        if (module && module.base) {
+            ur.libBase = module.base;
+        } else if (ur.libBase == 0) {
+            ur.libBase = MFCrossProcLastModuleBase();
+        }
 
         NSString *rep = [ur diagnosticReport];
 

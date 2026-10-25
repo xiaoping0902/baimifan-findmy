@@ -366,6 +366,26 @@
                     NSLog(@"[MF][UE4] 模块基址 = 0x%llx（来自 KFD 扫描）",
                           (unsigned long long)modBase);
                 }
+
+                /*
+                 * ★ [M5.121] 连上就把 UE4 链跑一遍并落盘。
+                 *
+                 * 用户不用再去点「UE4 链解析」：结果直接写 /mf-debug/mf-ue4.txt，
+                 * 电脑端一条命令就能读，断了哪一级都写得清清楚楚。
+                 */
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    NSString *ue4 = [[MFUEReader shared] diagnosticReport];
+                    NSString *dir = @"/var/mobile/Media/mf-debug";
+                    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                              withIntermediateDirectories:YES
+                                                               attributes:nil
+                                                                    error:NULL];
+                    [((ue4 ?: @"(nil)"))
+                        writeToFile:[dir stringByAppendingPathComponent:@"mf-ue4.txt"]
+                        atomically:YES
+                          encoding:NSUTF8StringEncoding
+                             error:NULL];
+                });
             } else {
                 /*
                  * ★ [M5.116] 失败就锁住，不再自动重试。
