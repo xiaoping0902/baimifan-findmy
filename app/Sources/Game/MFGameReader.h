@@ -55,6 +55,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL equipKnown;
 /* 第一个非零槽位物品 ID —— 用来核对 ID 编码格式 */
 @property (nonatomic, assign) uint64_t equipRawID;
+/* [M5.148] 人物 ID（PlayerState+0x490；未校准时为 0） */
+@property (nonatomic, assign) uint64_t uin;
 @property (nonatomic, assign) BOOL armorKnown;
 
 /// 相对相机朝向的方位角（度），**带符号**：

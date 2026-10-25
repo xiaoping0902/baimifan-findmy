@@ -241,7 +241,7 @@ static const float kMFMenuBallSize = 56.0f;
     const float headerY = ImGui::GetCursorPosY();
     const float right = screen.x - ImGui::GetStyle().WindowPadding.x;
     /* [M5.140] 浅色面板上原来的荧光绿看不清，换成深绿 */
-    ImGui::TextColored(ImVec4(0.05f, 0.45f, 0.18f, 1), "白米饭 · 悬浮窗");
+    ImGui::TextColored(ImVec4(0.05f, 0.45f, 0.18f, 1), "小玉 · 悬浮窗");
     ImGui::SetCursorPos(ImVec2(right - 136, headerY));
     bool collapse = ImGui::Button("收起", ImVec2(64, 32)); MFTrackLastItem();
     ImGui::SameLine(0, 8);

@@ -294,6 +294,9 @@ static const uint32_t kMFUE_SceneComponent_WorldLocation = 0x0220;
  * 物品 ID 是【十进制编码】：第 2~4 位 = 类型码（101 头 / 105 甲 / 108 包），
  * 第 8 位 = 等级 1~6。合法性区间 [10000001, 0x4A87F317F]。
  */
+/* ACharacter::Mesh（真机验证 0x3D0；骨骼数组位于 Mesh+0x750） */
+static const uint32_t kMFUE_Character_Mesh = 0x03D0;
+
 /* 手持武器（真机验证）：actor+0x1020 → 战斗组件 → +0x4D8（空则 +0x588）→ +0x838 武器ID */
 static const uint32_t kMFUE_Actor_CombatComponent = 0x1020;
 static const uint32_t kMFUE_Combat_WeaponA        = 0x04D8;

@@ -992,15 +992,6 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         }
     }
 
-    /* ── 名字（[M5.2] 用 fontPerson 字号）── */
-    if (st.showName) {
-        const char *name = e.name.length ? e.name.UTF8String
-                          : (e.isBot ? "人机" : "敌人");
-        ImVec2 ts = MFTextSize(name, st.fontPerson);
-        MFText(dl, st.fontPerson,
-               ImVec2(pt.x - ts.x * 0.5f, p1.y - ts.y - 2.0f), boxCol, name);
-    }
-
     /* ── 距离（[M5.2] 用 fontInfo 字号）── */
     if (st.showDistance) {
         char buf[32];
@@ -1009,45 +1000,69 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, p2.y + 2.0f), boxCol, buf);
     }
 
-    /* ── 头甲包（[M5.144] 等级来自装备槽物品 ID 的十进制编码）──
-     * 颜色沿用《物资与头甲等级机制》那张表：2 绿 / 3 天蓝 / 4 紫 / 5 黄 / 6 红。
+    /* ══════════ [M5.148] 文字块：按小玉的排版自下而上堆 ══════════
+     *      手持
+     *      头X 甲Y 包Z
+     *      队N : 人物ID
+     *      名字   血条
+     *   框顶 = 骨骼头，框底 = 骨骼脚，距离在框下面
      */
-    if (st.showArmor) {
-        char buf[40];
-        ImU32 col = MFU32([st colorForSlot:MFColorSlotArmor]);
+    {
+        const char *name = e.name.length ? e.name.UTF8String
+                          : (e.isBot ? "人机" : "敌人");
+
+        char lHeld[32], lArmor[48], lTeam[48], lName[96];
+        snprintf(lHeld, sizeof(lHeld), "%s", e.weaponId ? "持 枪" : "持 空手");
+        if (e.weaponId) snprintf(lHeld, sizeof(lHeld), "持 W%d", e.weaponId);
+
+        ImU32 armorCol = MFU32([st colorForSlot:MFColorSlotArmor]);
         if (e.equipKnown) {
             int h = e.helmetLevel, a = e.armorLevel, b = e.backpackLevel;
-            snprintf(buf, sizeof(buf), "头%d 甲%d 包%d", h, a, b);
-            int top = MAX(h, MAX(a, b));
-            switch (top) {
-                case 2: col = IM_COL32(0, 255, 0, 235); break;
-                case 3: col = IM_COL32(135, 206, 250, 235); break;
-                case 4: col = IM_COL32(122, 103, 238, 235); break;
-                case 5: col = IM_COL32(255, 219, 0, 235); break;
-                case 6: col = IM_COL32(255, 0, 0, 235); break;
+            snprintf(lArmor, sizeof(lArmor), "头%d 甲%d 包%d", h, a, b);
+            switch (MAX(h, MAX(a, b))) {
+                case 2: armorCol = IM_COL32(0, 255, 0, 235); break;
+                case 3: armorCol = IM_COL32(135, 206, 250, 235); break;
+                case 4: armorCol = IM_COL32(122, 103, 238, 235); break;
+                case 5: armorCol = IM_COL32(255, 219, 0, 235); break;
+                case 6: armorCol = IM_COL32(255, 0, 0, 235); break;
                 default: break;
             }
         } else {
-            snprintf(buf, sizeof(buf), "甲");
+            snprintf(lArmor, sizeof(lArmor), "头- 甲- 包-");
         }
-        MFText(dl, st.fontArmor, ImVec2(p2.x + 4.0f, p1.y), col, buf);
-    }
 
-    /* ── 队伍（[M5.2] 接线：显示队伍编号）── */
-    if (st.showTeam && e.teamId != 0) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "T%d", e.teamId);
-        MFText(dl, st.fontInfo, ImVec2(p1.x - 26.0f, p1.y),
-               MFU32([st colorForSlot:MFColorSlotTeam]), buf);
-    }
+        if (e.uin) snprintf(lTeam, sizeof(lTeam), "队%d : %llu", e.teamId,
+                            (unsigned long long)e.uin);
+        else       snprintf(lTeam, sizeof(lTeam), "队%d", e.teamId);
 
-    /* ── 手持（[M5.2] 接线：显示武器编号）── */
-    if (st.showHeld) {
-        char buf[24];
-        if (e.weaponId != 0) snprintf(buf, sizeof(buf), "W%d", e.weaponId);
-        else                 snprintf(buf, sizeof(buf), "持");
-        MFText(dl, st.fontInfo, ImVec2(p2.x + 4.0f, p2.y - st.fontInfo),
-               MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.85f), buf);
+        if (e.health >= kMFHealthMin && e.health <= kMFHealthMax)
+            snprintf(lName, sizeof(lName), "%s  %d", name, e.health);
+        else
+            snprintf(lName, sizeof(lName), "%s", name);
+
+        const float lh = MAX(13.0f, st.fontInfo + 2.0f);
+        const float topY0 = p1.y - 4.0f - lh * (st.showHeld ? 3.0f : 3.0f);
+        float y = topY0;
+
+        if (st.showHeld) {
+            ImVec2 ts = MFTextSize(lHeld, st.fontInfo);
+            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y),
+                   MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.9f), lHeld);
+        }
+        if (st.showArmor) {
+            ImVec2 ts = MFTextSize(lArmor, st.fontInfo);
+            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y + lh), armorCol, lArmor);
+        }
+        if (st.showTeam) {
+            ImVec2 ts = MFTextSize(lTeam, st.fontInfo);
+            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y + lh * 2.0f),
+                   MFU32([st colorForSlot:MFColorSlotTeam]), lTeam);
+        }
+        if (st.showName) {
+            ImVec2 ts = MFTextSize(lName, st.fontPerson);
+            MFText(dl, st.fontPerson, ImVec2(pt.x - ts.x * 0.5f, y + lh * 3.0f),
+                   boxCol, lName);
+        }
     }
 
     /* ── 射线 ── */

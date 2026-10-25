@@ -263,6 +263,24 @@ static NSString *gUEReport = nil;
              * 旧写法 `actor + 0x220` 少跳了 RootComponent —— 那个偏移在 AActor 里
              * 落在 Pad_1FA[0x76] 的填充区，所以永远读到 0。
              */
+            /*
+             * ★ [M5.148] 只认「有骨骼的角色」。
+             *
+             * 子弹、投掷物、箱子、场景物件全都有 RootComponent 和坐标 —— 以前它们
+             * 统统被当成"人"画出来，就是你看到的"子弹也有框/到处是空气"。
+             * 真正的角色一定有 USkeletalMeshComponent 且骨骼数 ≥ 20。
+             */
+            {
+                uint64_t meshChk = 0, boneDataChk = 0;
+                int32_t boneNumChk = 0;
+                if (![rb readU64:actor + kMFUE_Character_Mesh out:&meshChk] ||
+                    !MFUEIsValidPtr(meshChk)) continue;
+                if (![rb readU64:meshChk + 0x750 out:&boneDataChk] ||
+                    !MFUEIsValidPtr(boneDataChk)) continue;
+                if (![rb readRemote:meshChk + 0x750 + 8 into:&boneNumChk size:4]) continue;
+                if (boneNumChk < 20) continue;
+            }
+
             uint64_t rootComp = 0;
             if (![rb readU64:actor + p.actor_rootComponent out:&rootComp]) continue;
             if (!MFUEIsValidPtr(rootComp)) continue;
@@ -315,6 +333,10 @@ static NSString *gUEReport = nil;
                 BOOL havePS = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps] &&
                               MFUEIsValidPtr(ps);
                 e.isBot = havePS ? NO : YES;
+                if (havePS) {
+                    uint64_t uinVal = 0;
+                    if ([rb readU64:ps + 0x490 out:&uinVal]) e.uin = uinVal;
+                }
 
                 /* [M5.147] 手持武器：+0x4D8 空则用 +0x588（真机实测自己走的就是 0x588） */
                 uint64_t combat = 0;

@@ -77,7 +77,7 @@ extern char **environ;
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.title = @"白米饭";
+    self.title = @"小玉";
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
