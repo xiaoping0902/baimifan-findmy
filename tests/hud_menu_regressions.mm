@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "MFMenuUI.h"
 #import "MFHUDCaptureShieldView.h"
+#import "../app/Sources/Game/MFSettings.h"
 #import "../app/Sources/Render/MFOverlayView.h"
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "../app/Sources/Render/imgui/imgui_internal.h"
@@ -25,6 +26,42 @@ static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
     Frame(menu, overlay); Frame(menu, overlay);
     io.AddMouseButtonEvent(0, false);
     Frame(menu, overlay); Frame(menu, overlay);
+}
+
+static CGPoint FirstSwitchPoint(MFOverlayView *overlay) {
+    const CGFloat x = overlay.bounds.size.width * 0.5;
+    for (CGFloat y = 108; y < MIN(overlay.bounds.size.height - 40, 300); y += 1.0) {
+        if ([overlay acceptsInteractionAtPoint:CGPointMake(x, y)]) return CGPointMake(x, y + 18.0);
+    }
+    return CGPointMake(-1, -1);
+}
+
+static void TestSwitchInteractionAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overlay) {
+    MFSettings *settings = [MFSettings shared];
+    const BOOL initial = settings.masterEnabled;
+    CGPoint point = FirstSwitchPoint(overlay);
+    CHECK(point.x >= 0, "the first iOS-style setting switch must publish a real touch target");
+    ClickMenu(menu, overlay, point);
+    CHECK(settings.masterEnabled != initial,
+          "tapping the whole first setting row must change its production setting");
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.15];
+    while (deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    }
+    MFSettings *reloaded = [[MFSettings alloc] init];
+    CHECK(reloaded.masterEnabled == settings.masterEnabled,
+          "an idle setting change must persist without pressing a save button");
+
+    point = FirstSwitchPoint(overlay);
+    ClickMenu(menu, overlay, point);
+    deadline = [NSDate dateWithTimeIntervalSinceNow:1.15];
+    while (deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    }
+    reloaded = [[MFSettings alloc] init];
+    CHECK(reloaded.masterEnabled == initial,
+          "the second switch change must also be saved after the user restores the original value");
 }
 
 static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield,
@@ -74,6 +111,7 @@ static void TestButtonsAndBallAtNativeSize(void) {
         CHECK([[menu valueForKey:@"tab"] intValue] == tab,
               "each production tab click must select its page without a stuck press");
     }
+    TestSwitchInteractionAndAutomaticSave(menu, overlay);
     for (int cycle = 0; cycle < 3; cycle++) {
         ClickMenu(menu, overlay, CGPointMake(220, 28));
         CHECK([MFMenuUI collapsed] && resizePending,

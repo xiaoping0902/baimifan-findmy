@@ -858,9 +858,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     /* ── [M5.139] 雷达：画在实体循环之后、背敌之前 ── */
     [self drawRadar:ents drawList:dl settings:st camera:cam screen:screen];
 
-    /* [M5.149] 背敌提示（屏幕中心那圈点）先关掉：它和"子弹被绘制"的观感混淆，
-     * 需要时在菜单里再打开。实现保留在 drawBackEnemies: 里，没删。 */
-    if (st.backEnemyEnabled && NO) {
+    if (st.backEnemyEnabled) {
         [self drawBackEnemies:ents drawList:dl settings:st screen:screen];
     }
 
@@ -1291,10 +1289,17 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
 
 - (void)drawLoot:(MFEntity *)e drawList:(ImDrawList *)dl
         settings:(MFSettings *)st screen:(ImVec2)screen {
+    // Keep the item and container switches independent. The detail switch only
+    // changes the loot marker's presentation after its parent feature is on.
+    if (e.isBox) {
+        if (!st.showBox || e.distanceMeters > st.boxDrawDistance) return;
+    } else if (!st.showLoot || e.distanceMeters > st.lootDrawDistance) {
+        return;
+    }
+
     // ① 数值过滤（对齐分析已证的业务行为）
     if (st.minLootValue != 0 && e.value > 0 && e.value < st.minLootValue) return;
     if (st.minLootLevel != 0 && e.level > 0 && e.level < st.minLootLevel) return;
-    if (e.distanceMeters > st.lootDrawDistance) return;
 
     // ② 颜色（已证：等级 3/4/5/6 各自色；非 3–6 且价值【严格大于】9999 → 用 3 级色强调）
     UIColor *col;
@@ -1321,12 +1326,12 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         ImVec2 ts = MFTextSize(txt, st.fontBox);
         MFText(dl, st.fontBox,
                ImVec2(e.screen.x - ts.x * 0.5f, e.screen.y - ts.y), c, txt);
-    } else if (st.showLoot) {
+    } else if (!e.isBox) {
         dl->AddCircle(ImVec2(e.screen.x, e.screen.y), 4.0f, c, 12, 1.5f);
     }
 
     // ④ 盒子（独立的绘制距离）
-    if (st.showBox && e.isBox && e.distanceMeters <= st.boxDrawDistance) {
+    if (e.isBox) {
         float s = MIN(60.0f, 800.0f / MAX(e.distanceMeters, 1.0f));
         dl->AddRect(ImVec2(e.screen.x - s, e.screen.y - s),
                     ImVec2(e.screen.x + s, e.screen.y + s),

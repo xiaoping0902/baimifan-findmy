@@ -79,9 +79,9 @@ void MFApplyLightStyle(ImGuiStyle *style, MFStyleOptions options) {
     c[ImGuiCol_Text]                  = MFV(text);
     c[ImGuiCol_TextDisabled]          = MFV(faint);
     c[ImGuiCol_WindowBg]              = MFV(panel);
-    c[ImGuiCol_ChildBg]               = MFV(IM_COL32(255, 255, 255, 90));
+    c[ImGuiCol_ChildBg]               = MFV(IM_COL32(255, 255, 255, 245));
     c[ImGuiCol_PopupBg]               = MFV(surface);
-    c[ImGuiCol_Border]                = MFV(border);
+    c[ImGuiCol_Border]                = MFV(IM_COL32(60, 60, 67, 42));
     c[ImGuiCol_BorderShadow]          = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_FrameBg]               = MFV(surface);
     c[ImGuiCol_FrameBgHovered]        = MFV(track);

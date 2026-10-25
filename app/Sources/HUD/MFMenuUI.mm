@@ -13,9 +13,11 @@
 #import "MFHUDLog.h"
 #import "../Render/MFOverlayView.h"
 #import "../Game/MFSettings.h"
+#import <QuartzCore/QuartzCore.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
+#include <atomic>
 
 //
 // ★ ObjC++ 硬约束：不能对 property 表达式取地址（&s.someProp 是编译错误）。
@@ -23,6 +25,22 @@
 //     读进局部变量 → 传局部变量地址 → 有变更再写回属性。
 //
 static __weak MFOverlayView *sRectTarget = nil;
+static std::atomic<uint64_t> gSettingsRevision{0};
+static std::atomic<bool> gSettingsDirty{false};
+
+// Persist menu edits after a short idle period so a quick run of slider or
+// switch changes results in one plist write rather than one write per frame.
+static void MFMarkSettingsDirty(MFSettings *settings) {
+    gSettingsDirty.store(true, std::memory_order_release);
+    const uint64_t revision = gSettingsRevision.fetch_add(1, std::memory_order_acq_rel) + 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gSettingsRevision.load(std::memory_order_acquire) != revision) return;
+        const BOOL saved = [settings save];
+        if (gSettingsRevision.load(std::memory_order_acquire) == revision)
+            gSettingsDirty.store(!saved, std::memory_order_release);
+    });
+}
 
 // Clip against the current ImGui window, including its scrolling viewport.
 // Offscreen items must never become invisible touch targets.
@@ -40,19 +58,69 @@ static void MFTrackLastItem(void) {
     MFTrackRect(CGRectMake(a.x, a.y, b.x - a.x, b.y - a.y));
 }
 
-#define MF_CHECK(label, prop)                           \
-    do {                                                \
-        bool _v = (s.prop);                             \
-        if (ImGui::Checkbox(label, &_v)) s.prop = _v;   \
-        MFTrackLastItem();                              \
-    } while (0)
+static bool MFSettingSwitch(const char *label, bool enabled, const char *detail = nullptr) {
+    ImGui::PushID(label);
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = detail ? 62.0f : 52.0f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton("##row", ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    MFTrackLastItem();
 
-#define MF_CHECK_SAME(label, prop)                      \
-    do {                                                \
-        bool _v = (s.prop);                             \
-        if (ImGui::Checkbox(label, &_v)) s.prop = _v;   \
-        MFTrackLastItem();                              \
-        ImGui::SameLine();                              \
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    if (hovered) {
+        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height),
+                            ImGui::GetColorU32(ImGuiCol_FrameBgHovered), 8.0f);
+    }
+
+    const float labelY = detail ? origin.y + 8.0f : origin.y + (height - ImGui::GetTextLineHeight()) * 0.5f;
+    draw->AddText(ImVec2(origin.x + 3.0f, labelY), ImGui::GetColorU32(ImGuiCol_Text), label);
+    if (detail) {
+        draw->AddText(ImVec2(origin.x + 3.0f, origin.y + 32.0f),
+                      ImGui::GetColorU32(ImGuiCol_TextDisabled), detail);
+    }
+
+    const float trackW = 44.0f;
+    const float trackH = 26.0f;
+    const ImVec2 trackMin(origin.x + width - trackW - 4.0f,
+                          origin.y + (height - trackH) * 0.5f);
+    const ImVec2 trackMax(trackMin.x + trackW, trackMin.y + trackH);
+    const ImU32 trackColor = enabled ? IM_COL32(10, 132, 255, 255)
+                                     : IM_COL32(211, 211, 216, 255);
+    draw->AddRectFilled(trackMin, trackMax, trackColor, trackH * 0.5f);
+    const float knobRadius = 10.0f;
+    const float knobX = enabled ? trackMax.x - trackH * 0.5f : trackMin.x + trackH * 0.5f;
+    const ImVec2 knob(knobX, trackMin.y + trackH * 0.5f);
+    draw->AddCircleFilled(knob, knobRadius, IM_COL32(255, 255, 255, 255), 20);
+    draw->AddLine(ImVec2(origin.x + 3.0f, origin.y + height),
+                  ImVec2(origin.x + width - 3.0f, origin.y + height),
+                  ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+    ImGui::PopID();
+    return pressed;
+}
+
+static void MFBeginCard(const char *id, const char *title, const char *detail = nullptr) {
+    ImGui::Spacing();
+    ImGui::PushID(id);
+    ImGui::BeginChild("##card", ImVec2(0, 0),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Text("%s", title);
+    if (detail) ImGui::TextDisabled("%s", detail);
+    ImGui::Spacing();
+}
+
+static void MFEndCard(void) {
+    ImGui::EndChild();
+    ImGui::PopID();
+}
+
+#define MF_SWITCH(label, prop)                                     \
+    do {                                                            \
+        if (MFSettingSwitch(label, s.prop)) {                       \
+            s.prop = !s.prop;                                       \
+            MFMarkSettingsDirty(s);                                 \
+        }                                                           \
     } while (0)
 
 #define MF_SLIDE_F(label, prop, lo, hi, fmt)                          \
@@ -60,7 +128,7 @@ static void MFTrackLastItem(void) {
         float _v = (float)(s.prop);                                   \
         ImGui::TextUnformatted(label);                               \
         ImGui::SetNextItemWidth(-1);                                  \
-        if (ImGui::SliderFloat("##" label, &_v, lo, hi, fmt)) s.prop = _v; \
+        if (ImGui::SliderFloat("##" label, &_v, lo, hi, fmt)) { s.prop = _v; MFMarkSettingsDirty(s); } \
         MFTrackLastItem();                                            \
     } while (0)
 
@@ -69,7 +137,7 @@ static void MFTrackLastItem(void) {
         int _v = (int)(s.prop);                                       \
         ImGui::TextUnformatted(label);                               \
         ImGui::SetNextItemWidth(-1);                                  \
-        if (ImGui::SliderInt("##" label, &_v, lo, hi, fmt)) s.prop = _v;   \
+        if (ImGui::SliderInt("##" label, &_v, lo, hi, fmt)) { s.prop = _v; MFMarkSettingsDirty(s); } \
         MFTrackLastItem();                                            \
     } while (0)
 
@@ -85,6 +153,7 @@ static bool MFUIColorEdit(const char *label, UIColor **io, MFColorSlot slot) {
     if (changed) {
         UIColor *nc = [UIColor colorWithRed:col[0] green:col[1] blue:col[2] alpha:col[3]];
         [[MFSettings shared] setColor:nc forSlot:slot];
+        MFMarkSettingsDirty([MFSettings shared]);
         *io = nc;
         return true;
     }
@@ -240,32 +309,44 @@ static const float kMFMenuBallSize = 56.0f;
     const float left = ImGui::GetCursorPosX();
     const float headerY = ImGui::GetCursorPosY();
     const float right = screen.x - ImGui::GetStyle().WindowPadding.x;
-    /* [M5.140] 浅色面板上原来的荧光绿看不清，换成深绿 */
-    ImGui::TextColored(ImVec4(0.05f, 0.45f, 0.18f, 1), "小玉 · 悬浮窗");
-    ImGui::SetCursorPos(ImVec2(right - 136, headerY));
-    bool collapse = ImGui::Button("收起", ImVec2(64, 32)); MFTrackLastItem();
-    ImGui::SameLine(0, 8);
-    if (ImGui::Button("退出", ImVec2(64, 32))) [MFHUDControl requestExit];
+    ImGui::SetCursorPos(ImVec2(left, headerY + 2.0f));
+    ImGui::TextColored(ImVec4(0.04f, 0.43f, 0.88f, 1), "小玉");
+    ImGui::SameLine(0, 7);
+    ImGui::TextDisabled("HUD 设置");
+    ImGui::SetCursorPos(ImVec2(right - 126, headerY));
+    bool collapse = ImGui::Button("收起", ImVec2(58, 32)); MFTrackLastItem();
+    ImGui::SameLine(0, 6);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.92f, 0.92f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.84f, 0.84f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.13f, 0.13f, 1.0f));
+    if (ImGui::Button("退出", ImVec2(56, 32))) [MFHUDControl requestExit];
+    ImGui::PopStyleColor(3);
     MFTrackLastItem();
-    overlay.headerDragRect = CGRectMake(left, headerY, MAX(0.0f, right - 144 - left), 32);
+    overlay.headerDragRect = CGRectMake(left, headerY, MAX(0.0f, right - 132 - left), 36);
     ImGui::SetCursorPosY(headerY + 40);
     ImGui::Separator();
 
     // Fixed tabs; only the page below scrolls. Header and exit stay reachable.
     const char *tabs[] = {"主功能", "外观", "其他"};
-    float tabWidth = (ImGui::GetContentRegionAvail().x - 16) / 3;
+    const float tabWidth = (ImGui::GetContentRegionAvail().x - 12.0f) / 3.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
     for (int i = 0; i < 3; i++) {
-        if (i) ImGui::SameLine(0, 8);
+        if (i) ImGui::SameLine(0, 6);
         bool selected = _tab == i;
-        /* [M5.140] 选中页签：蓝底 + 白字 */
         if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.52f, 1, 1));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.43f, 0.88f, 1));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f, 0.50f, 0.96f, 1));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.91f, 0.93f, 0.96f, 1));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.89f, 0.94f, 1));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.31f, 0.34f, 0.39f, 1));
         }
-        if (ImGui::Button(tabs[i], ImVec2(tabWidth, 34))) _tab = i;
+        if (ImGui::Button(tabs[i], ImVec2(tabWidth, 38))) _tab = i;
         MFTrackLastItem();
-        if (selected) { ImGui::PopStyleColor(); ImGui::PopStyleColor(); }
+        ImGui::PopStyleColor(3);
     }
+    ImGui::PopStyleVar();
     float footerHeight = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y + 8;
     float pageHeight = MAX(64.0f, ImGui::GetContentRegionAvail().y - footerHeight);
     char pageID[32]; snprintf(pageID, sizeof(pageID), "##settings-%d", _tab);
@@ -285,10 +366,16 @@ static const float kMFMenuBallSize = 56.0f;
     }
     ImGui::EndChild();
     ImGui::Separator();
-    ImGui::SetNextItemWidth(MAX(60.0f, ImGui::GetContentRegionAvail().x - 104));
-    ImGui::SliderFloat("##alpha", &_alpha, 0.4f, 1.0f, "透明度 %.2f"); MFTrackLastItem();
+    ImGui::TextDisabled("面板透明度");
     ImGui::SameLine();
-    if (ImGui::Button("保存配置")) [s save]; MFTrackLastItem();
+    ImGui::SetNextItemWidth(MAX(64.0f, ImGui::GetContentRegionAvail().x - 112.0f));
+    ImGui::SliderFloat("##alpha", &_alpha, 0.4f, 1.0f, "%.0f%%");
+    MFTrackLastItem();
+    ImGui::SameLine();
+    if (gSettingsDirty.load(std::memory_order_acquire))
+        ImGui::TextDisabled("保存中");
+    else
+        ImGui::TextColored(ImVec4(0.16f, 0.55f, 0.25f, 1.0f), "已保存");
     ImGui::End();
     if (collapse) {
         [MFMenuUI setCollapsed:YES];
@@ -300,33 +387,29 @@ static const float kMFMenuBallSize = 56.0f;
 #pragma mark - 主功能页
 
 - (void)pageMain:(MFSettings *)s {
-    ImGui::Spacing();
-    MF_CHECK_SAME("总开关", masterEnabled);
-    MF_CHECK("启用绘制", drawEnabled);
+    MFBeginCard("overview", "悬浮绘制", "关闭任一总开关都会暂停整层 HUD");
+    MF_SWITCH("总开关", masterEnabled);
+    MF_SWITCH("启用绘制", drawEnabled);
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("绘制开关");
-    ImGui::Separator();
-    MF_CHECK("人机显示", showBot);
-    MF_CHECK("队友", showTeammates);
-    MF_CHECK("名字", showName);
-    MF_CHECK("头甲", showArmor);
-    MF_CHECK("血量", showHealth);
-    MF_CHECK("距离", showDistance);
-    ImGui::SameLine();
-    MF_CHECK("队伍", showTeam);
-    MF_CHECK("射线", showTracer);
-    ImGui::SameLine();
-    MF_CHECK("手持", showHeld);
-    MF_CHECK("骨骼", showSkeleton);
+    MFBeginCard("players", "对局信息", "每项开关都会即时作用于人物标记");
+    MF_SWITCH("人机显示", showBot);
+    MF_SWITCH("队友", showTeammates);
+    MF_SWITCH("名字", showName);
+    MF_SWITCH("头甲", showArmor);
+    MF_SWITCH("血量", showHealth);
+    MF_SWITCH("距离", showDistance);
+    MF_SWITCH("队伍", showTeam);
+    MF_SWITCH("射线", showTracer);
+    MF_SWITCH("手持", showHeld);
+    MF_SWITCH("骨骼", showSkeleton);
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("物资与盒子");
-    ImGui::Separator();
-    MF_CHECK_SAME("物资", showLoot);
-    MF_CHECK("盒子", showBox);
-    MF_CHECK_SAME("物资名字", showLootName);
-    MF_CHECK("统计窗口", showLootStats);
+    MFBeginCard("loot", "物资与盒子", "关闭物资后隐藏物资；盒子可单独控制");
+    MF_SWITCH("物资", showLoot);
+    MF_SWITCH("物资详情", showLootName);
+    MF_SWITCH("盒子", showBox);
+    MF_SWITCH("物资统计", showLootStats);
 
     {   // 等级阈值：0 显示「不限制」
         char fmt[32];
@@ -340,45 +423,43 @@ static const float kMFMenuBallSize = 56.0f;
         else                     snprintf(fmt, sizeof(fmt), "价值 >= %%d");
         MF_SLIDE_I("物资价值阈值", minLootValue, 0, 50000, fmt);
     }
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("绘制范围");
-    ImGui::Separator();
+    MFBeginCard("range", "绘制距离", "范围越大，读取和渲染的实体越多");
     MF_SLIDE_F("盒子距离", boxDrawDistance, 10.0f, 500.0f, "%.0f 米");
     MF_SLIDE_F("物资距离", lootDrawDistance, 10.0f, 500.0f, "%.0f 米");
     MF_SLIDE_F("骨骼距离", skeletonDistance, 10.0f, 300.0f, "%.0f 米");
-    ImGui::TextDisabled("骨骼距离越低越流畅");
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("背敌提示");
-    ImGui::Separator();
-    MF_CHECK("背敌", backEnemyEnabled);
+    MFBeginCard("back-enemy", "背敌提示", "标记处于屏幕后方的目标方向");
+    MF_SWITCH("背敌", backEnemyEnabled);
     MF_SLIDE_F("背敌半径", backEnemyRadius, 10.0f, 300.0f, "%.0f px");
     {
         const char *styles[] = {"圆形", "箭头", "圆环"};
         int st = (int)s.backEnemyStyle;
         ImGui::TextUnformatted("背敌样式");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##背敌样式", &st, styles, 3)) s.backEnemyStyle = (MFBackEnemyStyle)st;
+        if (ImGui::Combo("##背敌样式", &st, styles, 3)) {
+            s.backEnemyStyle = (MFBackEnemyStyle)st;
+            MFMarkSettingsDirty(s);
+        }
         MFTrackLastItem();
     }
+    MFEndCard();
 }
 
 #pragma mark - 外观页
 
 - (void)pageAppearance:(MFSettings *)s {
-    ImGui::Spacing();
-    ImGui::TextDisabled("字号");
-    ImGui::Separator();
+    MFBeginCard("type", "文字与线条", "调整屏幕标记的大小和清晰度");
     MF_SLIDE_F("人物字号", fontPerson, 8.0f, 28.0f, "%.0f");
     MF_SLIDE_F("盒子字号", fontBox, 8.0f, 28.0f, "%.0f");
     MF_SLIDE_F("信息字号", fontInfo, 8.0f, 28.0f, "%.0f");
     MF_SLIDE_F("头甲字号", fontArmor, 8.0f, 28.0f, "%.0f");
     MF_SLIDE_F("骨骼粗细", skeletonThickness, 0.5f, 6.0f, "%.1f");
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("颜色");
-    ImGui::Separator();
+    MFBeginCard("colors", "颜色", "点按色块可选择颜色和透明度");
 
     struct Row { const char *label; MFColorSlot slot; };
     static const Row rows[] = {
@@ -399,27 +480,18 @@ static const float kMFMenuBallSize = 56.0f;
         UIColor *c = [s colorForSlot:r.slot];
         MFUIColorEdit(r.label, &c, r.slot);
     }
+    MFEndCard();
 }
 
 #pragma mark - 其他页
 
 - (void)pageOther:(MFSettings *)s {
-    ImGui::Spacing();
-    ImGui::TextDisabled("穿透与窗口");
-    ImGui::Separator();
+    MFBeginCard("window", "窗口与触控", "面板空白处会穿透到下层 App");
     ImGui::TextWrapped("拖动标题移动窗口；收起后仅保留小圆球，点球展开。");
-    ImGui::TextWrapped("需要操作下层 App 时，先点标题右侧的收起。");
-    ImGui::TextDisabled("拖动右侧滚动条浏览设置");
+    ImGui::TextWrapped("点右上角“收起”可操作下层 App。");
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("物资统计");
-    ImGui::Separator();
-    MF_CHECK("物资统计窗口", showLootStats);
-    ImGui::TextDisabled("等级/价值阈值在主功能页");
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("渲染");
-    ImGui::Separator();
+    MFBeginCard("render", "渲染", "菜单和绘制层会同时应用刷新率");
     {
         const char *rates[] = {"30", "45", "60", "90", "120"};
         const int rateValues[] = {30, 45, 60, 90, 120};
@@ -429,6 +501,7 @@ static const float kMFMenuBallSize = 56.0f;
         ImGui::SetNextItemWidth(-1);
         if (ImGui::Combo("##刷新率", &ri, rates, 5)) {
             s.refreshRate = rateValues[ri];
+            MFMarkSettingsDirty(s);
             // ★ 同时应用到菜单层与绘制层：之前只改了菜单层，
             //   真正吃性能的全屏绘制层一直是固定 60。
             if (gFrameRateApplier) gFrameRateApplier(s.refreshRate);
@@ -447,21 +520,21 @@ static const float kMFMenuBallSize = 56.0f;
         int hb = (int)s.healthBarStyle;
         ImGui::TextUnformatted("血条样式");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##血条样式", &hb, bars, 3)) s.healthBarStyle = hb;
+        if (ImGui::Combo("##血条样式", &hb, bars, 3)) {
+            s.healthBarStyle = hb;
+            MFMarkSettingsDirty(s);
+        }
         MFTrackLastItem();
     }
-    MF_CHECK("平滑绘制", smoothAim);
+    MF_SWITCH("平滑绘制", smoothAim);
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("自检");
-    ImGui::Separator();
-    MF_CHECK("渲染自检", renderSelfTest);
-    ImGui::TextDisabled("打开后会画 4 个合成框 + 4 个物资标签");
+    MFBeginCard("diagnostics", "自检", "打开后用合成内容验证绘制链");
+    MF_SWITCH("渲染自检", renderSelfTest);
     ImGui::TextDisabled("用于在偏移校准之前验证渲染链");
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("模式");
-    ImGui::Separator();
+    MFBeginCard("availability", "功能状态");
     /*
      * ★ [M5.134] 防录屏开关已停用。
      *
@@ -476,14 +549,11 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::BeginDisabled();
     ImGui::Checkbox("防录屏（已停用，会导致卡死）", &captureProtection);
     ImGui::EndDisabled();
+    MFTrackLastItem();
     ImGui::TextWrapped("已停用：该开关在主线程重挂安全画布会死锁。等重写后再开放。");
     ImGui::TextDisabled("观战 / 直播模式：功能尚未接入");
+    MFEndCard();
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("目标");
-    ImGui::Separator();
-    ImGui::TextWrapped("当前目标：三角洲行动 com.tencent.tmgp.dfm");
-    ImGui::TextDisabled("游戏数据和偏移仍需单独验证");
 }
 
 @end

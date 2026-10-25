@@ -1325,7 +1325,7 @@ def check_layout():
         "app/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json",
         ".github/workflows/build.yml",
         "scripts/make_icon.py",
-        "docs/复刻总方案.md",
+        "docs/小玉-对接文档.md",
     ]
     for rel in must:
         p = os.path.join(ROOT, rel)

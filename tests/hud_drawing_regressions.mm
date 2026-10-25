@@ -15,6 +15,7 @@
 #include "HUDRegressionOutput.h"
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
@@ -42,24 +43,27 @@ static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay) {
     return ImGui::GetDrawData();
 }
 
-static void SendSyntheticFrame(uint16_t port) {
-    // Hand-written little-endian protocol fixture, independent of production
-    // decode: 44-byte header + one 20-byte entity. Camera at origin faces +X
-    // with FOV 90; a live non-bot person at (1000, 0, 0) is centered and 10m away.
-    uint8_t packet[64] = {};
-    const uint32_t magic = 0x4446464D, count = 1, sequence = 73, flags = 1;
+static void SendSyntheticFrame(uint16_t port, const float positions[][3],
+                               const uint8_t kinds[], uint32_t count, uint32_t sequence) {
+    // Hand-written little-endian fixture, independent of production decode:
+    // 44-byte header + N 20-byte entities. Camera at origin faces +X with FOV
+    // 90; kind 1 is a person, 2 a loot item, and 3 a box.
+    std::vector<uint8_t> packet(44 + count * 20, 0);
+    const uint32_t magic = 0x4446464D, flags = 1;
     const uint16_t version = 1, headerSize = 44;
     const float camera[6] = {0, 0, 0, 0, 0, 90};
-    const float entity[3] = {1000, 0, 0};
-    memcpy(packet + 0, &magic, sizeof(magic));
-    memcpy(packet + 4, &version, sizeof(version));
-    memcpy(packet + 6, &headerSize, sizeof(headerSize));
-    memcpy(packet + 8, &count, sizeof(count));
-    memcpy(packet + 12, &sequence, sizeof(sequence));
-    memcpy(packet + 16, camera, sizeof(camera));
-    memcpy(packet + 40, &flags, sizeof(flags));
-    memcpy(packet + 44, entity, sizeof(entity));
-    packet[58] = 1; // kind=person; bot, dead, padding and classId remain zero.
+    memcpy(packet.data() + 0, &magic, sizeof(magic));
+    memcpy(packet.data() + 4, &version, sizeof(version));
+    memcpy(packet.data() + 6, &headerSize, sizeof(headerSize));
+    memcpy(packet.data() + 8, &count, sizeof(count));
+    memcpy(packet.data() + 12, &sequence, sizeof(sequence));
+    memcpy(packet.data() + 16, camera, sizeof(camera));
+    memcpy(packet.data() + 40, &flags, sizeof(flags));
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t *entity = packet.data() + headerSize + i * 20;
+        memcpy(entity, positions[i], sizeof(float) * 3);
+        entity[14] = kinds[i];
+    }
 
     int sender = socket(AF_INET, SOCK_DGRAM, 0);
     CHECK(sender >= 0, "synthetic UDP sender socket must open");
@@ -67,10 +71,10 @@ static void SendSyntheticFrame(uint16_t port) {
     destination.sin_family = AF_INET;
     destination.sin_port = htons(port);
     destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    ssize_t sent = sendto(sender, packet, sizeof(packet), 0,
+    ssize_t sent = sendto(sender, packet.data(), packet.size(), 0,
                           (struct sockaddr *)&destination, sizeof(destination));
     close(sender);
-    CHECK(sent == (ssize_t)sizeof(packet), "complete synthetic datagram must reach the loopback socket");
+    CHECK(sent == (ssize_t)packet.size(), "complete synthetic datagram must reach the loopback socket");
 }
 
 static void TestExternalFeedWithoutLocalReadiness(void) {
@@ -118,7 +122,9 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
     CHECK(feed.running,
           "drawing must start the external feed even when local reader is not ready and libBase is zero");
 
-    SendSyntheticFrame(feed.port);
+    const float firstFrame[][3] = {{1000, 0, 0}};
+    const uint8_t firstKinds[] = {1};
+    SendSyntheticFrame(feed.port, firstFrame, firstKinds, 1, 73);
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
     while (feed.packetCount == 0 && deadline.timeIntervalSinceNow > 0) {
         [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
@@ -142,6 +148,53 @@ static void TestExternalFeedWithoutLocalReadiness(void) {
     CHECK(visibleVertex, "synthetic frame must generate a nontransparent vertex inside the logical screen");
     CHECK(!reader.ready && [MFUEReader shared].libBase == 0 && ![MFReadBackend shared].gateOpen,
           "drawing synthetic feed data must not require enabling local memory access");
+
+    // A behind-camera entity is intentionally off-screen. The back-enemy
+    // control must still add its directional marker to the real draw list.
+    settings.backEnemyEnabled = NO;
+    const float backEnemyFrame[][3] = {{1000, 0, 0}, {-1000, 0, 0}};
+    const uint8_t backEnemyKinds[] = {1, 1};
+    SendSyntheticFrame(feed.port, backEnemyFrame, backEnemyKinds, 2, 74);
+    deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
+    while (feed.packetCount < 2 && deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+    CHECK(feed.packetCount == 2, "behind-camera fixture must reach the production receiver");
+    ImDrawData *withoutBackEnemy = Frame(drawing, overlay);
+    settings.backEnemyEnabled = YES;
+    ImDrawData *withBackEnemy = Frame(drawing, overlay);
+    CHECK(withBackEnemy->TotalVtxCount > withoutBackEnemy->TotalVtxCount + 8,
+          "enabling back-enemy must render a marker for the behind-camera person");
+
+    // Loot visibility and its detail label are separate controls: the primary
+    // switch gates loot, while the name switch selects detail versus a marker.
+    settings.backEnemyEnabled = NO;
+    settings.showLoot = NO;
+    settings.showBox = YES;
+    settings.showLootName = YES;
+    const float lootFrame[][3] = {{1000, 0, 0}, {1000, 80, 0}, {1000, -80, 0}};
+    const uint8_t lootKinds[] = {1, 2, 3};
+    SendSyntheticFrame(feed.port, lootFrame, lootKinds, 3, 75);
+    deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
+    while (feed.packetCount < 3 && deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+    CHECK(feed.packetCount == 3, "loot fixture must reach the production receiver");
+    settings.showBox = NO;
+    ImDrawData *boxesHidden = Frame(drawing, overlay);
+    settings.showBox = YES;
+    ImDrawData *lootHidden = Frame(drawing, overlay);
+    settings.showLoot = YES;
+    ImDrawData *lootDetails = Frame(drawing, overlay);
+    settings.showLootName = NO;
+    ImDrawData *lootMarker = Frame(drawing, overlay);
+    CHECK(boxesHidden->TotalVtxCount + 8 < lootHidden->TotalVtxCount,
+          "the box switch must control box marks independently of item visibility");
+    CHECK(lootHidden->TotalVtxCount + 8 < lootDetails->TotalVtxCount,
+          "the loot switch must hide item labels while independently enabled boxes remain visible");
+    CHECK(lootMarker->TotalVtxCount + 8 < lootDetails->TotalVtxCount,
+          "the loot-name switch must reduce a detailed label to a simple marker");
+
     printf("TRACE: synthetic_udp_packets=%lu entities=%lu vertices=%d indices=%d\n",
            (unsigned long)feed.packetCount, (unsigned long)drawing.lastEntityCount,
            drawData->TotalVtxCount, drawData->TotalIdxCount);
