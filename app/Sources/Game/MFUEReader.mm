@@ -224,6 +224,24 @@ static NSString *gUEReport = nil;
             if (r.pawn != 0 && actor == r.pawn) continue;
 
             /*
+             * ★ [M5.139] 隐藏 / 待销毁的 Actor 不画 —— 这就是"空气框"的来源。
+             *
+             * 靶场里的隐形靶、已经销毁但还挂在 Actors 数组里的残影，位置全都在，
+             * 只是 bHidden 或 bActorIsBeingDestroyed 置位。以前不看这两个标志，
+             * 于是屏幕上出现"框在空地上、里面没有人"。
+             *
+             * 偏移来自 SDK（同版本 1.201.37117）：
+             *   AActor::bHidden               @ 0x0090 bit0
+             *   AActor::bActorIsBeingDestroyed@ 0x0095 bit1
+             * 一次读 16 字节同时覆盖这两个字节。
+             */
+            uint8_t flags[16] = {0};
+            if ([rb readRemote:actor + 0x90 into:flags size:sizeof(flags)]) {
+                if (flags[0] & 0x01) continue;   // bHidden
+                if (flags[5] & 0x02) continue;   // bActorIsBeingDestroyed
+            }
+
+            /*
              * [M5.135] 坐标必须两跳，而且要用世界坐标：
              *     Actor + 0x180        → RootComponent
              *     RootComponent + 0x220 → ComponentToWorld.Translation（世界坐标）

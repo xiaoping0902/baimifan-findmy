@@ -14,6 +14,7 @@
 #import "../Read/MFReadBackend.h"
 #import "../Read/MFExternalFeed.h"
 #import "MFHUDLog.h"
+#import "MFRadar.h"        /* [M5.139] 圆形雷达（移植自参考项目 radar.h） */
 
 #import <QuartzCore/QuartzCore.h>      // CACurrentMediaTime（自检动画）
 
@@ -122,6 +123,11 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
                  screen:(ImVec2)screen;
+- (void)drawRadar:(NSArray<MFEntity *> *)ents
+         drawList:(ImDrawList *)dl
+         settings:(MFSettings *)st
+           camera:(MFCamera)cam
+           screen:(ImVec2)screen;
 - (void)drawSkeleton:(MFEntity *)e drawList:(ImDrawList *)dl
             settings:(MFSettings *)st camera:(MFCamera)cam at:(ImVec2)pt
               height:(float)bodyPx;
@@ -846,6 +852,9 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         [self drawEntity:e drawList:dl settings:st screen:screen camera:cam];
     }
 
+    /* ── [M5.139] 雷达：画在实体循环之后、背敌之前 ── */
+    [self drawRadar:ents drawList:dl settings:st camera:cam screen:screen];
+
     /* ── [M5.2] 背敌提示 ──
      * 放在实体循环【之后】画，确保它盖在框上面。
      * 它用 bearingDeg（只由坐标 + 相机 yaw 算得）判定，不依赖游戏字段，
@@ -1069,6 +1078,52 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     dl->AddLine(hip, rFoot, col, th);
     dl->AddLine(lShoulder, lFoot, col, th * 0.6f);
     dl->AddLine(rShoulder, rFoot, col, th * 0.6f);
+}
+
+#pragma mark - 雷达（[M5.139]，移植自参考项目）
+
+/*
+ * 数据全部是现成的：相机位置/偏航（MFCamera）、每个实体的世界坐标与距离。
+ * 布局、投影、配色对齐 小玉源码 jni/src/radar.h 的 ComputeRadarLayout /
+ * ProjectRadarOffset / RenderRadarBase，只保留玩家雷达部分。
+ */
+- (void)drawRadar:(NSArray<MFEntity *> *)ents
+         drawList:(ImDrawList *)dl
+         settings:(MFSettings *)st
+           camera:(MFCamera)cam
+           screen:(ImVec2)screen {
+    if (!dl || screen.x <= 0 || screen.y <= 0) return;
+
+    MFRadarConfig cfg;
+    cfg.selfX = cam.x;
+    cfg.selfY = cam.y;
+    cfg.yawDeg = cam.yaw;
+    cfg.rangeM = 120.0f;          /* 量程 120m，够覆盖当前交战距离 */
+    cfg.xRatio = 0.125f;          /* 参考实现的默认布局 */
+    cfg.yRatio = 0.370f;
+    cfg.radiusRatio = 0.139f;
+    cfg.northUp = NO;             /* 前方朝上 */
+
+    enum { kMaxBlips = 192 };
+    MFRadarBlip blips[kMaxBlips];
+    int n = 0;
+
+    for (MFEntity *e in ents) {
+        if (n >= kMaxBlips) break;
+        if (e.isLoot || e.isBox) continue;                       /* 雷达只放人 */
+        if (e.worldX == 0.0f && e.worldY == 0.0f) continue;      /* 未读到坐标 */
+        if (!isfinite(e.worldX) || !isfinite(e.worldY)) continue;
+
+        blips[n].x = e.worldX;
+        blips[n].y = e.worldY;
+        blips[n].distM = e.distanceMeters;
+        blips[n].isBot = e.isBot;
+        blips[n].color = e.isBot ? IM_COL32(255, 190, 90, 235)
+                                 : IM_COL32(238, 80, 70, 235);
+        n++;
+    }
+
+    MFRadarRender(dl, screen, &cfg, blips, n);
 }
 
 #pragma mark - 背敌提示（[M5.2] 新增，原版有我们之前没实现）
