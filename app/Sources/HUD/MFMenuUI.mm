@@ -456,14 +456,21 @@ static const float kMFMenuBallSize = 56.0f;
     ImGui::Spacing();
     ImGui::TextDisabled("模式");
     ImGui::Separator();
+    /*
+     * ★ [M5.134] 防录屏开关已停用。
+     *
+     * 真机后果：点一下就会让整个悬浮窗卡死（点不动、退不出），只能重启设备。
+     * 原因在 MFHUDCaptureShieldView：切换时在主线程同步 layoutIfNeeded，并把
+     * 内容视图重新挂到 secureTextEntry 的安全画布上 —— 我们的窗口是托管给
+     * SpringBoard 的远程上下文，这一步会等渲染服务器，直接死锁。
+     *
+     * 修好之前先把它关掉：宁可少一个功能，也不能让用户每次都得重启。
+     */
     bool captureProtection = s.captureProtectionEnabled;
-    if (ImGui::Checkbox("防录屏", &captureProtection)) {
-        s.captureProtectionEnabled = captureProtection;
-        [s save];
-        if (gCaptureProtectionApplier) gCaptureProtectionApplier(captureProtection);
-    }
-    MFTrackLastItem();
-    ImGui::TextWrapped("默认关闭，便于截图核对。开启后保护菜单、悬浮球和绘制内容。");
+    ImGui::BeginDisabled();
+    ImGui::Checkbox("防录屏（已停用，会导致卡死）", &captureProtection);
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("已停用：该开关在主线程重挂安全画布会死锁。等重写后再开放。");
     ImGui::TextDisabled("观战 / 直播模式：功能尚未接入");
 
     ImGui::Spacing();

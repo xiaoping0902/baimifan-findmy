@@ -267,7 +267,18 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
-    [self applyCaptureProtectionEnabled:[MFSettings shared].captureProtectionEnabled];
+    /*
+     * ★ [M5.134] 启动时强制关掉防录屏，并清掉持久化的开关。
+     *
+     * 上一次卡死时开关可能已经被存成 YES，如果启动还照它执行，悬浮窗会每次
+     * 启动就卡死 —— 用户只能重启设备。这里直接清零，保证进来一定是关闭状态。
+     */
+    if ([MFSettings shared].captureProtectionEnabled) {
+        [MFSettings shared].captureProtectionEnabled = NO;
+        [[MFSettings shared] save];
+        MFHUDLogLine(@"[M5.134] 已清除上次持久化的防录屏开关（该功能暂停使用）");
+    }
+    [self applyCaptureProtectionEnabled:NO];
     __weak MFHUDAppDelegate *weakSelfForCapture = self;
     [MFMenuUI setCaptureProtectionApplier:^(BOOL enabled) {
         // Reparent content after the current ImGui build has ended.
