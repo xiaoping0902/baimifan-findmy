@@ -9,6 +9,7 @@
 //        触摸会直接落到下层 App（游戏）。
 //
 #import "MFMenuUI.h"
+#import "MFMenuPanel.h"
 #import "MFHUDControl.h"
 #import "MFHUDLog.h"
 #import "../Render/MFOverlayView.h"
@@ -205,8 +206,6 @@ static const float kMFMenuBallSize = 56.0f;
 #pragma mark - MFOverlayViewDelegate
 
 - (void)overlayBuildUI:(MFImGuiContext *)ctx overlay:(MFOverlayView *)overlay {
-    MFSettings *s = [MFSettings shared];
-
     overlay.passthroughAll = NO;
 
     sRectTarget = nil;
@@ -223,10 +222,17 @@ static const float kMFMenuBallSize = 56.0f;
     ImGuiIO &io = ImGui::GetIO();
     const ImVec2 screen = io.DisplaySize;
 
-    if (gCollapsed) {
-        [self buildBallOnOverlay:overlay screen:screen];
-    } else {
-        [self buildPanelForSettings:s overlay:overlay screen:screen];
+    /*
+     * ★ [M5.183] 换成小玉原版面板 ★
+     * 布局、分页、开关、滑块、颜色、缩放、灵动岛全部来自 UIPort/（原样搬运），
+     * 不再用这个文件里那套简化菜单。
+     */
+    MFMenuPanelSetExpanded(!gCollapsed);
+    MFMenuPanelRender(overlay, screen);
+    /* 点灵动岛会自己展开/收起 —— 把状态同步回来，下一帧才不会被覆盖 */
+    {
+        const BOOL want = MFMenuPanelExpanded();
+        if (gCollapsed == want) gCollapsed = !want;
     }
 
     // Popups own their visible surface, including color pickers and combo

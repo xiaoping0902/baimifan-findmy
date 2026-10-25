@@ -10,6 +10,7 @@
 #import "../Game/MFGearCatalog.h"    /* [M5.85] 物资/装备类名分类目录 */
 #import "../Game/MFGearReader.h"     /* [M5.85] 物资属性读取（真实偏移） */
 #import "../Game/MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
+#import "MFMenuPanel.h"             /* [M5.183] 灵动岛统计 */
 #import "../Game/MFItemTable.h"      /* [M5.86] 物品定义表（等级/价值/名字） */
 #import "../Game/Offsets.h"
 #import "../Read/MFReadBackend.h"
@@ -1035,6 +1036,13 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     if (outEntities) *outEntities = ents;
     if (outLoot) *outLoot = lootOut;
     if (outSource) *outSource = MFDrawSourceUE4;
+
+    /* [M5.183] 喂给面板的灵动岛：真人 / 人机 / 物资 */
+    {
+        int realN = 0, botN = 0;
+        for (MFEntity *e in ents) { if (e.isBot) botN++; else realN++; }
+        MFMenuPanelReportStats(realN, botN, (int)lootOut.count, YES, 0);
+    }
     return YES;
 }
 
@@ -1371,9 +1379,14 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         }
     }
 
-    /* ── [M5.152] 射线：从【屏幕顶部中心】连到目标（之前画在底边，方向是反的）── */
+    /*
+     * ── 射线 ──
+     * [M5.183] 起点改成【灵动岛中心】，和小玉原版一致：
+     *   岛在顶部中间，射线从岛上射出去，展开成面板时自动跟随岛的位置/缩放。
+     */
     if (st.showTracer) {
-        dl->AddLine(ImVec2(screen.x * 0.5f, 0.0f), pt,
+        const ImVec2 tracerOrigin = MFMenuPanelIslandCenter(screen);
+        dl->AddLine(tracerOrigin, pt,
                     MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.55f), 1.0f);
     }
 
