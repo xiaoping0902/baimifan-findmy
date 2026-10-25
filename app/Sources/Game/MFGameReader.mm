@@ -265,6 +265,17 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             /* ── [M5.2] 人物属性（偏移全为 0 时自动跳过，不会画错）── */
             [self readHumanFields:e reader:rb profile:off.current];
 
+            /*
+             * ★ [M5.141] 贴身过滤：自己永远在相机底下。
+             *
+             * 前面按 actor == Pawn 跳过自己，但 Pawn 指针读失败时（或引擎换了一具
+             * 代理身体）那条就不生效，于是屏幕上给自己画框、脚下还留一条"残留骨骼"。
+             * 实体离相机不到 1.2m 的，无论指针怎么指都不可能是别人。
+             */
+            if (e.distanceMeters >= 0.0f && e.distanceMeters < 1.2f) {
+                continue;
+            }
+
             [out addObject:e];
         }
     }
