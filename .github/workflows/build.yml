@@ -8,7 +8,9 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Pin Intel hosts while GitHub's macOS arm64 pool has capacity failures.
+    # Xcode still cross-compiles the shipped iphoneos executable for arm64.
+    runs-on: macos-15-intel
     timeout-minutes: 45
     # 需要写权限：构建完成后把 IPA 附到 Release 上，
     # 这样下载链接是【匿名可用】的（artifact 下载必须要 token，

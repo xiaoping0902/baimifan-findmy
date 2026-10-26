@@ -16,7 +16,7 @@ on:
 jobs:
   native:
     if: ${{ !inputs.baseline_renderer && (inputs.suite == '' || inputs.suite == 'all' || inputs.suite == 'native') }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
         run: bash tests/run_hud_regressions.sh
   uikit:
     if: ${{ !inputs.baseline_renderer && inputs.suite != 'native' }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -46,7 +46,7 @@ jobs:
           if-no-files-found: ignore
   overlay-baseline:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_renderer }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
