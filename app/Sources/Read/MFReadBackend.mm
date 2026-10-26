@@ -41,6 +41,8 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     uint64_t _readCount;
     uint64_t _failCount;
     uint64_t _observedWorld;
+    int _identityPid;           // sessionIdentity 缓存对应的 pid
+    NSString *_identityCache;   // sessionIdentity 的惰性缓存
 }
 
 + (instancetype)shared {
@@ -96,10 +98,9 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     self.kfdPid = pid;
     self.kfdRoot = root;
     self.modeFlag = YES;
-    _sessionIdentity = MFReadSessionIdentityForPid(pid);
     mfpt_cache_reset();
     NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx session=%@",
-          pid, (unsigned long long)root, _sessionIdentity ?: @"(身份未确认)");
+          pid, (unsigned long long)root, self.sessionIdentity ?: @"(身份未确认)");
     return YES;
 }
 
@@ -107,8 +108,26 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     self.kfdRoot = 0;
     self.kfdPid = 0;
     self.modeFlag = NO;
-    _sessionIdentity = nil;
+    _identityPid = 0;
+    _identityCache = nil;
     mfpt_cache_reset();
+}
+
+/*
+ * 会话身份按当前 kfdPid **惰性**计算。
+ *
+ * 为什么不在 attach 时算死：会话身份是"这个后端现在指向哪个进程实例"的纯函数。
+ * 绑定时算死会让任何直接设置 kfdPid 的路径（回归夹具、诊断）拿不到身份，
+ * 而身份缺失会让基址快照被拒绝保存 —— 测试就只能造出一个"永远没有身份"的后端，
+ * 验证不了真正要验证的分支。
+ */
+- (NSString *)sessionIdentity {
+    const int pid = self.kfdPid;
+    if (pid <= 0) return nil;
+    if (_identityPid == pid && _identityCache) return _identityCache;
+    _identityPid = pid;
+    _identityCache = MFReadSessionIdentityForPid(pid);
+    return _identityCache;
 }
 
 - (uint64_t)sessionToken {
@@ -116,7 +135,7 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     // FNV-1a over the identity string, mixed with the pmap root:
     // 同一 pid 重启后 identity 变（启动时间不同），令牌随之改变。
     uint64_t h = 1469598103934665603ULL;
-    NSString *s = _sessionIdentity;
+    NSString *s = self.sessionIdentity;
     for (NSUInteger i = 0; i < s.length; i++) {
         h ^= (uint64_t)[s characterAtIndex:i];
         h *= 1099511628211ULL;

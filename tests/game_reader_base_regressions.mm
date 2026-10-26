@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import "MFGameReader.h"
+#import "../app/Sources/Read/MFReadBackend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include "HUDRegressionOutput.h"
@@ -25,6 +26,15 @@ static void RestoreDefaults(void) {
 
 static MFGameReader *NewReader(void) {
     MFGameReader *reader = [MFGameReader new];
+    /*
+     * [M5.207] 端口路已移除，夹具改为直接摆出「KFD 已绑定」的状态：
+     * kfdPid 提供进程实例身份（pid|路径|启动时间），kfdRoot + modeFlag 让门打开。
+     * 模拟器里不会真的去读内核 —— root 只是门判与令牌用的占位值。
+     */
+    MFReadBackend *backend = [MFReadBackend shared];
+    backend.kfdPid = getpid();
+    backend.kfdRoot = 0xFFFFFFE000100000ULL;
+    backend.modeFlag = YES;
     reader.targetTaskPort = mach_task_self();
     return reader;
 }

@@ -528,20 +528,23 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         }
 
         /*
-         * [M5.209] 校准链「有相机、零目标」= 基址大概率已过期。
+         * [M5.209] 「校准链有相机、零目标」只在**本帧刚识别到换局**时才改道。
          *
-         * 换局后 readCamera 可能从旧地址凑出看似合法的数值，于是 cameraOK 为 YES，
-         * 但 entityArrayBase / lootArrayBase 指向的是上一局的 Actors 数组。
-         * 旧代码在这里直接 return YES，于是自动 UE4 链永远轮不到 —— 表现就是
-         * "相机还在但不画东西"。现在让自动链先试一次，它能从 GWorld 重新解出新局。
+         * 为什么加这个条件：零目标也可能是真的空场（刚复活、全场清空）。
+         * 无条件改道会让每一帧都去跑一次自动链解析，既浪费内核读，也会在
+         * 合成帧测试里走进不该走的读取路径。换局那一帧才需要接管 —— 那时
+         * 基址已被 refreshMatchEpoch 作废，自动链是唯一还能出图的来源。
          */
-        if ([frame[@"cameraOK"] boolValue]) {
+        if ([frame[@"cameraOK"] boolValue] && [frame[@"matchChanged"] boolValue]) {
             if ([self acquireUE4FrameWithSize:size camera:outCamera entities:outEntities
                                          loot:outLoot source:outSource]) {
-                [self noteUE4Issue:@"校准链有相机但零目标（基址可能已过期），已切换到自动链"];
+                [self noteUE4Issue:@"换局：校准基址已作废，已切换到自动链"];
                 return YES;
             }
-            // 自动链也出不来：按校准结果交差（相机有效、本局确实没有目标）
+        }
+
+        if ([frame[@"cameraOK"] boolValue]) {
+            // 相机有效但没有任何目标：按校准结果交差（本局确实没人 / 已完成清场）
             if (outCamera) *outCamera = cam;
             if (outEntities) *outEntities = calEnts;
             if (outLoot) *outLoot = calLoot;

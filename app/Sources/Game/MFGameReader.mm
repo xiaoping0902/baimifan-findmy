@@ -603,7 +603,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 #pragma mark - 一次性
 
 - (NSDictionary *)readFrameWithSize:(CGSize)size {
-    [self refreshMatchEpoch];
+    const BOOL matchChanged = [self refreshMatchEpoch];
     MFCamera cam = {0};
     BOOL ok = [self readCamera:&cam];
     MFScreen sc = [MFProjection screenWithSize:size fov:cam.fov];
@@ -613,6 +613,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
     return @{
         @"cameraOK": @(ok),
+        @"matchChanged": @(matchChanged),
         @"camera": @{ @"x": @(cam.x), @"y": @(cam.y), @"z": @(cam.z),
                       @"pitch": @(cam.pitch), @"yaw": @(cam.yaw),
                       @"roll": @(cam.roll), @"fov": @(cam.fov) },
