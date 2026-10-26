@@ -84,6 +84,9 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
 @implementation MFGameReader {
     NSString *_baseCalibrationStatus;
+    /* [M5.212] 帧内读取预算被截断的次数（限流日志用，避免每帧刷屏） */
+    unsigned _entityBudgetCuts;
+    unsigned _lootBudgetCuts;
 }
 
 + (instancetype)shared {
@@ -254,8 +257,27 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
      * 基本可以断定这个基址已经失效（典型场景：换局了但没被识别）。
      * 继续跑满 count 次只会把渲染线程按在几千次无效内核读上 —— 那正是卡死。
      */
+    /*
+     * [M5.212] 帧内时间预算。
+     *
+     * CADisplayLink 和绘制都在主线程，所以"实体读得太多"不是掉帧问题，
+     * 是直接卡住 UI 的问题。目标多的局（几十上百人）里，一个人一次坐标读
+     * 就是一次内核读，累计起来能把一帧拖到几十毫秒。
+     *
+     * 给 5ms 预算：超了就停，下一帧从头发继续。宁可这一帧少画几个，
+     * 也不让主线程被按死 —— 用户看到的是"框偶尔少一个"，不是"整个 HUD 卡住"。
+     */
+    const CFTimeInterval entityBudgetEnd = CFAbsoluteTimeGetCurrent() + 0.005;
     int consecutiveMisses = 0;
     for (int i = 0; i < count; i++) {
+        if ((i & 7) == 0 && CFAbsoluteTimeGetCurrent() > entityBudgetEnd) {
+            if (_entityBudgetCuts < 5) {
+                _entityBudgetCuts++;
+                MFHUDLogLine(@"实体读取触顶 5ms 预算：已读 %d/%d（第 %u 次，后续不再刷日志）",
+                             i, count, _entityBudgetCuts);
+            }
+            break;
+        }
         @autoreleasepool {
             uint64_t itemPtrAddr = base + 0x8 * (uint64_t)i;   // 指针数组，真机校准
             uint64_t item = [rb readU64:itemPtrAddr];
@@ -514,8 +536,18 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     MFSettings *st = [MFSettings shared];
 
     /* [M5.209] 与实体循环同样的熔断：基址失效时不要跑满 count 次无效读 */
+    /* [M5.212] 物资也给一份小预算：地面物品多的时候不能把主线程吃光 */
+    const CFTimeInterval lootBudgetEnd = CFAbsoluteTimeGetCurrent() + 0.0015;
     int consecutiveMisses = 0;
     for (int i = 0; i < count; i++) {
+        if ((i & 7) == 0 && CFAbsoluteTimeGetCurrent() > lootBudgetEnd) {
+            if (_lootBudgetCuts < 3) {
+                _lootBudgetCuts++;
+                MFHUDLogLine(@"物资读取触顶 1.5ms 预算：已读 %d/%d（第 %u 次）",
+                             i, count, _lootBudgetCuts);
+            }
+            break;
+        }
         @autoreleasepool {
             uint64_t item = [rb readU64:base + 0x8 * (uint64_t)i];
             if (!item) { if (++consecutiveMisses > 64) break; continue; }
