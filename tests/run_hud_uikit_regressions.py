@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(*args, capture=False, timeout=180):
+    print("RUN: " + " ".join(map(str, args)), flush=True)
     return subprocess.run(args, check=True, text=True, capture_output=capture, timeout=timeout)
 
 
@@ -41,7 +42,8 @@ def main():
     if not candidates:
         raise RuntimeError("An available iOS simulator is required for the UIKit regression")
     candidates.sort(key=lambda item: (item[1]["state"] != "Booted", "iPhone" not in item[1]["name"]))
-    _, device = candidates[0]
+    runtime, device = candidates[0]
+    print(f"Simulator: {device['name']} runtime={runtime} state={device['state']} udid={device['udid']}", flush=True)
     device_id = device["udid"]
     booted_here = device["state"] != "Booted"
     bundle_id = "org.baimifan.HUDWindowRegression"
@@ -148,6 +150,11 @@ def main():
             if booted_here:
                 run("xcrun", "simctl", "boot", device_id)
             run("xcrun", "simctl", "bootstatus", device_id, "-b", timeout=300)
+            if args.suite == "menu":
+                # This suite needs a visible WindowServer-backed surface for
+                # its real Metal screenshot, beyond the booted device used by
+                # the headless geometry fixtures.
+                run("open", "-a", "Simulator", "--args", "-CurrentDeviceUDID", device_id, timeout=30)
             run("xcrun", "simctl", "install", device_id, str(app))
             container = Path(run("xcrun", "simctl", "get_app_container", device_id,
                                  bundle_id, "data", capture=True).stdout.strip())
@@ -176,8 +183,12 @@ def main():
                                              stdout=launch_output, stderr=subprocess.STDOUT, env=environment)
                 try:
                     deadline = time.monotonic() + 240
+                    next_launch_report = time.monotonic()
                     while time.monotonic() < deadline:
                         report = output.read_text(errors="replace") if output.exists() else ""
+                        if time.monotonic() >= next_launch_report:
+                            print(f"Launch progress: status={launcher.poll()} result_bytes={len(report)}", flush=True)
+                            next_launch_report = time.monotonic() + 30
                         if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
                             # The fresh fixture report proves launch completed.
                             # Release a CLI still awaiting its acknowledgement
@@ -226,7 +237,7 @@ def main():
                         result_dir.mkdir(exist_ok=True)
                         (result_dir / "menu-result.txt").write_text(report)
                     finish_launcher(launcher)
-            print(launch_log.read_text(errors="replace"), end="", flush=True)
+                    print(launch_log.read_text(errors="replace"), end="", flush=True)
             if marker not in report or "FAIL:" in report:
                 raise SystemExit("UIKit window regression failed")
     finally:
