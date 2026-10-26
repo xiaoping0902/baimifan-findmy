@@ -476,8 +476,15 @@ static void TestGPUBackpressureIsBounded(BOOL delayDrawable, dispatch_block_t co
         // Cross the former 1.2s acquisition timeout while real display ticks
         // continue. Returning that still-owned credit used to permit a third
         // frame after the delayed callback arrived and released it again.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1400 * NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{ [layer releaseAll]; });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            BOOL entered = dispatch_semaphore_wait(layer.entered,
+                dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1400 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                Expect(entered, "the delayed request must actually enter drawable acquisition before its hold is timed");
+                [layer releaseAll];
+            });
+        });
     }
     // Also release on an independent deadline if the broken implementation
     // blocks main while trying to acquire a fourth layer drawable.
