@@ -156,6 +156,7 @@ struct UIState
     bool  vehicleIconEnabled = true;  // 载具贴图(V20 独立开关, 默认开=保持现状)
     // 极简浏览器同款玩家雷达；V29 在配置末尾保存，不占 feat[] 槽位。
     bool  radarEnabled = false;
+    bool  fpsEnabled = true;
     float radarXRatio = .125f;
     float radarYRatio = 400.0f/1080.0f;
     float radarRadiusRatio = 150.0f/1080.0f;
@@ -249,7 +250,7 @@ struct UIState
     float mortarHipMaxRangeM = kMortarHipMaximumM;
 
     ImVec4 humanSkeletonColor = ImVec4(1.0f, 0.08f, 0.08f, 1.0f);
-    ImVec4 botSkeletonColor = ImVec4(0.10f, 1.0f, 0.20f, 1.0f);
+    ImVec4 botSkeletonColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
     ImVec4 coverColor = ImVec4(1.0f, 0.30f, 0.30f, 1.0f);
     ImVec4 energyDrinkColor = ImVec4(0.24f, 0.67f, 1.0f, 1.0f);
     ImVec4 painkillerColor = ImVec4(1.0f, 0.57f, 0.19f, 1.0f);
@@ -501,7 +502,7 @@ static void BuildUIChineseRanges(ImGuiIO& io, ImVector<ImWchar>& out)
 #include "MFUiFontChars.h"
     builder.AddText(kGeneratedFontChars);
     builder.AddText("灵动岛固定在屏幕顶部中央");
-    builder.AddText("统计窗口位置水平垂直恢复默认位置真人骨骼人机骨骼红绿蓝黄白不透明度");
+    builder.AddText("统计窗口位置水平垂直恢复默认位置真人骨骼人机骨骼红绿蓝黄白不透明度玩家与英雄名队伍编号");
     // 固定界面文字在启动时建立；玩家昵称的字形由主循环按需加入，避免整套汉字图集占满显存。
     builder.AddText(
         "黑皇主页绘制瞄准物资设置退出主页运行状态在线刷新项目筛选应用背景图"

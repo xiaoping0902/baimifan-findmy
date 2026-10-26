@@ -5,6 +5,7 @@
 #include <cmath>
 
 static NSString *const kSettingsFile = @"mf_settings.plist";
+static const NSInteger kMFColorDefaultsVersion = 1;
 
 @implementation MFSettings {
     NSMutableDictionary<NSNumber *, UIColor *> *_colors;
@@ -44,6 +45,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _showDistance = YES;
     _showHealth = YES;
     _showRadar = NO;
+    _showFPS = YES;
 
     _showLoot = NO;
     _showBox = NO;
@@ -91,7 +93,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     [self setColorInternal:[UIColor colorWithRed:0.55 green:0.85 blue:1.00 alpha:1] slot:MFColorSlotArmor];
     [self setColorInternal:[UIColor colorWithRed:1.00 green:0.08 blue:0.08 alpha:1] slot:MFColorSlotSkeleton];
     [self setColorInternal:[UIColor colorWithRed:1.00 green:0.27 blue:0.23 alpha:1] slot:MFColorSlotBackEnemy];
-    [self setColorInternal:[UIColor colorWithRed:0.10 green:1.00 blue:0.20 alpha:1] slot:MFColorSlotBotSkeleton];
+    [self setColorInternal:UIColor.whiteColor slot:MFColorSlotBotSkeleton];
 }
 
 // Clamp at the model boundary so direct edits and persisted values obey the
@@ -133,6 +135,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         @[@"showTracer", @(_showTracer)], @[@"showTeam", @(_showTeam)],
         @[@"showHeld", @(_showHeld)], @[@"showDistance", @(_showDistance)],
         @[@"showHealth", @(_showHealth)], @[@"showRadar", @(_showRadar)],
+        @[@"showFPS", @(_showFPS)],
         @[@"showLoot", @(_showLoot)], @[@"showBox", @(_showBox)],
         @[@"showLootName", @(_showLootName)], @[@"showLootStats", @(_showLootStats)],
         @[@"backEnemyEnabled", @(_backEnemyEnabled)],
@@ -170,6 +173,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         }
     }
     d[@"colors"] = cols;
+    d[@"colorDefaultsVersion"] = @(kMFColorDefaultsVersion);
 
     return [d writeToFile:[self filePath] atomically:YES];
 }
@@ -188,6 +192,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     LOAD_BOOL(showSkeleton); LOAD_BOOL(showTracer); LOAD_BOOL(showTeam);
     LOAD_BOOL(showHeld); LOAD_BOOL(showDistance); LOAD_BOOL(showHealth);
     LOAD_BOOL(showRadar);
+    LOAD_BOOL(showFPS);
     LOAD_BOOL(showLoot); LOAD_BOOL(showBox); LOAD_BOOL(showLootName); LOAD_BOOL(showLootStats);
     LOAD_BOOL(backEnemyEnabled); LOAD_BOOL(spectatorMode); LOAD_BOOL(liveMode); LOAD_BOOL(smoothAim);
     LOAD_BOOL(renderSelfTest);
@@ -206,15 +211,23 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     #undef LOAD_NUM
 
     NSDictionary *cols = d[@"colors"];
+    const BOOL migrateColorDefaults = [d[@"colorDefaultsVersion"] integerValue] < kMFColorDefaultsVersion;
     if ([cols isKindOfClass:[NSDictionary class]]) {
         for (NSString *key in cols) {
             NSArray *rgba = cols[key];
             if (rgba.count == 4) {
                 // Replace the shipped pale-red default, retaining custom hues.
-                if (key.integerValue == MFColorSlotSkeleton &&
+                if (migrateColorDefaults && key.integerValue == MFColorSlotSkeleton &&
                     fabs([rgba[0] doubleValue]-1.0)<0.0001 &&
                     fabs([rgba[1] doubleValue]-.45)<0.0001 &&
                     fabs([rgba[2] doubleValue]-.45)<0.0001 &&
+                    fabs([rgba[3] doubleValue]-1.0)<0.0001) continue;
+                // Only migrate the previous shipped bot default; a custom
+                // human or bot choice must survive the upgrade unchanged.
+                if (migrateColorDefaults && key.integerValue == MFColorSlotBotSkeleton &&
+                    fabs([rgba[0] doubleValue]-.10)<0.0001 &&
+                    fabs([rgba[1] doubleValue]-1.0)<0.0001 &&
+                    fabs([rgba[2] doubleValue]-.20)<0.0001 &&
                     fabs([rgba[3] doubleValue]-1.0)<0.0001) continue;
                 _colors[@(key.integerValue)] =
                     [UIColor colorWithRed:[rgba[0] doubleValue]

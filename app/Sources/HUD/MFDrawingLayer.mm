@@ -28,6 +28,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "MFDrawGeometryCache.h"
+#include "MFEntityLabels.h"
 #include <array>
 #include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
 #include <stdlib.h>   /* calloc —— 宽松读要清零 */
@@ -183,6 +184,7 @@ static const NSTimeInterval kMFUEPersonPosInterval = 1.0 / 120.0;
                       profile:(MFUEProfile *)p now:(CFTimeInterval)now;
 #pragma mark [M5.181] 物资（结构识别，不依赖类名）
 - (void)fillLootFields:(MFEntity *)e actor:(uint64_t)actor reader:(MFReadBackend *)rb;
+- (void)drawFrameRateBadge:(MFOverlayView *)overlay;
 @end
 
 
@@ -763,7 +765,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
                 BOOL loot = NO;
                 if ([rb readU64:addr + kMFUE_Actor_PickupInfo out:&item] && MFUEIsValidPtr(item)) {
                     uint32_t q = 0, price = 0;
-                    const BOOL qOK = ([rb readRemote:item + kMFUE_Pickup_Quality into:&q size:4] && q <= 6);
+                    const BOOL qOK = ([rb readRemote:item + kMFUE_Pickup_Quality into:&q size:4] && MFUEDataTable::ValidQuality((int)q));
                     const BOOL pOK = ([rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
                                       price < 100000000u);
                     loot = qOK && pOK;
@@ -891,8 +893,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
             if (gear) {
                 // 名字：优先物品 ID 名；拿不到就用目录的可读标签（"尸体盒"/"武器箱"），
                 // 绝不把 "InventoryPickup_DeadBody" 这种原始类名当物品名显示
-                e.name = gear.itemIdName.length
-                       ? gear.itemIdName
+                e.name = gear.displayName.length
+                       ? gear.displayName
                        : [[MFGearCatalog shared] fallbackLabelForClassName:a.className];
 
                 if (gear.count > 0) e.count = gear.count;
@@ -903,12 +905,10 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
                 }
 
                 /*
-                 * 等级：优先用**物品定义表**里的 Quality（真·品质，0–6 级）。
-                 * 查不到（表没加载 / 这行不在表里）才退回 Actor 上的 StarNum。
-                 * 两者不是一回事：Quality 是品质分级，StarNum 是星级，别混用。
+                 * 品质必须来自已验证的 Quality 或装备 ID 编码。
+                 * StarNum 是另一项星级属性，不能拿来替代六档品质。
                  */
-                if (gear.hasQuality)   e.level = gear.quality;
-                else if (gear.hasStar) e.level = gear.starNum;
+                if (gear.hasQuality && MFUEDataTable::ValidQuality(gear.quality)) e.level = gear.quality;
 
                 e.gearCategory = (uint32_t)gear.mainType;
             } else {
@@ -1047,6 +1047,9 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     _camOK = NO;
 
     MFSettings *st = [MFSettings shared];
+    // Independent of game acquisition and entity visibility: the measurement
+    // comes from presented Metal drawables, including idle / disconnected UI.
+    if (st.showFPS) [self drawFrameRateBadge:overlay];
     if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) {
         _botGeometry.clear(); _lootGeometry.clear();
         MFMenuPanelReportStats(0, 0, 0, NO, 0);
@@ -1240,12 +1243,13 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         ? MFU32([st colorForSlot:MFColorSlotTeam])
         : MFU32([st colorForSlot:MFColorSlotPersonInfo]);
 
-    // Rows collapse when their switches are off. The final name/health row
-    // stays above the projected head; distance stays below the feet.
+    // Player-authored nickname and hero identity occupy separate rows. Their
+    // common name switch controls both names; the team switch adds the number.
     const float lineHeight = MAX(14.0f, MAX(st.fontInfo, st.fontPerson) + 3.0f);
-    const bool nameHealthRow = st.showName || st.showHealth;
+    const bool playerRow = st.showTeam || st.showName;
+    const bool heroHealthRow = st.showName || st.showHealth;
     const int rowCount = (st.showHeld ? 1 : 0) + (st.showArmor ? 1 : 0) +
-                         (st.showTeam ? 1 : 0) + (nameHealthRow ? 1 : 0);
+                         (playerRow ? 1 : 0) + (heroHealthRow ? 1 : 0);
     const float labelTop = p1.y - 6.0f - rowCount * lineHeight;
     const float gearY = labelTop + (st.showHeld ? lineHeight : 0.0f);
     const ImVec2 tracerTarget(pt.x, st.showArmor ? gearY + st.fontInfo * 0.5f
@@ -1255,24 +1259,14 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
                     MFU32([st colorForSlot:e.isBot ? MFColorSlotBotSkeleton : MFColorSlotSkeleton]), 1.2f);
     }
 
-    char held[256], team[64];
-    char head[48], armor[48], bag[48];
     const char *weapon = e.weaponRawID ? MFItemNameForID(e.weaponRawID) : NULL;
-    snprintf(held, sizeof(held), "%s", weapon ?: "武器未知");
-    {
-        if (e.helmetLevel <= 0) snprintf(head, sizeof(head), "头%s", e.equipKnown && !e.helmetRawID ? "空" : "?");
-        else if (e.helmetMaxHP > 0.5f && isfinite(e.helmetHP))
-            snprintf(head, sizeof(head), "%d头%.0f", e.helmetLevel, MAX(0.0f, e.helmetHP));
-        else snprintf(head, sizeof(head), "%d头%s", e.helmetLevel, e.helmetLevel ? "?" : "");
-        if (e.armorLevel <= 0) snprintf(armor, sizeof(armor), "甲%s", e.equipKnown && !e.armorRawID ? "空" : "?");
-        else if (e.armorMaxHP > 0.5f && isfinite(e.armorHP))
-            snprintf(armor, sizeof(armor), "%d甲%.0f", e.armorLevel, MAX(0.0f, e.armorHP));
-        else snprintf(armor, sizeof(armor), "%d甲%s", e.armorLevel, e.armorLevel ? "?" : "");
-        if (e.backpackLevel <= 0) snprintf(bag, sizeof(bag), "包%s", e.equipKnown && !e.bagRawID ? "空" : "?");
-        else snprintf(bag, sizeof(bag), "%d包", e.backpackLevel);
-    }
-    if (e.uin) snprintf(team, sizeof(team), "%d : %llu", e.teamId, (unsigned long long)e.uin);
-    else snprintf(team, sizeof(team), "%d : ?", e.teamId);
+    if (!weapon) weapon = MFHeldWeapons::NameForID(e.weaponRawID);
+    const char *held = MFEntityLabels::Weapon(weapon);
+    const std::string headText = MFEntityLabels::Gear("头", e.helmetLevel, e.helmetRawID, e.equipKnown, e.helmetHP);
+    const std::string armorText = MFEntityLabels::Gear("甲", e.armorLevel, e.armorRawID, e.equipKnown, e.armorHP);
+    const std::string bagText = MFEntityLabels::Bag(e.backpackLevel, e.bagRawID, e.equipKnown);
+    const char *head = headText.c_str(), *armor = armorText.c_str(), *bag = bagText.c_str();
+    const std::string identity = MFEntityLabels::PlayerRow(e.teamId, e.name.UTF8String, st.showTeam, st.showName);
 
     float rowY = labelTop;
     auto textRow = [&](const char *text, ImU32 color) {
@@ -1291,9 +1285,9 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
             MFText(dl, st.fontInfo, ImVec2(x,rowY), MFQualityColor(e.backpackLevel,st), bag);
             rowY += lineHeight;
     }
-    if (st.showTeam) textRow(team, MFU32([st colorForSlot:MFColorSlotTeam]));
-    if (nameHealthRow) {
-        const char *name = e.name.length ? e.name.UTF8String : (e.isBot ? "人机" : "敌人");
+    if (playerRow) textRow(identity.c_str(), MFU32([st colorForSlot:MFColorSlotPersonInfo]));
+    if (heroHealthRow) {
+        const char *name = MFEntityLabels::Hero(e.heroName.UTF8String);
         const float nameWidth = st.showName ? MFTextSize(name, st.fontPerson).x : 0;
         const MFUEHealth::Snapshot hp{(float)e.health, e.maxHealth};
         char number[32];
@@ -1477,7 +1471,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         const float world[3] = {a.x, a.y, a.z};
         a.yawDeg = MFUEHeading::Read(a.address, world, [rb](uint64_t address, void *out, size_t size) {
             return (bool)[rb readRemote:address into:out size:size];
-        });
+        }, p.actor_rootComponent);
     }
 
     if (now - a.seenAt < kMFUEPersonPosInterval) return;   // 同一帧别重复读位置
@@ -1559,6 +1553,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     e.health        = [health[@"hp"] floatValue];
     e.maxHealth     = [health[@"max"] floatValue];
     MFApplyUEEquipmentAttributes(e, a);
+    MFApplyUEHeroAttributes(e, a);
     e.weaponRawID = [a[@"wid"] unsignedLongLongValue];
     if (e.weaponRawID) e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
     NSString *nm = a[@"name"];
@@ -1578,10 +1573,10 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     d[@"h"]    = @0;
     d[@"a"]    = @0;
     d[@"b"]    = @0;
-    d[@"hHP"]  = @0.0f;
-    d[@"hMax"] = @0.0f;
-    d[@"aHP"]  = @0.0f;
-    d[@"aMax"] = @0.0f;
+    d[@"hHP"]  = @(NAN);
+    d[@"hMax"] = @(NAN);
+    d[@"aHP"]  = @(NAN);
+    d[@"aMax"] = @(NAN);
 
     /*
      * ⓿ [M5.176] 先判"是不是人" —— 也顺手把自己剔掉
@@ -1678,13 +1673,16 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         (void)[rb readU64:combat + kMFUE_Combat_WeaponA out:&wpn];
         if (!MFUEIsValidPtr(wpn)) (void)[rb readU64:combat + kMFUE_Combat_WeaponB out:&wpn];
         if (MFUEIsValidPtr(wpn)) {
-            uint64_t wid = 0;
-            if ([rb readU64:wpn + kMFUE_Weapon_ID out:&wid] && wid > 0) d[@"wid"] = @(wid);
+            const uint64_t wid = MFHeldWeapons::ReadID(wpn + kMFUE_Weapon_ID, [rb](uint64_t address, void *out, size_t size) {
+                return (bool)[rb readRemote:address into:out size:size];
+            });
+            if (wid > 0) d[@"wid"] = @(wid);
         }
     }
 
     /* SDK 的两张装备数组；完整的空数组也要保留“已知为空”状态。 */
     MFFillUEEquipmentAttributes(rb, actor, d);
+    MFFillUEHeroAttributes(rb, actor, d);
 
     return d;
 }
@@ -1695,13 +1693,13 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
  * 为什么要有这条：物资原本靠「类名命中 InventoryPickup」识别，而本机 GNames
  * 解不出来（ok=0 fail=53）→ 类名永远拿不到 → 物资一个都不画。
  *
- * 这条通道完全不碰 GNames，只用结构判据（参考实现欧易 2.0 的读法）：
+ * 这条通道用结构判据识别物资，识别后可用 FName / FText 补可读名称：
  *     actor + 0x1200 → 物品对象
- *     物品对象 + 0x68  → Quality（0..6）
+ *     物品对象 + 0x68  → Quality（1..6；0 为未确定）
  *     物品对象 + 0xDC  → Price
  *     数量：+0x18→+0x18→+0x00→+0x30→+0x20
  *
- * 名字暂时给「物资」；等 GNames 解码补上后自动换成真名与品质色。
+ * 名称优先内置中文表，再读配置行的本地化 FText。
  */
 - (void)fillLootFields:(MFEntity *)e actor:(uint64_t)actor reader:(MFReadBackend *)rb {
     if (e == nil || rb == nil) return;
@@ -1713,11 +1711,32 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     if (![rb readU64:actor + kMFUE_Actor_PickupInfo out:&item] || !MFUEIsValidPtr(item)) return;
 
     uint32_t quality = 0, price = 0;
-    if ([rb readRemote:item + kMFUE_Pickup_Quality into:&quality size:4] && quality <= 6)
+    if ([rb readRemote:item + kMFUE_Pickup_Quality into:&quality size:4] && MFUEDataTable::ValidQuality((int)quality))
         e.level = (int)quality;
     if ([rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
         price > 0 && price < 100000000u)
         e.value = (int)price;
+
+    uint32_t itemNameIndex = 0;
+    if ([rb readRemote:item + 0x10 into:&itemNameIndex size:4] && itemNameIndex > 0 && itemNameIndex <= 20000000) {
+        NSString *idName = [[MFUEGNames shared] classNameForID:(int32_t)itemNameIndex];
+        const uint64_t rawID = MFUEDataTable::NumericID(idName.UTF8String);
+        const char *knownName = MFItemNameForID(rawID);
+        if (knownName) e.name = [NSString stringWithUTF8String:knownName];
+        else {
+            const auto text = MFUEPlayerData::ReadFText(item + 0x18, [rb](uint64_t address, void *out, size_t size) {
+                return (bool)[rb readRemote:address into:out size:size];
+            });
+            if (!text.empty()) e.name = [NSString stringWithCharacters:(const unichar *)text.data() length:text.size()];
+        }
+        if (!MFUEDataTable::ValidQuality(e.level) && rawID) {
+            MFUEPlayerData::Equipment equipment;
+            if (MFUEPlayerData::SlotForID(equipment, rawID)) {
+                const int level = (int)((rawID / 1000ULL) % 10ULL);
+                if (MFUEDataTable::ValidQuality(level)) e.level = level;
+            }
+        }
+    }
 
     /* 数量：+0x18 → +0x18 → +0x00 → +0x30，最后在 +0x20 读 u32 */
     uint64_t p = item;
@@ -1786,17 +1805,35 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         blips[n].distM = e.distanceMeters;
         blips[n].yawDeg = e.yawDeg;          /* [M5.178] 他在看哪边 */
         blips[n].isBot = e.isBot;
-        blips[n].color = MFU32([st colorForSlot:e.isBot ? MFColorSlotBotSkeleton : MFColorSlotSkeleton]);
+        blips[n].color = MFRadarTeamColor(e.teamId);
         n++;
     }
 
     MFRadarRender(dl, screen, &cfg, blips, n);
 }
 
+- (void)drawFrameRateBadge:(MFOverlayView *)overlay {
+    const CGSize size = overlay.bounds.size;
+    if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1 || size.height < 1) return;
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (!dl) return;
+    const UIEdgeInsets inset = overlay.safeAreaInsets;
+    const float x = MIN(MAX(0.0f, inset.left) + 10.0f, MAX(0.0f, size.width - 94.0f));
+    const float y = MIN(MAX(0.0f, inset.top) + 8.0f, MAX(0.0f, size.height - 28.0f));
+    const double fps = overlay.presentedFPS;
+    char label[32];
+    if (isfinite(fps) && fps > 0) snprintf(label, sizeof(label), "FPS %.0f", fps);
+    else snprintf(label, sizeof(label), "FPS --");
+    dl->AddRectFilled(ImVec2(x,y), ImVec2(MIN(size.width,x+94),MIN(size.height,y+28)),
+                      IM_COL32(12,18,26,205), 9.0f);
+    dl->AddCircleFilled(ImVec2(x+11,y+14), 2.5f,
+                        fps > 0 ? IM_COL32(74,222,128,255) : IM_COL32(148,163,184,255));
+    MFText(dl,14.0f,ImVec2(x+20,y+6),IM_COL32(246,248,252,255),label);
+}
+
 #pragma mark - 背敌提示（[M5.2] 新增，原版有我们之前没实现）
 
-/* 方位来自世界坐标与相机 yaw。邻近 30° 方位合并，只保留最近距离与数量；
- * 真人红、人机绿。同一方位存在真人时优先显示真人颜色。 */
+/* 每个背后目标各自一个箭头；按真实方位和身份稳定安排空位，箭头与距离一起避让。 */
 - (void)drawBackEnemies:(NSArray<MFEntity *> *)ents
                drawList:(ImDrawList *)dl
                settings:(MFSettings *)st
@@ -1805,78 +1842,41 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     if (!st.backEnemyEnabled || !dl || !isfinite(screen.x) || !isfinite(screen.y) ||
         screen.x <= 0 || screen.y <= 0) return;
 
+    const float fs = isfinite(st.fontInfo) ? MIN(14.0f, MAX(11.0f, st.fontInfo * 0.85f)) : 12.0f;
     MFOffscreenIndicators groups{};
     for (MFEntity *e in ents) {
-        const MFOffscreenThreat threat{e.bearingDeg, e.distanceMeters, e.teamId,
+        MFOffscreenThreat threat{e.bearingDeg, e.distanceMeters, e.teamId,
                                        (bool)e.isBot, (bool)e.isBehind, (bool)e.isLoot, (bool)e.isBox};
+        threat.address = e.address;
+        char distance[24]; snprintf(distance, sizeof(distance), "%.0fm", e.distanceMeters);
+        const ImVec2 textSize = MFTextSize(distance, fs);
+        threat.labelWidth = textSize.x; threat.labelHeight = textSize.y;
         MFOffscreenAdd(groups, threat, st.showBot, gMFUELocalTeam, st.backEnemyDistance);
     }
     _backEnemyCount = groups.threatCount;
     if (groups.threatCount == 0) return;
 
-    const ImVec2 c(screen.x * 0.5f, screen.y * 0.5f);
-    const float maxR = MAX(40.0f, MIN(screen.x, screen.y) * 0.5f - 45.0f);
     const float configuredR = isfinite(st.backEnemyRadius) ? st.backEnemyRadius : 60.0f;
-    const float R = MIN(maxR, MAX(40.0f, configuredR));
-    const float fs = isfinite(st.fontInfo) ? MIN(14.0f, MAX(11.0f, st.fontInfo * 0.85f)) : 12.0f;
-    struct LabelBounds { ImVec2 min, max; } labels[MFOffscreenIndicators::kBucketCount];
-    int labelCount = 0;
-    for (const MFOffscreenBucket &bucket : groups.buckets) {
-        if (bucket.count == 0) continue;
-        const ImU32 col = MFU32([st colorForSlot:bucket.hasHuman ? MFColorSlotSkeleton : MFColorSlotBotSkeleton]);
-        const float rad = (bucket.bearingDeg - 90.0f) * kMF_Deg2Rad;
+    const auto markers = MFOffscreenLayout(groups, screen.x, screen.y, MAX(40.0f, configuredR));
+    for (const MFOffscreenMarker &marker : markers) {
+        const ImU32 col = MFU32([st colorForSlot:marker.threat.isBot ? MFColorSlotBotSkeleton : MFColorSlotSkeleton]);
+        const float rad = (marker.threat.bearingDeg - 90.0f) * kMF_Deg2Rad;
         const ImVec2 dir(cosf(rad), sinf(rad));
         const ImVec2 side(-dir.y, dir.x);
-        const ImVec2 p(c.x + dir.x * R, c.y + dir.y * R);
+        const ImVec2 cardMin(marker.x - marker.width * 0.5f, marker.y - marker.height * 0.5f);
+        const ImVec2 cardMax(marker.x + marker.width * 0.5f, marker.y + marker.height * 0.5f);
+        const ImVec2 p(marker.showLabel ? cardMin.x + 10.0f : marker.x, marker.y);
         const ImU32 shadow = IM_COL32(4, 8, 12, 225);
-
-        // A short local guide gives direction without putting a full ring over the scene.
-        dl->PathArcTo(c, R - 8.0f, rad - 0.10f, rad + 0.10f, 8);
-        dl->PathStroke((col & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 110), 0, 1.5f);
-
-        switch (st.backEnemyStyle) {
-            case MFBackEnemyStyleCircle:
-                dl->AddCircleFilled(p, 4.8f, shadow, 20);
-                dl->AddCircleFilled(p, 3.3f, col, 20);
-                break;
-            case MFBackEnemyStyleArrow: {
-                const ImVec2 tip(p.x + dir.x * 7.0f, p.y + dir.y * 7.0f);
-                const ImVec2 l(p.x - dir.x * 3.0f + side.x * 4.0f, p.y - dir.y * 3.0f + side.y * 4.0f);
-                const ImVec2 r(p.x - dir.x * 3.0f - side.x * 4.0f, p.y - dir.y * 3.0f - side.y * 4.0f);
-                dl->AddTriangle(tip, l, r, shadow, 3.0f);
-                dl->AddTriangleFilled(tip, l, r, col);
-                break;
-            }
-            default:
-                dl->AddCircle(p, 4.8f, shadow, 20, 3.0f);
-                dl->AddCircle(p, 4.8f, col, 20, 1.6f);
-                break;
+        dl->AddRectFilled(cardMin, cardMax, IM_COL32(5, 10, 15, 185), 4.0f);
+        const ImVec2 tip(p.x + dir.x * 6.0f, p.y + dir.y * 6.0f);
+        const ImVec2 l(p.x - dir.x * 3.0f + side.x * 3.5f, p.y - dir.y * 3.0f + side.y * 3.5f);
+        const ImVec2 r(p.x - dir.x * 3.0f - side.x * 3.5f, p.y - dir.y * 3.0f - side.y * 3.5f);
+        dl->AddTriangle(tip, l, r, shadow, 2.0f);
+        dl->AddTriangleFilled(tip, l, r, col);
+        if (marker.showLabel) {
+            char distance[24]; snprintf(distance, sizeof(distance), "%.0fm", marker.threat.distanceM);
+            MFText(dl, fs, ImVec2(cardMin.x + 21.0f, marker.y - marker.threat.labelHeight * 0.5f), col, distance);
         }
-
-        char buf[40];
-        if (bucket.count > 1) snprintf(buf, sizeof(buf), "%.0fm ×%d", bucket.nearestM, bucket.count);
-        else snprintf(buf, sizeof(buf), "%.0fm", bucket.nearestM);
-        const ImVec2 ts = MFTextSize(buf, fs);
-        LabelBounds label{};
-        // Adjacent direction groups can have wide labels; move conflicting labels
-        // outward in a bounded search while keeping the marker at its true bearing.
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            const float offset = 17.0f + attempt * (fs + 5.0f);
-            label.min = ImVec2(p.x + dir.x * offset - ts.x * 0.5f - 4.0f,
-                               p.y + dir.y * offset - ts.y * 0.5f - 2.0f);
-            label.min.x = MAX(2.0f, MIN(screen.x - ts.x - 10.0f, label.min.x));
-            label.min.y = MAX(2.0f, MIN(screen.y - ts.y - 6.0f, label.min.y));
-            label.max = ImVec2(label.min.x + ts.x + 8.0f, label.min.y + ts.y + 4.0f);
-            bool overlaps = false;
-            for (int i = 0; i < labelCount; ++i) {
-                if (label.min.x < labels[i].max.x + 3 && label.max.x + 3 > labels[i].min.x &&
-                    label.min.y < labels[i].max.y + 3 && label.max.y + 3 > labels[i].min.y) overlaps = true;
-            }
-            if (!overlaps) break;
-        }
-        labels[labelCount++] = label;
-        dl->AddRectFilled(label.min, label.max, IM_COL32(5, 10, 15, 185), 4.0f);
-        MFText(dl, fs, ImVec2(label.min.x + 4.0f, label.min.y + 2.0f), col, buf);
     }
 }
 
@@ -1904,8 +1904,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     //    [M5.2] 接线：用「盒子字号」fontBox
     if (st.showLootName) {
         NSString *name = e.name.length ? e.name : @"物资";
-        NSString *label = [NSString stringWithFormat:@"%@\n等级[%d]\n价值[%d]\n[%.1fm]",
-                           name, e.level, e.value, e.distanceMeters];
+        NSString *quality = e.level >= 1 && e.level <= 6 ? [NSString stringWithFormat:@"%d", e.level] : @"?";
+        NSString *label = [NSString stringWithFormat:@"%@\n等级[%@]\n价值[%d]\n[%.1fm]",
+                           name, quality, e.value, e.distanceMeters];
         const char *txt = label.UTF8String;
         ImVec2 ts = MFTextSize(txt, st.fontBox);
         MFText(dl, st.fontBox,

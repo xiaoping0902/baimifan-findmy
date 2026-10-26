@@ -60,5 +60,21 @@ int main() {
     CHECK(std::isnan(MFUEHeading::Read(actor, world, read)), "only simulated remote proxies may use body fallback");
     put(actor + 0x130, uint8_t(1)); memory[actor + 0x9C].resize(12);
     CHECK(std::isnan(MFUEHeading::Read(actor, world, read)), "partial replicated movement reads must fail closed");
-    std::puts("PASS: SDK controller yaw and validated replicated body-facing fallback");
+    // A locally updated root component remains meaningful when controllers and
+    // movement replication are absent. Relative rotation is world rotation
+    // only with no parent, or when the absolute-rotation flag is enabled.
+    constexpr uint64_t root = 0x140000000ULL;
+    put(actor + 0x180, root); put(root + 0x108, uint64_t(0));
+    put(root + 0x178, std::array<float, 3>{0, 135, 0});
+    CHECK(MFUEHeading::Read(actor, world, read) == 135,
+          "an unattached actor root must provide actual body yaw when controller/network facing is missing");
+    put(root + 0x108, uint64_t(0x150000000ULL));
+    CHECK(std::isnan(MFUEHeading::Read(actor, world, read)),
+          "a parent-relative root rotation must not be mislabeled as world facing");
+    put(root + 0x19C, uint8_t(0x08));
+    CHECK(MFUEHeading::Read(actor, world, read) == 135,
+          "an explicitly absolute root rotation may provide world facing despite attachment");
+    put(root + 0x178, std::array<float, 3>{0, NAN, 0});
+    CHECK(std::isnan(MFUEHeading::Read(actor, world, read)), "invalid root facing must stay unknown");
+    std::puts("PASS: SDK controller, replicated body and unattached/absolute root facing paths");
 }

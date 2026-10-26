@@ -65,6 +65,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
         _health = -1;
         _maxHealth = 0;
         _yawDeg = NAN;
+        _helmetHP = _helmetMaxHP = _armorHP = _armorMaxHP = NAN;
     }
     return self;
 }
@@ -334,6 +335,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                         if (havePS && [rb readU64:ps + kMFUE_PlayerState_UIN out:&uinVal]) a[@"uin"] = @(uinVal);
                         NSString *name = havePS ? MFReadUEPlayerName(rb, ps) : nil;
                         if (name.length) a[@"name"] = name;
+                        MFFillUEHeroAttributes(rb, item, a);
 
                         /* 手持 */
                         uint64_t combat = 0;
@@ -343,8 +345,10 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                                 [rb readU64:combat + 0x588 out:&wpn];
                             }
                             if (wpn) {
-                                uint64_t wid = 0;
-                                if ([rb readU64:wpn + 0x838 out:&wid] && wid > 0) {
+                                const uint64_t wid = MFHeldWeapons::ReadID(wpn + 0x838, [rb](uint64_t address, void *out, size_t size) {
+                                    return (bool)[rb readRemote:address into:out size:size];
+                                });
+                                if (wid > 0) {
                                     a[@"wid"] = @(wid);
                                 }
                             }
@@ -364,6 +368,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 if (![attr[@"char"] boolValue]) continue;
 
                 e.worldX = posNow[0]; e.worldY = posNow[1]; e.worldZ = posNow[2];
+                MFApplyUEHeading(e, rb, 0x180);
                 e.teamId = [attr[@"team"] intValue];
                 e.isBot = [attr[@"bot"] boolValue];
                 e.uin = [attr[@"uin"] unsignedLongLongValue];
@@ -390,6 +395,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
                 }
                 e.name = attr[@"name"];
+                MFApplyUEHeroAttributes(e, attr);
                 MFApplyUEEquipmentAttributes(e, attr);
             }
 

@@ -9,6 +9,7 @@
 #import "../app/Sources/Read/MFExternalFeed.h"
 #import "../app/Sources/Read/MFReadBackend.h"
 #import "../app/Sources/Render/MFOverlayView.h"
+#include "../app/Sources/Game/MFUEPlayerDataObjC.h"
 #include "../app/Sources/Render/imgui/imgui.h"
 #include "../app/Sources/Render/imgui/imgui_internal.h"
 #include "HUDRegressionOutput.h"
@@ -26,7 +27,7 @@
 // A narrow byte source for the actual heading read path. It accepts only the
 // SDK root/controller/rotation addresses and fails on unexpected access.
 @interface HeadingReadFixture : MFReadBackend
-@property (nonatomic, assign) BOOL hasController, hasRotation;
+@property (nonatomic, assign) BOOL hasController, hasRotation, hasBodyRotation;
 @property (nonatomic, assign) float pitch, yaw, roll;
 @end
 @implementation HeadingReadFixture
@@ -46,6 +47,13 @@
     }
     if (address == 0x110000000ULL + 0x90 && size == 6) {
         const uint8_t replicationFlags[6] = {}; memcpy(out, replicationFlags, size); return YES;
+    }
+    if (address == 0x120000000ULL + 0x108 && size == 8) {
+        const uint64_t parent = 0; memcpy(out, &parent, size); return YES;
+    }
+    if (address == 0x120000000ULL + 0x178 && size == 12) {
+        if (!_hasBodyRotation) return NO;
+        const float bodyRotation[3] = {0, 270, 0}; memcpy(out, bodyRotation, size); return YES;
     }
     CHECK(NO, "heading fixture must never read outside its SDK field map");
     return NO;
@@ -75,9 +83,14 @@ static void TestHeadingReadFailures(void) {
     [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.2];
     CHECK(std::isnan([[actor valueForKey:@"yawDeg"] floatValue]),
           "a missing controller must clear the previous heading");
+    reader.hasBodyRotation = YES;
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.4];
+    CHECK(fabsf([[actor valueForKey:@"yawDeg"] floatValue] + 90) < .001f,
+          "remote actors without controllers must receive validated root body facing");
+    reader.hasBodyRotation = NO;
     reader.hasController = YES; reader.pitch = NAN;
     [actor setValue:@(90) forKey:@"yawDeg"];
-    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.3];
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.5];
     CHECK(std::isnan([[actor valueForKey:@"yawDeg"] floatValue]),
           "a partially invalid rotation must never produce a heading");
 }
@@ -170,6 +183,14 @@ static int ColoredVertices(ImDrawData *data, ImU32 color) {
     return count;
 }
 
+@interface DrawingOverlayFixture : MFOverlayView
+@property (nonatomic, assign) double sampleFPS;
+@end
+@implementation DrawingOverlayFixture
+- (double)presentedFPS { return self.sampleFPS; }
+- (UIEdgeInsets)safeAreaInsets { return UIEdgeInsetsMake(20, 12, 0, 0); }
+@end
+
 static void TestSyntheticDrawing(void) {
     MFGameReader *reader = [MFGameReader shared];
     reader.targetTaskPort = MACH_PORT_NULL;
@@ -183,6 +204,8 @@ static void TestSyntheticDrawing(void) {
 
     MFSettings *settings = [MFSettings shared];
     [settings resetToDefaults];
+    CHECK(settings.showFPS, "the requested realtime FPS display must default on");
+    settings.showFPS = NO;
     settings.masterEnabled = settings.drawEnabled = YES;
     settings.renderSelfTest = NO;
     settings.showName = settings.showArmor = settings.showHealth = NO;
@@ -192,8 +215,8 @@ static void TestSyntheticDrawing(void) {
 
     [MFDrawingLayer setEnabled:YES];
     MFExternalFeed *feed = [MFExternalFeed shared];
-    MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 720)
-                                                               interactive:NO];
+    DrawingOverlayFixture *overlay = [[DrawingOverlayFixture alloc] initWithFrame:CGRectMake(0, 0, 640, 720)
+                                                                                  interactive:NO];
     overlay.automaticallyStartsRendering = NO;
     MFDrawingLayer *drawing = [MFDrawingLayer new];
     drawing.overlay = overlay;
@@ -202,6 +225,34 @@ static void TestSyntheticDrawing(void) {
     ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
     unsigned char *pixels; int fontWidth, fontHeight;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &fontWidth, &fontHeight);
+
+    CHECK([MFReadUEHeroName([MFReadBackend shared], 10010) isEqualToString:@"威龙"] &&
+          MFReadUEHeroName([MFReadBackend shared], 99999) == nil,
+          "a missing live hero table must use exact local IDs without any remote read or invented name");
+    CHECK([MFResolveUEHeroName(20003, @"蜂医") isEqualToString:@"蜂医"],
+          "live localized hero names must override a local nickname");
+
+    // FPS remains available before a game source connects, follows the actual
+    // presented rate rather than the configured target, and has its own switch.
+    settings.showFPS = YES; overlay.sampleFPS = 59;
+    ImDrawData *fpsData = Frame(drawing, overlay);
+    const ImU32 fpsText = IM_COL32(246,248,252,255);
+    const float rate59Width = ColoredWidth(fpsData, fpsText);
+    CHECK(rate59Width > 20 && !drawing.lastCameraOK,
+          "the top-left FPS badge must draw even when no game camera is connected");
+    for (int list = 0; list < fpsData->CmdLists.Size; ++list)
+        for (const ImDrawVert &v : fpsData->CmdLists[list]->VtxBuffer)
+            CHECK(v.pos.x >= 21 && v.pos.y >= 27 && v.pos.x <= 117 && v.pos.y <= 57,
+                  "the FPS badge must stay at the top-left inside the safe-area anchor");
+    overlay.sampleFPS = 119;
+    CHECK(ColoredWidth(Frame(drawing,overlay),fpsText) > rate59Width + 3,
+          "the rendered FPS text must change with measured presentation rate");
+    settings.drawEnabled = NO;
+    CHECK(ColoredWidth(Frame(drawing,overlay),fpsText) > 20,
+          "FPS must remain independent of the game drawing switch");
+    settings.drawEnabled = YES; settings.showFPS = NO;
+    CHECK(Frame(drawing,overlay)->TotalVtxCount == 0,
+          "disabling the FPS switch must remove the entire top-left badge");
 
     // Check the actual current source selection before injecting any frame.
     const int unavailableVertices = Frame(drawing, overlay)->TotalVtxCount;
@@ -353,6 +404,29 @@ static void TestSyntheticDrawing(void) {
     CHECK(ColoredVertices(data,packed(MFColorSlotLoot4))>0 && ColoredVertices(data,packed(MFColorSlotLoot5))>0 &&
           ColoredVertices(data,packed(MFColorSlotLoot6))>0,
           "head, armor and bag must each use their own quality color in the same gear row");
+    const float helmetWidthWithMax=ColoredWidth(data,packed(MFColorSlotLoot4));
+    const float armorWidthWithMax=ColoredWidth(data,packed(MFColorSlotLoot5));
+    patient.helmetMaxHP=patient.armorMaxHP=0;
+    data=Frame(drawing,overlay);
+    CHECK(fabsf(ColoredWidth(data,packed(MFColorSlotLoot4))-helmetWidthWithMax)<.01f &&
+          fabsf(ColoredWidth(data,packed(MFColorSlotLoot5))-armorWidthWithMax)<.01f,
+          "known current durability must draw the same digits when maximum durability is unavailable");
+    settings.showHeld=settings.showArmor=NO;
+    patient.name=@"PlayerNickname"; patient.heroName=@"Hero"; patient.teamId=7;
+    patient.uin=1234567890123ULL;
+    data=Frame(drawing,overlay);
+    const ImU32 infoColor=packed(MFColorSlotPersonInfo), heroColor=packed(MFColorSlotTeam);
+    const float nicknameWidth=ColoredWidth(data,infoColor), heroWidth=ColoredWidth(data,heroColor);
+    patient.uin=9;
+    CHECK(fabsf(ColoredWidth(Frame(drawing,overlay),infoColor)-nicknameWidth)<.01f,
+          "changing UIN must never replace the player-authored nickname in the team row");
+    patient.name=@"N";
+    CHECK(ColoredWidth(Frame(drawing,overlay),infoColor)<nicknameWidth-30,
+          "the identity row must follow the authored nickname");
+    patient.heroName=@"HeroWithLongerName";
+    CHECK(ColoredWidth(Frame(drawing,overlay),heroColor)>heroWidth+30,
+          "the hero and nickname must render as separate identity rows");
+    patient.teamId=0;
     settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = NO;
 
     sEntities = @[Entity(1000, 0, NO, NO), Entity(-1000, 0, NO, NO)];
@@ -385,8 +459,8 @@ static void TestSyntheticDrawing(void) {
     MFEntity *adjacentBack = Entity(-1200, 10, NO, NO);
     sEntities = @[back, adjacentBack];
     const int clusteredBack = Frame(drawing, overlay)->TotalVtxCount;
-    CHECK(clusteredBack > oneBack && clusteredBack < oneBack * 2,
-          "nearby bearings must share a marker and show their count without duplicating distance labels");
+    CHECK(clusteredBack >= oneBack * 2,
+          "nearby bearings must retain separate arrows and individual distance labels");
     sEntities = @[];
     CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
           "the offscreen guide must disappear immediately with no threats");

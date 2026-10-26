@@ -64,6 +64,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger effectiveFPS;
 /// Successful GPU completions per second; not game FPS or physical scanout.
 @property (nonatomic, readonly) double renderedFPS;
+/// Actual overlay presentations measured from CAMetalDrawable.presentedTime.
+/// Zero means no valid recent sample; this is not the underlying game's FPS.
+@property (nonatomic, readonly) double presentedFPS;
 /// 空闲帧率（默认 0 = 不降频）。菜单设成 ~12：不交互时不占 GPU。
 @property (nonatomic, assign) NSInteger idleFPS;
 /// 一次交互之后保持满帧的秒数（默认 0.6）

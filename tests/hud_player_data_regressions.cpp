@@ -1,4 +1,7 @@
 #include "../app/Sources/Game/MFUEPlayerData.h"
+#include "../app/Sources/Game/MFUEDataTable.h"
+#include "../app/Sources/Game/MFHeldWeapons.h"
+#include "../app/Sources/Game/MFHeroNames.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -85,6 +88,42 @@ int main() {
     CHECK(gear.known && gear.head.level == 5 && gear.head.rawID == helmet &&
           gear.head.health == 12 && gear.head.maximum == 45 && gear.bag.level == 3 && gear.bag.rawID == bag && gear.armor.level == 0,
           "SDK armor and equipment arrays must yield IDs, levels, durability, and absent armor");
+    const float unknownMax = 0, broken = 0, nan = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(memory[armorData].data() + 0x1C, &unknownMax, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 12 && std::isnan(gear.head.maximum),
+          "valid current armor HP must survive an unavailable maximum");
+    const float staleMaximum = 1;
+    std::memcpy(memory[armorData].data() + 0x1C, &staleMaximum, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 12, "a stale replicated maximum must not erase valid current armor HP");
+    std::memcpy(memory[armorData].data() + 0x18, &broken, 4);
+    std::memcpy(memory[armorData].data() + 0x1C, &maximum, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 0, "broken armor must preserve zero current HP");
+    std::memcpy(memory[armorData].data() + 0x18, &nan, 4);
+    std::memcpy(memory[armorData].data() + 0x20, &current, 4);
+    std::memcpy(memory[armorData].data() + 0x24, &maximum, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 12, "SDK Durability is a fallback when ArmorHP is invalid");
+    std::memcpy(memory[armorData].data() + 0x18, &current, 4);
+    std::memcpy(memory[armorData].data() + 0x20, &broken, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 12, "zero Durability must not replace valid ArmorHP");
+    std::memcpy(memory[armorData].data() + 0x18, &nan, 4);
+    std::memcpy(memory[armorData].data() + 0x20, &nan, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(std::isnan(gear.head.health), "unreadable current HP must remain unknown, not zero");
+    std::memcpy(memory[infoData].data(), &helmet, 8);
+    std::memcpy(memory[infoData].data() + 0x10, &current, 4);
+    std::memcpy(memory[infoData].data() + 0x14, &maximum, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 12, "matching SDK equipment Health fills unavailable armor HP");
+    std::memcpy(memory[armorData].data() + 0x18, &broken, 4);
+    gear = MFUEPlayerData::ReadEquipment(actor, read);
+    CHECK(gear.head.health == 0, "equipment fallback must not refill broken armor");
+    std::memcpy(memory[armorData].data() + 0x18, &current, 4);
+    std::memcpy(memory[infoData].data(), &bag, 8);
     put(equipment + 0x1E8, MFUEPlayerData::ArrayHeader{armorData, 2, 2});
     const uint64_t bodyArmor = 11050006001ULL;
     memory[armorData + 0x88].resize(0x40);
@@ -121,5 +160,79 @@ int main() {
     gear = MFUEPlayerData::ReadEquipment(actor, read);
     CHECK(gear.known && gear.bag.rawID == unknownLevelBag && gear.bag.level == 0,
           "known encoded equipment type with unknown level must preserve ID for '?' rendering");
+    const uint64_t fashion = 0x100007000, textData = 0x100008000;
+    put(actor + 0x26A8, fashion);
+    put(fashion + 0x508, uint64_t(12345678901ULL));
+    CHECK(MFUEPlayerData::ReadHeroID(actor, read) == 12345678901ULL,
+          "hero identity must use the live replicated fashion component, not player UIN");
+    memory.erase(fashion + 0x508);
+    CHECK(MFUEPlayerData::ReadHeroID(actor, read) == 0, "missing hero state must stay unknown");
+    const std::pair<uint64_t, const char *> heroes[] = {
+        {10007, u8"红狼"}, {10010, u8"威龙"}, {10011, u8"无名"}, {10012, u8"张姐"},
+        {20003, u8"疯医"}, {20004, u8"女医"}, {20005, u8"蝶"}, {20006, u8"养狗的"},
+        {30008, u8"老黑"}, {30009, u8"比特"}, {30010, u8"盾狗"}, {30011, u8"乌鲁鲁"},
+        {30012, u8"液氮"}, {40005, u8"露娜"}, {40010, u8"骇爪"}, {40011, u8"老头"}
+    };
+    for (const auto &hero : heroes)
+        CHECK(MFHeroNames::Resolve(hero.first, nullptr) &&
+              std::string(MFHeroNames::Resolve(hero.first, nullptr)) == hero.second,
+              "each exact supplied hero ID must have its documented fallback name");
+    CHECK(std::string(MFHeroNames::Resolve(20003, u8"蜂医")) == u8"蜂医",
+          "the live localized hero name must take precedence over documented slang");
+    CHECK(std::string(MFHeroNames::Resolve(10010, "")) == u8"威龙",
+          "an empty live name must still use the local hero fallback");
+    CHECK(!MFHeroNames::Resolve(99999, nullptr) && !MFHeroNames::Resolve(0, nullptr) &&
+          !MFHeroNames::Resolve(10010007, nullptr),
+          "unknown hero IDs must not be guessed or matched by decimal suffix");
+    put(actor + 0x18, textData);
+    stringAt(0x470, u"威龙");
+    put(textData + 0x48, MFUEPlayerData::ArrayHeader{nameData, 3, 3});
+    CHECK(MFUEPlayerData::ReadFText(actor + 0x18, read) == u"威龙",
+          "localized FText must follow SDK TextData.TextSource at 0x48");
+    CHECK(MFUEDataTable::AlignedReadSize(0x1000, 24) == 4080,
+          "data-table read chunks must not split a 24-byte element and shift all later rows");
+    CHECK(MFUEDataTable::AlignedReadSize(100, 24) == 96, "last complete rows must fit the read buffer");
+    CHECK(MFUEDataTable::ValidQuality(6) && !MFUEDataTable::ValidQuality(0) && !MFUEDataTable::ValidQuality(7),
+          "only six explicit quality levels are drawable; zero must not suppress a known red grade");
+    CHECK(MFUEDataTable::NumericID("11010006001") == 11010006001ULL &&
+          MFUEDataTable::NumericID("11010006001_bad") == 0,
+          "item FNames must decode only complete decimal IDs");
+    CHECK(std::string(MFHeldWeapons::NameForID(920130818)) == u8"小刀",
+          "verified held knife identity must display the knife name");
+    CHECK(MFHeldWeapons::NameForID(830130830) &&
+          std::string(MFHeldWeapons::NameForID(830130830)) == "M16A4" &&
+          MFHeldWeapons::NameForID(830130829) &&
+          std::string(MFHeldWeapons::NameForID(830130829)) == "M416",
+          "all verified compact rifle IDs must retain their concrete names");
+    put(actor + 0x838, uint64_t(0xABCDEF1200000000ULL | 920130818ULL));
+    CHECK(MFHeldWeapons::ReadID(actor + 0x838, read) == (0xABCDEF1200000000ULL | 920130818ULL),
+          "the SDK uint64 weapon field must preserve all bits without guessing a narrower ABI");
+    put(actor + 0x838, uint64_t(18010000001ULL));
+    CHECK(MFHeldWeapons::ReadID(actor + 0x838, read) == 18010000001ULL,
+          "full inventory weapon IDs must stay intact");
+    put(actor + 0x838, uint32_t(920130818));
+    CHECK(MFHeldWeapons::ReadID(actor + 0x838, read) == 0,
+          "a partial four-byte read must not masquerade as a valid SDK uint64 field");
+    const uint64_t table = 0x100009000, rowStruct = 0x10000A000, tableData = 0x10000B000;
+    put(table + 0x28, rowStruct);
+    put(table + 0x30, MFUEPlayerData::ArrayHeader{tableData, 201, 201});
+    std::vector<unsigned char> tableBytes(201 * 24);
+    for (uint32_t i = 0; i < 201; ++i) {
+        const uint32_t nameIndex = i + 100;
+        const uint64_t row = 0x100100000 + i * 0x300;
+        std::memcpy(tableBytes.data() + i * 24, &nameIndex, 4);
+        std::memcpy(tableBytes.data() + i * 24 + 8, &row, 8);
+    }
+    auto readTable = [&](uint64_t address, void *out, size_t size) {
+        if (address >= tableData && address - tableData <= tableBytes.size() && size <= tableBytes.size() - (address - tableData)) {
+            std::memcpy(out, tableBytes.data() + (address - tableData), size); return true;
+        }
+        return read(address, out, size);
+    };
+    const auto rows = MFUEDataTable::ReadRows(table, rowStruct, readTable);
+    CHECK(rows.size() == 201 && rows[170].comparisonIndex == 270 && rows.back().comparisonIndex == 300,
+          "localized table rows after the first 4KB boundary must retain their exact item/hero keys");
+    CHECK(MFUEDataTable::ReadRows(table, rowStruct + 8, readTable).empty(),
+          "a different RowStruct must not be interpreted as a hero/item table");
     puts("PASS: SDK player names, UIN, equipment records, known empty and unreadable states");
 }

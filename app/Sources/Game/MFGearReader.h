@@ -119,6 +119,9 @@ typedef NS_ENUM(uint32_t, MFGearItemSource) {
 /// 物品 ID 名（PickupBase.InventoryIdName 解出来的字符串）。
 /// 拿不到就为 nil —— 绘制层应回退到 MFGearCatalog 的 fallbackLabel。
 @property (nonatomic, copy, nullable) NSString *itemIdName;
+/// Decimal inventory ID and readable dictionary name, when resolved.
+@property (nonatomic, assign) uint64_t rawItemID;
+@property (nonatomic, copy, nullable) NSString *displayName;
 
 /// 物品 ID 的 FName 原始两段（ComparisonIndex + Number）。
 /// 查物品定义表时要用它当主键 —— 字符串可能解不出来，但索引一定在。

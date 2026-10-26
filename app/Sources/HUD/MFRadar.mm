@@ -15,6 +15,22 @@ static inline float MFRAClamp(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+ImU32 MFRadarTeamColor(int teamID) {
+    if (teamID <= 0) return IM_COL32(225, 232, 240, 255);
+    // Golden-angle hue spacing keeps consecutive squad numbers visibly apart;
+    // no frame-order allocation means the same squad keeps its color on return.
+    const float hue = (float)fmod((double)teamID * 0.3819660112501051, 1.0);
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(hue, 0.78f, 1.0f, r, g, b);
+    // Preserve the valid squad ID (1..999) in the low channel nibbles so
+    // quantizing nearby hues never makes two known squads exactly the same.
+    const unsigned identity = (unsigned)teamID;
+    const int red = ((int)lroundf(r * 255) & 0xF0) | (identity & 0x0F);
+    const int green = ((int)lroundf(g * 255) & 0xF0) | ((identity >> 4) & 0x0F);
+    const int blue = ((int)lroundf(b * 255) & 0xF0) | ((identity >> 8) & 0x0F);
+    return IM_COL32(red, green, blue, 255);
+}
+
 typedef struct { ImVec2 center; float radius; } MFRALayout;
 
 /// 短边自适应布局（对齐 ComputeRadarLayout）
@@ -165,7 +181,7 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
         float markerR = (b->isBot ? 2.8f : 3.5f) * scale;
         const bool hasHeading = isfinite(b->yawDeg) && fabsf(b->yawDeg) <= 720.0f;
         // Reserve the full facing marker, including its anti-aliased edge.
-        const float footprintR = markerR + (hasHeading ? 7.0f * scale : 1.2f * scale);
+        const float footprintR = markerR + (hasHeading ? 10.0f * scale : 1.2f * scale);
 
         ImVec2 off;
         if (!MFRAProject(cfg, b->x, b->y, radius, footprintR, &off)) continue;
@@ -195,12 +211,13 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
                 rx =  (wy * cc - wx * cs);
                 ry = -(wx * cc + wy * cs);
             }
-            const float len = markerR + 6.0f * scale;
+            const float len = markerR + 9.0f * scale;
             const ImVec2 tip(p.x + rx * len, p.y + ry * len);
-            const float root = markerR + 1.0f * scale;
-            const float halfWidth = 2.2f * scale;
+            const float root = markerR;
+            const float halfWidth = 3.0f * scale;
             const ImVec2 left(p.x + rx * root - ry * halfWidth, p.y + ry * root + rx * halfWidth);
             const ImVec2 right(p.x + rx * root + ry * halfWidth, p.y + ry * root - rx * halfWidth);
+            dl->AddTriangle(tip, left, right, IM_COL32(2, 7, 12, 230), 1.8f * scale);
             dl->AddTriangleFilled(tip, left, right, b->color);
         }
 

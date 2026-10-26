@@ -14,6 +14,7 @@
 #import "MFItemTable.h"
 #import "MFUEOffsets.h"
 #import "MFUEReader.h"        /* 只为拿 libBase（模块基址） */
+#include "MFUEDataTable.h"
 #import "../Read/MFReadBackend.h"
 #import <string.h>
 
@@ -50,7 +51,9 @@ static const uint32_t kMFItem_Row_Valuable = 0x01B8;   // bool
 static const uint32_t kMFItem_Row_Size     = 576;
 
 /// 一次读多个行时，单次请求的上限（不跨页太多，稳妥）
-static const uint32_t kMFItem_ReadChunkBytes = 0x1000;
+// 24-byte map records cannot be split at 4096: otherwise the next chunk
+// starts 16 bytes into a record and most later item qualities disappear.
+static const uint32_t kMFItem_ReadChunkBytes = (uint32_t)MFUEDataTable::AlignedReadSize(0x1000, 24);
 
 #pragma mark - 已知对象下标（GObjects dump 直读，同一版本内稳定）
 
@@ -77,8 +80,6 @@ typedef NS_ENUM(NSInteger, MFItemMapLayout) {
 
 #pragma mark - 值域
 
-/// Quality 的合理上限（游戏是 0–6 级，留足余量）
-static const int32_t kMFItem_MaxQuality = 20;
 /// Price 上限（1 亿）
 static const int32_t kMFItem_MaxPrice = 100000000;
 
@@ -385,8 +386,12 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
         r.comparisonIndex = comparisonIndex;
         r.number = number;
         r.rowAddress = rowPtr;
+        const auto name = MFUEPlayerData::ReadFText(rowPtr + 0x18, [rb](uint64_t address, void *out, size_t size) {
+            return (bool)[rb readRemote:address into:out size:size];
+        });
+        if (!name.empty()) r.displayName = [NSString stringWithCharacters:(const unichar *)name.data() length:name.size()];
         // 值域校验：越界说明这一行的偏移不成立，宁可给 -1 也不给错数
-        r.quality = (quality >= 0 && quality <= kMFItem_MaxQuality) ? quality : -1;
+        r.quality = MFUEDataTable::ValidQuality(quality) ? quality : -1;
         r.price   = (price   >= 0 && price   <= kMFItem_MaxPrice)   ? price   : -1;
 
         uint8_t vb = 0;

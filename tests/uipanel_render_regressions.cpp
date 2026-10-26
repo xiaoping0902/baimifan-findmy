@@ -244,12 +244,65 @@ static bool SameColor(const ImVec4& a, const ImVec4& b) {
     return std::fabs(a.x-b.x)<.001f && std::fabs(a.y-b.y)<.001f &&
            std::fabs(a.z-b.z)<.001f && std::fabs(a.w-b.w)<.001f;
 }
+static void TestColorPopupKeepsItsGeometryStable(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1; state.tab = 3;
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    ScrollToBottom(state, layout);
+    Click(state, layout, Item("human_skeleton_color"));
+    for (int frame = 0; frame < 6; ++frame) Frame(state, layout);
+    CHECK(GImGui->OpenPopupStack.Size == 1 && GImGui->OpenPopupStack[0].Window,
+          "the color row must open a live popup");
+    ImGuiWindow *popup = GImGui->OpenPopupStack[0].Window;
+    const ImVec2 size = popup->Size, position = popup->Pos;
+    const Hit preset = Item("color_preset", 0);
+    for (int frame = 0; frame < 30; ++frame) {
+        Frame(state, layout);
+        const Hit current = Item("color_preset", 0);
+        CHECK(popup->Active && std::fabs(popup->Size.x-size.x)<.5f &&
+              std::fabs(popup->Size.y-size.y)<.5f &&
+              std::fabs(popup->Pos.x-position.x)<.5f && std::fabs(popup->Pos.y-position.y)<.5f &&
+              std::fabs(current.origin.x-preset.origin.x)<.5f &&
+              std::fabs(current.origin.y-preset.origin.y)<.5f,
+              "an idle color popup must keep its text and controls stationary instead of flashing each frame");
+    }
+    const Hit picker = Item("color_picker");
+    // The far-right strip is the production alpha bar. Hold a touch there,
+    // then slide it down: the value must follow the same pointer continuously.
+    const ImVec4 initialBot = state.botSkeletonColor;
+    const ImVec2 pointer(picker.origin.x+picker.size.x-8*layout.scale,
+                         picker.origin.y+50*layout.scale);
+    ImGuiIO& io = ImGui::GetIO();
+    state.configDirty = false;
+    io.AddMousePosEvent(pointer.x,pointer.y);
+    io.AddMouseButtonEvent(0,true);
+    Frame(state,layout); Frame(state,layout);
+    CHECK(state.humanSkeletonColor.w<.9f && state.humanSkeletonColor.w>.3f &&
+          SameColor(state.botSkeletonColor,initialBot) && state.configDirty && GImGui->ActiveId,
+          "dragging the actual alpha bar must edit only its bound human color");
+    const float heldAlpha = state.humanSkeletonColor.w;
+    const ImGuiID active = GImGui->ActiveId;
+    for (int frame = 0; frame < 20; ++frame) {
+        Frame(state,layout);
+        CHECK(GImGui->ActiveId==active && std::fabs(state.humanSkeletonColor.w-heldAlpha)<.001f &&
+              std::fabs(popup->Size.y-size.y)<.5f,
+              "holding a color slider must preserve its geometry, active touch and value across frames");
+    }
+    io.AddMousePosEvent(pointer.x,pointer.y+30*layout.scale);
+    Frame(state,layout); Frame(state,layout);
+    CHECK(state.humanSkeletonColor.w<heldAlpha-.1f && GImGui->ActiveId==active,
+          "the same color-bar gesture must keep adjusting smoothly after the touch moves");
+    io.AddMouseButtonEvent(0,false); Frame(state,layout); Frame(state,layout);
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    Frame(state, layout);
+}
 static void TestIndependentSkeletonColorControls(void) {
     UIState state;
     state.expanded = true; state.anim = 1; state.tab = 3;
     CHECK(SameColor(state.humanSkeletonColor, ImVec4(1,.08f,.08f,1)) &&
-          SameColor(state.botSkeletonColor, ImVec4(.10f,1,.20f,1)),
-          "fresh skeleton colors must be vivid red for humans and vivid green for bots");
+          SameColor(state.botSkeletonColor, ImVec4(1,1,1,1)),
+          "fresh skeleton colors must be vivid red for humans and white for bots");
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
     ScrollToBottom(state, layout);
@@ -306,6 +359,7 @@ int main() {
     TestMovableIndependentLootStatistics();
     TestInertiaKeepsFramesActiveUntilSettled();
     TestPersonalitySizeSliderAndFixedIsland();
+    TestColorPopupKeepsItsGeometryStable();
     TestIndependentSkeletonColorControls();
     ImGui::DestroyContext();
     std::puts("PASS: production hosted panel geometry, useful pages, minimize and bidirectional resize");

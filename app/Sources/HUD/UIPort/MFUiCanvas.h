@@ -185,8 +185,10 @@ struct Canvas {
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,tc.accentSoft);
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,tc.accentSoft);
         if(ImGui::BeginPopup("##color")){
-            /* 新版 ImGui 删掉了 ImFont::FontSize；统一用 14px 与当前字号的比例 */
-            ImGui::SetWindowFontScale(ImMax(0.6f, 14.0f * s / ImMax(1.0f, ImGui::GetFontSize())));
+            // Bind an absolute size: GetFontSize() already includes the prior
+            // window scale, so dividing by it creates an every-frame feedback
+            // loop that makes the picker text, bars and popup height oscillate.
+            ImGui::PushFont(font,14.0f*s);
             ImGui::TextUnformatted(label);
             const ImVec4 presets[]={ImVec4(1,.08f,.08f,1),ImVec4(.10f,1,.20f,1),
                 ImVec4(.12f,.48f,1,1),ImVec4(1,.85f,.08f,1),ImVec4(1,1,1,1)};
@@ -215,8 +217,12 @@ struct Canvas {
                     value = ImVec4(col[0], col[1], col[2], col[3]);
                     changed = true;
                 }
+#ifdef HEIHUANG_UI_TEST_ITEM
+                HEIHUANG_UI_TEST_ITEM("color_picker",ImGui::GetItemRectMin(),ImGui::GetItemRectSize());
+#endif
             }
             ImGui::PopItemWidth();
+            ImGui::PopFont();
             ImGui::EndPopup();
         }
         ImGui::PopStyleColor(6);

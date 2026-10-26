@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <set>
 
 #define CHECK(c, msg) do { if (!(c)) { std::fprintf(stderr, "FAIL: %s\n", msg); std::exit(1); } } while (0)
 
@@ -34,6 +35,15 @@ static Bounds TargetBounds(ImDrawData *data, bool checkCircle = false, ImU32 col
 }
 
 int main() {
+    std::set<ImU32> teamColors;
+    for (int team = 1; team <= 999; ++team) {
+        const ImU32 color = MFRadarTeamColor(team);
+        CHECK(color == MFRadarTeamColor(team), "team color must be stable across calls");
+        CHECK((color & IM_COL32_A_MASK) == IM_COL32_A_MASK, "radar team colors must be fully visible");
+        teamColors.insert(color);
+    }
+    CHECK(teamColors.size() == 999, "different valid team IDs must receive distinct radar colors");
+    CHECK(MFRadarTeamColor(0) == MFRadarTeamColor(-1), "unknown team IDs must use a shared neutral fallback");
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
     unsigned char *pixels; int w, h; io.Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);

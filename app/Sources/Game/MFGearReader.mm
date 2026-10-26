@@ -47,6 +47,8 @@
 //
 #import "MFGearReader.h"
 #import "MFGearCatalog.h"
+#import "MFItemNames.h"
+#include "MFUEDataTable.h"
 #import "MFItemTable.h"      /* [M5.86] 物品定义表：等级/价值/名字的真实来源 */
 #import "MFUEOffsets.h"
 #import "../Read/MFReadBackend.h"
@@ -161,6 +163,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     if ((self = [super init])) {
         _mainType = MFGearItemMainTypeNone;
         _equipSubType = MFGearEquipSubTypeNone;
+        _quality = -1;
     }
     return self;
 }
@@ -371,10 +374,38 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
      * 正确做法是查到行地址、再在行地址上加。
      *
      * 查表失败（表没加载 / 这行不在表里）时不设置 hasQuality/hasValue，
-     * 绘制层退回「只有星级、没有等级」的显示 —— 不伪造。
+     * 绘制层保留未知品质；StarNum 不能替代六档 Quality。
      */
     if (info.itemIdNameIndex > 0) {
         [self lookupItemTableForInfo:info];
+    }
+    info.rawItemID = MFUEDataTable::NumericID(info.itemIdName.UTF8String);
+    const char *displayName = MFItemNameForID(info.rawItemID);
+    if (displayName) info.displayName = [NSString stringWithUTF8String:displayName];
+
+    // The reference runtime exposes a cached common-item row at +0x1200.
+    // Accept its quality only when its own ItemID matches the pickup FName.
+    if (!info.hasQuality && info.itemIdNameIndex > 0) {
+        uint64_t row = 0;
+        if ([rb readU64:actor + 0x1200 out:&row] && MFUEIsValidPtr(row)) {
+            uint32_t itemName[2] = {};
+            int32_t quality = 0;
+            if ([rb readRemote:row + 0x10 into:itemName size:sizeof(itemName)] &&
+                itemName[0] == info.itemIdNameIndex && itemName[1] == info.itemIdNameNumber &&
+                [rb readRemote:row + 0x68 into:&quality size:sizeof(quality)] &&
+                MFUEDataTable::ValidQuality(quality)) {
+                info.quality = quality; info.hasQuality = YES;
+            }
+        }
+    }
+    if (!info.hasQuality && info.rawItemID) {
+        MFUEPlayerData::Equipment equipment;
+        if (MFUEPlayerData::SlotForID(equipment, info.rawItemID)) {
+            const int level = (int)((info.rawItemID / 1000ULL) % 10ULL);
+            if (MFUEDataTable::ValidQuality(level)) {
+                info.quality = level; info.hasQuality = YES;
+            }
+        }
     }
 
     /*
@@ -426,7 +457,8 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     if ([table lookupComparisonIndex:info.itemIdNameIndex
                               number:info.itemIdNameNumber
                                  row:&row] && row != nil) {
-        if (row.quality >= 0) {
+        if (row.displayName.length) info.displayName = row.displayName;
+        if (MFUEDataTable::ValidQuality(row.quality)) {
             info.quality = row.quality;
             info.hasQuality = YES;
         }

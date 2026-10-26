@@ -6,6 +6,7 @@ import unittest
 
 FONT = Path(__file__).resolve().parents[1] / "app/Resources/NotoSansSC-full.ttf"
 REQUIRED_TEXT = "小玉灵动岛真人机物资观战自身队伍人物干员名字头甲包刀枪血量未知距离统计0123456789:/·—m"
+REQUIRED_TEXT += "红狼威龙无名张姐疯医女医蝶养狗的老黑比特盾狗乌鲁鲁液氮露娜骇爪老头蜂医"
 
 
 def font_tables(data):

@@ -70,9 +70,11 @@ static void TestSettingsColorAndAnchorPersistence(void) {
           "appending bot skeleton color must keep all existing persisted color slot numbers");
     MFSettings *settings=MFSettings.shared;
     [settings resetToDefaults];
+    CHECK(settings.showFPS,"fresh settings must show the realtime overlay frame rate");
+    settings.showFPS=NO;
     CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],1,.08,.08)&&
-          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.10,1,.20),
-          "fresh native settings must use vivid red humans and vivid green bots");
+          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],1,1,1),
+          "fresh native settings must use vivid red humans and white bots");
     settings.lootStatsXRatio=-2;settings.lootStatsYRatio=4;
     CHECK(settings.lootStatsXRatio==0&&settings.lootStatsYRatio==1,
           "statistics screen anchors must clamp at their model setters");
@@ -84,7 +86,7 @@ static void TestSettingsColorAndAnchorPersistence(void) {
     [settings setColor:[UIColor colorWithRed:.64 green:.52 blue:.23 alpha:1] forSlot:MFColorSlotBotSkeleton];
     CHECK([settings save],"native color/anchor settings fixture must save");
     MFSettings *loaded=[[MFSettings alloc] init];
-    CHECK(fabs(loaded.lootStatsXRatio-.43f)<.001&&fabs(loaded.lootStatsYRatio-.72f)<.001&&
+    CHECK(!loaded.showFPS&&fabs(loaded.lootStatsXRatio-.43f)<.001&&fabs(loaded.lootStatsYRatio-.72f)<.001&&
           ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&
           ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
           "native colors and statistics position must survive a full disk roundtrip");
@@ -92,15 +94,37 @@ static void TestSettingsColorAndAnchorPersistence(void) {
         stringByAppendingPathComponent:@"mf_settings.plist"];
     NSMutableDictionary *legacy=[[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
     [legacy removeObjectForKey:@"lootStatsXRatio"];[legacy removeObjectForKey:@"lootStatsYRatio"];
+    [legacy removeObjectForKey:@"colorDefaultsVersion"];
+    [legacy removeObjectForKey:@"showFPS"];
     legacy[@"showTeammates"]=@YES;
     NSMutableDictionary *colors=[legacy[@"colors"] mutableCopy];
     [colors removeObjectForKey:@"10"];legacy[@"colors"]=colors;
     CHECK([legacy writeToFile:path atomically:YES],"legacy settings fixture must save");
     loaded=[[MFSettings alloc] init];
-    CHECK(fabs(loaded.lootStatsXRatio-.01f)<.001&&fabs(loaded.lootStatsYRatio-.18f)<.001&&
-          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.10,1,.20)&&
+    CHECK(loaded.showFPS&&fabs(loaded.lootStatsXRatio-.01f)<.001&&fabs(loaded.lootStatsYRatio-.18f)<.001&&
+          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],1,1,1)&&
           ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&!loaded.showTeammates,
           "legacy settings must retain human colors, default new anchors/bot color, and exclude teammates");
+    colors[@"10"]=@[@.10,@1.0,@.20,@1.0];legacy[@"colors"]=colors;
+    CHECK([legacy writeToFile:path atomically:YES],"previous bot-color default fixture must save");
+    loaded=[[MFSettings alloc] init];
+    CHECK(ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],1,1,1)&&
+          ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72),
+          "the previous shipped green bot default must migrate to white while custom human color survives");
+    colors[@"8"]=@[@1.0,@.45,@.45,@1.0];legacy[@"colors"]=colors;
+    CHECK([legacy writeToFile:path atomically:YES],"previous human-color default fixture must save");
+    loaded=[[MFSettings alloc] init];
+    CHECK(ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],1,.08,.08)&&
+          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],1,1,1),
+          "legacy pale-red human and green bot defaults must migrate together");
+    [loaded setColor:[UIColor colorWithRed:.10 green:1 blue:.20 alpha:1] forSlot:MFColorSlotBotSkeleton];
+    [loaded setColor:[UIColor colorWithRed:1 green:.45 blue:.45 alpha:1] forSlot:MFColorSlotSkeleton];
+    CHECK([loaded save],"current-version colors matching old defaults must save");
+    loaded=[[MFSettings alloc] init];
+    CHECK(ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],1,.45,.45)&&
+          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.10,1,.20),
+          "newly selected colors must survive restart even when their RGBA equals a previous shipped default");
+    settings.showFPS=YES;
     CHECK([settings save],"restore the seeded production menu preferences");
 }
 static void WaitForMenuPreferences(BOOL (^ready)(MFSettings *),NSDate *deadline,void (^completion)(void)) {
@@ -110,13 +134,49 @@ static void WaitForMenuPreferences(BOOL (^ready)(MFSettings *),NSDate *deadline,
         WaitForMenuPreferences(ready,deadline,completion);
     });
 }
+static void TestNativeColorPopupStability(MFMenuUI *menu,MFOverlayView *overlay) {
+    for(int frame=0;frame<8;++frame)Frame(menu,overlay);
+    CHECK(GImGui->OpenPopupStack.Size==1 && GImGui->OpenPopupStack[0].Window,
+          "the real menu must own its live color popup");
+    ImGuiWindow *popup=GImGui->OpenPopupStack[0].Window;
+    const ImVec2 size=popup->Size,position=popup->Pos;
+    const MenuTestHit first=MenuItem("color_preset",0);
+    for(int frame=0;frame<30;++frame){
+        Frame(menu,overlay);
+        const MenuTestHit current=MenuItem("color_preset",0);
+        CHECK(popup->Active && fabs(popup->Size.y-size.y)<.5f &&
+              fabs(popup->Pos.x-position.x)<.5f && fabs(popup->Pos.y-position.y)<.5f &&
+              fabs(current.origin.y-first.origin.y)<.5f,
+              "native color popup controls must stay stationary over repeated idle frames");
+    }
+    const MenuTestHit picker=MenuItem("color_picker");
+    const float scale=PanelScale(overlay);
+    const ImVec2 pointer(picker.origin.x+picker.size.x-8*scale,picker.origin.y+50*scale);
+    ImGuiIO &io=ImGui::GetIO();
+    io.AddMousePosEvent(pointer.x,pointer.y);io.AddMouseButtonEvent(0,true);
+    Frame(menu,overlay);Frame(menu,overlay);
+    CGFloat r=0,g=0,b=0,a=0;
+    [[MFSettings.shared colorForSlot:MFColorSlotSkeleton]getRed:&r green:&g blue:&b alpha:&a];
+    CHECK(a<.9 && a>.3 && GImGui->ActiveId,
+          "the native popup alpha bar must update actual production settings while held");
+    const CGFloat held=a;const ImGuiID active=GImGui->ActiveId;
+    for(int frame=0;frame<20;++frame){
+        Frame(menu,overlay);
+        [[MFSettings.shared colorForSlot:MFColorSlotSkeleton]getRed:&r green:&g blue:&b alpha:&a];
+        CHECK(GImGui->ActiveId==active && fabs(a-held)<.001 && fabs(popup->Size.y-size.y)<.5f,
+              "a native color slider must keep the same active touch and value without a geometry feedback loop");
+    }
+    io.AddMouseButtonEvent(0,false);Frame(menu,overlay);Frame(menu,overlay);
+}
 static void TestColorsAndPositionPersistence(MFMenuUI *menu,MFOverlayView *overlay,void (^completion)(void)) {
     MFSettings *settings=MFSettings.shared;
     CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.36,.24,.72) &&
           ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
           "saved human and bot colors must load independently before the menu opens");
     ClickMenu(menu,overlay,NavPoint(overlay,3));ScrollMenuToBottom(menu,overlay);
-    ClickItem(menu,overlay,"human_skeleton_color");ClickItem(menu,overlay,"color_preset",2);
+    ClickItem(menu,overlay,"human_skeleton_color");
+    TestNativeColorPopupStability(menu,overlay);
+    ClickItem(menu,overlay,"color_preset",2);
     CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.12,.48,1) &&
           ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
           "the human color swatch must update only its bound production settings slot");
@@ -301,6 +361,13 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
         CHECK(ImGui::GetDrawData()->TotalVtxCount > 100 && ImGui::GetActiveID() == 0,
               "page selection must render content and release its touch owner");
     }
+    ScrollMenuToBottom(menu,overlay);
+    const BOOL fpsBefore=settings.showFPS, masterBefore=settings.masterEnabled, drawingBefore=settings.drawEnabled;
+    ClickItem(menu,overlay,"fps_enabled");
+    CHECK(settings.showFPS!=fpsBefore&&settings.masterEnabled==masterBefore&&settings.drawEnabled==drawingBefore,
+          "the realtime FPS switch must bind only its independent production setting");
+    ClickItem(menu,overlay,"fps_enabled");
+    CHECK(settings.showFPS==fpsBefore,"the FPS display must be reversible through the actual menu control");
     TestDrawingTileAndAutomaticSave(menu, overlay, ^{
       TestIndependentLootStatsAndSave(menu, overlay, ^{
        TestColorsAndPositionPersistence(menu,overlay,^{

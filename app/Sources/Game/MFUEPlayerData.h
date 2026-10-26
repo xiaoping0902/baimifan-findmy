@@ -7,7 +7,7 @@
 
 namespace MFUEPlayerData {
 struct ArrayHeader { uint64_t data; int32_t num; int32_t maximum; };
-struct EquipmentSlot { uint64_t rawID = 0; int level = 0; float health = 0, maximum = 0; };
+struct EquipmentSlot { uint64_t rawID = 0; int level = 0; float health = NAN, maximum = NAN; };
 struct Equipment { bool known = false; EquipmentSlot head, armor, bag; };
 static_assert(sizeof(ArrayHeader) == 16, "SDK TArray/FString layout");
 constexpr uint32_t UINOffset = 0x490;
@@ -51,6 +51,22 @@ uint64_t ReadUIN(uint64_t playerState, ReadBytes read) {
     return ValidPointer(playerState) && read(playerState + UINOffset, &uin, sizeof(uin)) ? uin : 0;
 }
 
+template <typename ReadBytes>
+uint64_t ReadHeroID(uint64_t actor, ReadBytes read) {
+    uint64_t fashion = 0, id = 0;
+    // SDK ADFMCharacter.CharacterFashionComponent / currentCharacterHeroID.
+    if (!ValidPointer(actor) || !read(actor + 0x26A8, &fashion, 8) || !ValidPointer(fashion) ||
+        !read(fashion + 0x508, &id, 8)) return 0;
+    return id;
+}
+
+template <typename ReadBytes>
+std::u16string ReadFText(uint64_t address, ReadBytes read) {
+    uint64_t textData = 0;
+    // SDK Basic.hpp: FText.TextData -> FTextData.TextSource FString (+0x48).
+    return read(address, &textData, 8) && ValidPointer(textData) ? ReadFString(textData + 0x48, read) : std::u16string{};
+}
+
 // GPPlayerState.CurrentCharacterLiveStatus is a replicated int32; its enum
 // distinguishes rescuable ImpendingDeath from Death. Health==0 is not death.
 template <typename ReadBytes>
@@ -71,6 +87,23 @@ inline EquipmentSlot *SlotForID(Equipment &result, uint64_t itemID) {
     if (itemID < 10000000000ULL || itemID > 19999999999ULL) return nullptr;
     const unsigned type = (unsigned)((itemID / 10000000ULL) % 1000ULL);
     return type == 101 ? &result.head : type == 105 ? &result.armor : type == 108 ? &result.bag : nullptr;
+}
+
+inline void ReadCurrentDurability(const unsigned char *record, size_t healthOffset,
+                                  size_t durabilityOffset, EquipmentSlot &slot) {
+    if (std::isfinite(slot.health)) return;
+    for (const size_t offset : {healthOffset, durabilityOffset}) {
+        float health = NAN, maximum = NAN;
+        std::memcpy(&health, record + offset, sizeof(float));
+        std::memcpy(&maximum, record + offset + 4, sizeof(float));
+        const bool validMaximum = std::isfinite(maximum) && maximum > 0 && maximum <= 10000;
+        // Replication can provide current HP before its maximum. A zero value
+        // is broken equipment; NAN alone means the read could not establish HP.
+        if (!std::isfinite(health) || health < 0 || health > 10000) continue;
+        slot.health = health;
+        slot.maximum = validMaximum ? maximum : NAN;
+        return;
+    }
 }
 
 template <typename ReadBytes>
@@ -103,14 +136,11 @@ bool ReadEquipmentArray(uint64_t component, uint32_t offset, size_t stride,
         const int encodedLevel = (int)((id / 1000ULL) % 10ULL);
         const int level = encodedSlot == slot && encodedLevel >= 1 && encodedLevel <= 6 ? encodedLevel : 0;
         if (!slot->rawID) { slot->rawID = id; slot->level = level; }
-        if (durability && slot != &result.bag && slot->rawID == id) {
-            float health = 0, maximum = 0;
-            std::memcpy(&health, record + 0x18, sizeof(float));
-            std::memcpy(&maximum, record + 0x1C, sizeof(float));
-            if (std::isfinite(health) && std::isfinite(maximum) && health >= 0 &&
-                maximum > 0 && maximum <= 10000 && health <= maximum + 1) {
-                slot->health = health; slot->maximum = maximum;
-            }
+        if (slot != &result.bag && slot->rawID == id) {
+            // FArmorInfo: ArmorHP/MaxArmorHP at 0x18, Durability at 0x20.
+            // FEquipmentInfo: Health/MaxHealth at 0x10, Durability at 0x18.
+            ReadCurrentDurability(record, durability ? 0x18 : 0x10,
+                                  durability ? 0x20 : 0x18, *slot);
         }
     }
     return complete;

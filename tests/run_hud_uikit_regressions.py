@@ -99,10 +99,11 @@ def main():
             elif args.suite == "game-reader":
                 sources = [ROOT / "tests/game_reader_base_regressions.mm"]
                 sources += [ROOT / f"app/Sources/Game/{name}.mm"
-                            for name in ("MFGameReader", "MFProjection", "Offsets", "MFSettings")]
+                            for name in ("MFGameReader", "MFProjection", "Offsets", "MFSettings",
+                                         "MFUEReader", "MFUEOffsets", "MFUEGNames")]
                 sources += [ROOT / "app/Sources/Read/MFReadBackend.mm",
                             ROOT / "tests/mfpt_page_table_stubs.c",
-                            ROOT / "tests/mfue_game_reader_stubs.mm"]
+                            ROOT / "app/Sources/HUD/MFHUDLog.m"]
             else:
                 sources = [ROOT / f"tests/hud_{args.suite}_regressions.mm",
                            ROOT / "app/Sources/Render/MFOverlayView.mm",

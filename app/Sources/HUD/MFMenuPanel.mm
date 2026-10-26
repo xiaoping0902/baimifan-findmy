@@ -50,6 +50,7 @@ static void MFPanelStoreToSettings(void) {
     s.showTracer     = gUI.feat[DrawingRay];
     s.showHealth     = gUI.feat[DrawingHealth];
     s.showRadar      = gUI.radarEnabled;
+    s.showFPS        = gUI.fpsEnabled;
     s.showName       = gUI.feat[DrawingName];
     s.showTeam       = gUI.feat[DrawingTeam];
     s.showHeld       = gUI.feat[DrawingWeapon];
@@ -112,6 +113,7 @@ static void MFPanelLoadFromSettings(void) {
     gUI.feat[DrawingRay]        = s.showTracer;
     gUI.feat[DrawingHealth]     = s.showHealth;
     gUI.radarEnabled            = s.showRadar;
+    gUI.fpsEnabled              = s.showFPS;
     gUI.feat[DrawingName]       = s.showName;
     gUI.feat[DrawingTeam]       = s.showTeam;
     gUI.feat[DrawingWeapon]     = s.showHeld;

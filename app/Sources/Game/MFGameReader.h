@@ -59,6 +59,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t equipRawID;
 /* [M5.148] 人物 ID（PlayerState+0x490；未校准时为 0） */
 @property (nonatomic, assign) uint64_t uin;
+/// Live operator identity, distinct from the player-authored nickname / UIN.
+@property (nonatomic, assign) uint64_t heroID;
+@property (nonatomic, copy, nullable) NSString *heroName;
 /* [M5.159] 原始物品 ID（用于查中文名） */
 @property (nonatomic, assign) uint64_t weaponRawID;
 @property (nonatomic, assign) uint64_t helmetRawID;
@@ -67,7 +70,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL armorKnown;
 
 /* [M5.176] 护甲耐久 —— FArmorInfo.ArmorHP / MaxArmorHP（float，实测 45/45、20/20、55/55）
- * max == 0 表示没读到，绘制层不显示耐久。 */
+ * NAN 表示没读到当前值；真实 0 表示耐久耗尽，最大值缺失不影响当前值显示。 */
 @property (nonatomic, assign) float helmetHP,  helmetMaxHP;
 @property (nonatomic, assign) float armorHP,   armorMaxHP;
 

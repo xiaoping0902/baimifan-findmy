@@ -162,6 +162,14 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
     Expect(view.effectiveFPS == 12, "an idle menu must retain its low-power 12fps request");
     [view requestRedraw];
     Expect(view.effectiveFPS == 120, "new input must immediately restore the active high-refresh request");
+    Expect(view.presentedFPS == 0,
+           "a maximum or requested 120Hz rate must not masquerade as an actual presentation sample");
+    [view setValue:@73.0 forKey:@"presentedFPS"];
+    view.paused = YES;
+    Expect(view.presentedFPS == 0, "pausing must clear stale presentation FPS");
+    [view setValue:@49.0 forKey:@"presentedFPS"];
+    [view invalidateRenderingGeneration];
+    Expect(view.presentedFPS == 0, "a resized or restarted rendering generation must clear presentation FPS");
 }
 @implementation OverlayFixture
 - (instancetype)init {
@@ -476,6 +484,8 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
                        "held GPU completions must bound reserved/acquired/in-flight frames to two");
                 Expect(fixture.overlay.renderedFPS == 0,
                        "queued frames must never be reported as completed rendering FPS");
+                Expect(fixture.overlay.presentedFPS == 0,
+                       "queued GPU work must not be reported as an actually presented frame");
                 barrier.signaledValue = 1;
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                     BOOL completed = dispatch_semaphore_wait(firstFrame,
@@ -490,6 +500,8 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
                             [fixture dispose];
                             Expect(fixture.overlay.renderedFPS == 0,
                                    "stopping must clear old frame statistics");
+                            Expect(fixture.overlay.presentedFPS == 0,
+                                   "stopping must clear old presentation statistics");
                             completion();
                         });
                     });

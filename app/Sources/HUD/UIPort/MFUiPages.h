@@ -8,14 +8,15 @@ static float Home(Canvas& c) {
     snprintf(loot,sizeof(loot),"%d 件",c.st.lootCount);
     c.info(14,69,c.width-28,"人物",people,c.tc.text);
     c.info(14,103,c.width-28,"物资",loot,c.tc.text);
-    c.card(0,154,c.width,174,"面板控制");
+    c.card(0,154,c.width,212,"面板控制");
     c.toggle(14,190,c.width-28,"绘制总开关",c.st.feat[DrawingHuman],"drawing_master");
     c.slider(14,232,c.width-28,"面板大小",c.st.uiScale,kPanelScaleMinimum,kPanelScaleMaximum,"%.0f%%",100*kPanelDefaultWidthRatio,"panel_size",.01f/kPanelDefaultWidthRatio);
-    c.text(14,290,13,c.tc.textMuted,"拖动标题移动，右下角缩放");
-    return 328;
+    c.toggle(14,274,c.width-28,"实时帧率",c.st.fpsEnabled,"fps_enabled");
+    c.text(14,328,13,c.tc.textMuted,"拖动标题移动，右下角缩放");
+    return 366;
 }
 static float Drawing(Canvas& c) {
-    static const char* names[]={"人机","骨骼","射线","血量","人物名字","队伍与ID","武器名字","背敌提示","距离","头甲包"};
+    static const char* names[]={"人机","骨骼","射线","血量","玩家与英雄名","队伍编号","武器名字","背敌提示","距离","头甲包"};
     static const int indices[]={DrawingBot,DrawingSkeleton,DrawingRay,DrawingHealth,DrawingName,DrawingTeam,DrawingWeapon,DrawingOffscreen,DrawingDistance,DrawingEquipment};
     c.card(0,0,c.width,440,"人物信息");
     for(int i=0;i<IM_ARRAYSIZE(indices);++i){

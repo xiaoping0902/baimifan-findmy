@@ -4,12 +4,14 @@
 #import "MFOverlayView.h"
 #import "../HUD/MFHUDLog.h"
 #import <QuartzCore/CAMetalLayer.h>
+#include "MFPresentedFrameRate.h"
 #include <cmath>
 #include <atomic>
 #include <memory>
 
 struct MFOverlayFrameStats {
     std::atomic<uint64_t> completed{0};
+    MFPresentedFrameRate presented;
 };
 
 /// 每帧上报的可交互矩形上限。菜单控件约 40 个，256 足够且不占内存。
@@ -187,6 +189,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     _fpsSampleTime = CACurrentMediaTime();
     _fpsSampleCount = 0;
     _renderedFPS = 0;
+    _presentedFPS = 0;
     // Do not clear _drawablePending: the old driver's wait still occupies the
     // one acquisition slot, even across stop/resize/restart.
 }
@@ -299,10 +302,15 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     }
     [self.imgui endFrameWithCommandBuffer:cb encoder:encoder];
     [encoder endEncoding];
+    std::shared_ptr<MFOverlayFrameStats> stats = _frameStats;
+    [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+        // The captured generation owns this sampler. Late callbacks after a
+        // resize, pause or stop cannot change the active generation's value.
+        stats->presented.Record(presented.presentedTime);
+    }];
     [cb presentDrawable:drawable];
     BOOL reportFirstFrame = !_firstFrameReported && !_firstFramePending;
     if (reportFirstFrame) _firstFramePending = YES;
-    std::shared_ptr<MFOverlayFrameStats> stats = _frameStats;
     __weak MFOverlayView *weakSelf = self;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         dispatch_semaphore_signal(credits);
@@ -432,6 +440,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 
 - (void)sampleCompletedFrames {
     CFTimeInterval now = CACurrentMediaTime();
+    _presentedFPS = _frameStats ? _frameStats->presented.Sample(now) : 0;
     CFTimeInterval elapsed = now - _fpsSampleTime;
     if (!_frameStats || elapsed < 0.5) return;
     uint64_t count = _frameStats->completed.load(std::memory_order_relaxed);

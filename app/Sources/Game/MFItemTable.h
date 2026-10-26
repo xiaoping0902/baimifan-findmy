@@ -83,6 +83,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL valuable;
 /// 行在远程内存里的地址（诊断用）
 @property (nonatomic, assign) uint64_t rowAddress;
+/// Localized common-item Name (FText); nil when unavailable.
+@property (nonatomic, copy, nullable) NSString *displayName;
 @end
 
 @interface MFItemTable : NSObject

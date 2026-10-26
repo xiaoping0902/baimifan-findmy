@@ -41,3 +41,6 @@ typedef struct {
 void MFRadarRender(ImDrawList *dl, ImVec2 screen,
                    const MFRadarConfig *cfg,
                    const MFRadarBlip *blips, int count);
+
+/// 同一已知队号总是同色，未知队号使用中性色；不依赖绘制/骨骼颜色设置。
+ImU32 MFRadarTeamColor(int teamID);

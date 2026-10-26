@@ -404,6 +404,7 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
             MFEntity *e = [[MFEntity alloc] init];
             e.address = actor;
             e.worldX = pos[0]; e.worldY = pos[1]; e.worldZ = pos[2];
+            MFApplyUEHeading(e, rb, p.actor_rootComponent);
 
             float cam[3] = {camera.x, camera.y, camera.z};
             e.distanceMeters = [MFProjection distanceMetersFrom:pos to:cam];
@@ -466,8 +467,11 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
                         (void)[rb readU64:combat + kMFUE_Combat_WeaponB out:&wpn];
                     }
                     if (MFUEIsValidPtr(wpn)) {
-                        uint64_t wid = 0;
-                        if ([rb readU64:wpn + kMFUE_Weapon_ID out:&wid] && wid > 0) {
+                        const uint64_t wid = MFHeldWeapons::ReadID(wpn + kMFUE_Weapon_ID, [rb](uint64_t address, void *out, size_t size) {
+                            return (bool)[rb readRemote:address into:out size:size];
+                        });
+                        if (wid > 0) {
+                            e.weaponRawID = wid;
                             char dec[24] = {0};
                             int len = snprintf(dec, sizeof(dec), "%llu",
                                                (unsigned long long)wid);
@@ -486,6 +490,8 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
             NSMutableDictionary *equipmentAttributes = [NSMutableDictionary dictionary];
             MFFillUEEquipmentAttributes(rb, actor, equipmentAttributes);
             MFApplyUEEquipmentAttributes(e, equipmentAttributes);
+            MFFillUEHeroAttributes(rb, actor, equipmentAttributes);
+            MFApplyUEHeroAttributes(e, equipmentAttributes);
 
             [out addObject:e];
         }
