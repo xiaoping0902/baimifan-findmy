@@ -311,8 +311,8 @@ extern uint32_t gMFUELocalTeam;
 
 /* 剔除判定（分析报告剔除表 第4/5 条）：死人 = actor+0xDC8 首字节非 0 */
 static const uint32_t kMFUE_Actor_DeadFlag      = 0x0DC8;
-/* 观战/未激活 = PlayerState+0x4C0 & 1 */
-static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
+/* SDK spectator/inactive bits live at APlayerState+0x39E; see MFUEActorState.h.
+ * AGPPlayerState+0x4C0 is bFinishGame and must not substitute for those bits. */
 
 /*
  * [M5.173] 玩家资料与本机血量 —— 真机 Frida 已逐条验证（交接报告 §4.2 / §4.3）

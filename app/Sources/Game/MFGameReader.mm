@@ -7,6 +7,7 @@
 #import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
 #include "MFUEHealth.h"
 #include "MFUEPlayerDataObjC.h"
+#include "MFUEActorState.h"
 #import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Read/MFReadBackend.h"
 #import <mach/mach.h>
@@ -307,13 +308,10 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     BOOL havePS = NO;
                     if (isChar) {
                         havePS = ([rb readU64:item + 0x390 out:&ps] && ps != 0);
-                        if (havePS) {
-                            uint8_t inactive = 0;
-                            if ([rb readRemote:ps + 0x4C0 into:&inactive size:1] &&
-                                (inactive & 1)) {
-                                isChar = NO;
-                            }
-                        }
+                        if (havePS && MFUEActorState::IsSpectatorOrInactive(ps,
+                            [rb](uint64_t address, void *out, size_t size) {
+                                return (bool)[rb readRemote:address into:out size:size];
+                            })) isChar = NO;
                     }
 
                     uint32_t teamVal = 0;

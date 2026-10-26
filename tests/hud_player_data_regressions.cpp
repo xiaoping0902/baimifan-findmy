@@ -62,6 +62,16 @@ int main() {
           "the SDK player-AI flag must survive a valid PlayerState pointer");
     put(actor+0xE60,uint8_t(0));
     CHECK(!MFUEPlayerData::ReadBotIdentity(actor,read),"an unflagged player with valid PlayerState remains human");
+    put(actor+0xE61,uint8_t(1));
+    CHECK(MFUEPlayerData::ReadBotIdentity(actor,read),"the SDK SOL player-AI flag must identify AI with PlayerState");
+    put(actor+0xE61,uint8_t(0));
+    put(ps+0x39E,uint8_t(0x08));
+    CHECK(MFUEPlayerData::ReadBotIdentity(actor,read),"APlayerState bIsABot identifies a replicated bot independently of actor AI flags");
+    put(ps+0x39E,uint8_t(0x01));
+    CHECK(!MFUEPlayerData::ReadBotIdentity(actor,read),"neighboring PlayerState bits must not identify a bot");
+    put(actor+0xE61,uint8_t(2));
+    CHECK(!MFUEPlayerData::ReadBotIdentity(actor,read),"out-of-range SDK bool bytes must not establish AI identity");
+    put(actor+0xE61,uint8_t(0));
     put(actor+0x390,uint64_t(0));
     CHECK(MFUEPlayerData::ReadBotIdentity(actor,read),"a confirmed absent PlayerState identifies ordinary AI");
     memory.erase(actor+0x390);
@@ -179,6 +189,37 @@ int main() {
           "hero identity must use the live replicated fashion component, not player UIN");
     memory.erase(fashion + 0x508);
     CHECK(MFUEPlayerData::ReadHeroID(actor, read) == 0, "missing hero state must stay unknown");
+    const uint64_t battleClass = 0x100009000;
+    put(actor + 0x3890, battleClass);
+    put(battleClass + 0x100, int64_t(10007));
+    put(fashion + 0x508, uint64_t(12345678901ULL));
+    CHECK(MFUEPlayerData::ReadExpertID(actor, read) == 10007 &&
+          MFUEPlayerData::ReadHeroID(actor, read) == 12345678901ULL,
+          "the supplied operator dictionary uses BattleClass ExpertId, independently of fashion HeroID");
+    put(ps + 0x9F8, int64_t(20003));
+    put(ps + 0x9F0, int64_t(99887766));
+    put(battleClass + 0x100, int64_t(0));
+    put(fashion + 0x508, uint64_t(0));
+    CHECK(MFUEPlayerData::ReadExpertID(actor, read) == 20003 &&
+          MFUEPlayerData::ReadHeroID(actor, read) == 99887766,
+          "replicated PlayerState ExpertId and HeroID are separate fallbacks while components initialize");
+    memory.erase(battleClass + 0x100);
+    memory.erase(fashion + 0x508);
+    CHECK(MFUEPlayerData::ReadExpertID(actor, read) == 20003 &&
+          MFUEPlayerData::ReadHeroID(actor, read) == 99887766,
+          "unavailable components must not hide readable replicated player identities");
+    put(battleClass + 0x100, int64_t(-1));
+    put(ps + 0x9F8, int64_t(-1));
+    put(ps + 0x9F0, int64_t(-1));
+    CHECK(MFUEPlayerData::ReadExpertID(actor, read) == 0 &&
+          MFUEPlayerData::ReadHeroID(actor, read) == 0,
+          "negative identity sentinels must remain unknown instead of becoming unsigned lookup keys");
+    memory.erase(ps + 0x9F8);
+    memory.erase(ps + 0x9F0);
+    memory.erase(battleClass + 0x100);
+    CHECK(MFUEPlayerData::ReadExpertID(actor, read) == 0 &&
+          MFUEPlayerData::ReadExpertID(0, read) == 0,
+          "missing ExpertId must not be guessed from a player name, UIN, or HeroID suffix");
     const std::pair<uint64_t, const char *> heroes[] = {
         {10007, u8"红狼"}, {10010, u8"威龙"}, {10011, u8"无名"}, {10012, u8"张姐"},
         {20003, u8"疯医"}, {20004, u8"女医"}, {20005, u8"蝶"}, {20006, u8"养狗的"},

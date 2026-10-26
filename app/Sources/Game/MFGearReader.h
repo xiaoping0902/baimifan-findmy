@@ -184,6 +184,9 @@ typedef NSString *_Nullable (^MFGearNameLookup)(uint32_t nameIndex);
                                 className:(NSString *_Nullable)className
                                   isActor:(BOOL *)outIsActor;
 
+/// 仅供已通过结构验证的地面拾取物调用；共享字段与 ItemID 校验，不依赖类名解析。
+- (MFGearInfo *_Nullable)readGearForVerifiedPickup:(uint64_t)actor;
+
 /// 展开容器内容 —— 盒子里 / 尸体上到底有什么。
 ///
 /// 走 RepItemArray(0x1F38) → TArray<FInventoryItemInfo>（Data=0x2040 / Num=0x2048 / 步长 0x800）。

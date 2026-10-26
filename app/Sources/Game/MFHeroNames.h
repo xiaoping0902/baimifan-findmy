@@ -2,8 +2,9 @@
 #include <cstdint>
 
 namespace MFHeroNames {
-// Exact IDs and labels from the user's supplied 干员名字表.md. Some labels
-// are community nicknames; a live localized HeroData name always takes priority.
+// Exact ExpertId values and labels from the user's supplied 干员名字表.md.
+// HeroID is a distinct replicated field; do not use it as this table's key.
+// Some labels are community nicknames; a live localized HeroData name takes priority.
 inline const char *NameForID(uint64_t id) {
     switch (id) {
         case 10007: return u8"红狼";

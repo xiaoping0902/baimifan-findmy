@@ -49,5 +49,8 @@ int main() {
     CHECK(rows.size()==3 && rows[0].name=="红色物资" && rows[0].quantity==5 &&
           rows[0].nearest==10 && rows[1].quality==1 && rows[2].quality==0,
           "equal item names and qualities must merge, ordered by quality then value with unknown last");
+    CHECK(summary.valueByQuality[6]==150 && summary.valueByQuality[1]==20 &&
+          summary.valueByQuality[0]==0 && summary.valueByQuality[5]==0,
+          "quality summaries must sum acquired pickup values, excluding boxes and negative unknown values");
     std::puts("PASS: weapon, current durability, team nickname and separate hero labels");
 }

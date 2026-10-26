@@ -16,7 +16,7 @@ struct Row {
 };
 struct Summary {
     uint64_t quantity=0, boxes=0, byQuality[7]{};
-    int64_t totalValue=0;
+    int64_t totalValue=0, valueByQuality[7]{};
     std::map<std::pair<int,std::string>,Row> rows;
     void Add(const char *name,int quality,int count,int value,float distance,bool box) {
         if (box) { ++boxes; return; }
@@ -26,7 +26,7 @@ struct Summary {
         // Keep the acquired per-pickup value semantics; multiplying by the
         // stack here would double-count sources that already report a total.
         const int64_t knownValue=std::max(0,value);
-        totalValue+=knownValue;
+        totalValue+=knownValue; valueByQuality[quality]+=knownValue;
         const std::string label=name&&*name?name:"物资未知";
         Row &row=rows[{quality,label}];
         row.name=label;row.quality=quality;row.quantity+=amount;row.value+=knownValue;

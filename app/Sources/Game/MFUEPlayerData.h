@@ -53,11 +53,30 @@ uint64_t ReadUIN(uint64_t playerState, ReadBytes read) {
 
 template <typename ReadBytes>
 uint64_t ReadHeroID(uint64_t actor, ReadBytes read) {
-    uint64_t fashion = 0, id = 0;
+    if (!ValidPointer(actor)) return 0;
+    uint64_t fashion = 0;
+    int64_t id = 0;
     // SDK ADFMCharacter.CharacterFashionComponent / currentCharacterHeroID.
-    if (!ValidPointer(actor) || !read(actor + 0x26A8, &fashion, 8) || !ValidPointer(fashion) ||
-        !read(fashion + 0x508, &id, 8)) return 0;
-    return id;
+    if (read(actor + 0x26A8, &fashion, 8) && ValidPointer(fashion) &&
+        read(fashion + 0x508, &id, 8) && id > 0) return (uint64_t)id;
+    uint64_t playerState = 0;
+    // ADFMPlayerState.HeroID is replicated independently of the component.
+    return read(actor + 0x390, &playerState, 8) && ValidPointer(playerState) &&
+           read(playerState + 0x9F0, &id, 8) && id > 0 ? (uint64_t)id : 0;
+}
+
+template <typename ReadBytes>
+uint64_t ReadExpertID(uint64_t actor, ReadBytes read) {
+    if (!ValidPointer(actor)) return 0;
+    uint64_t battleClass = 0;
+    int64_t id = 0;
+    // The supplied operator-name table is keyed by ExpertId, not HeroID.
+    // SDK ADFMCharacter.DFMCharacterBattleClassComp / BattleClass.ExpertId.
+    if (read(actor + 0x3890, &battleClass, 8) && ValidPointer(battleClass) &&
+        read(battleClass + 0x100, &id, 8) && id > 0) return (uint64_t)id;
+    uint64_t playerState = 0;
+    return read(actor + 0x390, &playerState, 8) && ValidPointer(playerState) &&
+           read(playerState + 0x9F8, &id, 8) && id > 0 ? (uint64_t)id : 0;
 }
 
 template <typename ReadBytes>
@@ -78,10 +97,17 @@ bool ReadBotIdentity(uint64_t actor, ReadBytes read, uint32_t aiOffset=0xE60) {
     if(!ValidPointer(actor))return false;
     uint8_t playerAI=0;
     if(aiOffset&&read(actor+aiOffset,&playerAI,1)&&playerAI==1)return true;
+    uint8_t solPlayerAI=0;
+    // AGPCharacterBase.bIsPlayerAI_SOL is a separate replicated bool.
+    if(read(actor+0xE61,&solPlayerAI,1)&&solPlayerAI==1)return true;
     uint64_t playerState=0;
     // Some AI players own PlayerState. Its presence cannot override the SDK
     // bIsPlayerAI flag; a failed pointer read cannot establish an ordinary bot.
-    return read(actor+0x390,&playerState,8)&&playerState==0;
+    if(!read(actor+0x390,&playerState,8))return false;
+    if(playerState==0)return true;
+    uint8_t stateFlags=0;
+    // SDK APlayerState.bIsABot is bit3, beside spectator/inactive flags.
+    return ValidPointer(playerState)&&read(playerState+0x39E,&stateFlags,1)&&(stateFlags&0x08);
 }
 
 template <typename ReadBytes, typename NameLookup>

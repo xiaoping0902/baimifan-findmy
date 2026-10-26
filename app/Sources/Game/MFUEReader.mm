@@ -1,5 +1,6 @@
 #import "MFUEReader.h"
 #include "MFUEPlayerDataObjC.h"
+#include "MFUEActorState.h"
 #import "MFSettings.h"                 /* [M5.150] 队友开关 */
 
 /* [M5.155] 供 MFGameReader（真正用于绘制的实体循环）使用的本地玩家信息 */
@@ -442,14 +443,10 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
                               MFUEIsValidPtr(ps);
                 e.isBot = MFIsUEBot(rb,actor,p.character_isAI);
 
-                /* [M5.153] 观战 / 未激活：PlayerState+0x4C0 的 bit0（剔除表 §5） */
-                if (havePS) {
-                    uint8_t inactive = 0;
-                    if ([rb readRemote:ps + kMFUE_PlayerState_Remove into:&inactive size:1] &&
-                        (inactive & 1)) {
-                        continue;
-                    }
-                }
+                if (havePS && MFUEActorState::IsSpectatorOrInactive(ps,
+                    [rb](uint64_t address, void *out, size_t size) {
+                        return (bool)[rb readRemote:address into:out size:size];
+                    })) continue;
 
                 if (havePS) {
                     uint64_t uinVal = 0;

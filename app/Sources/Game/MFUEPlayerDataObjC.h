@@ -10,13 +10,13 @@
 #import "MFUEReader.h"
 #import "MFUEGNames.h"
 
-static inline NSString *MFResolveUEHeroName(uint64_t heroID, NSString *localized) {
-    const char *name = MFHeroNames::Resolve(heroID, localized.UTF8String);
+static inline NSString *MFResolveUEHeroName(uint64_t expertID, NSString *localized) {
+    const char *name = MFHeroNames::Resolve(expertID, localized.UTF8String);
     return name ? [NSString stringWithUTF8String:name] : nil;
 }
 
-static inline NSString *MFReadUEHeroName(MFReadBackend *reader, uint64_t heroID) {
-    if (!heroID) return nil;
+static inline NSString *MFReadUEHeroName(MFReadBackend *reader, uint64_t heroID, uint64_t expertID) {
+    if (!heroID) return MFResolveUEHeroName(expertID, nil);
     static NSMutableDictionary<NSNumber *, NSString *> *names;
     static uint64_t cachedBase = 0;
     static uint32_t cachedTask = 0;
@@ -29,7 +29,7 @@ static inline NSString *MFReadUEHeroName(MFReadBackend *reader, uint64_t heroID)
         }
         if (names[@(heroID)]) return names[@(heroID)];
         const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (!base || (retryAt > 0 && now - retryAt < 5.0)) return MFResolveUEHeroName(heroID, nil);
+        if (!base || (retryAt > 0 && now - retryAt < 5.0)) return MFResolveUEHeroName(expertID, nil);
         retryAt = now;
         const auto read = [reader](uint64_t address, void *out, size_t size) {
             return (bool)[reader readRemote:address into:out size:size];
@@ -52,16 +52,19 @@ static inline NSString *MFReadUEHeroName(MFReadBackend *reader, uint64_t heroID)
             name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
             if (name.length) names[@(id)] = name;
         }
-        return MFResolveUEHeroName(heroID, names[@(heroID)]);
+        return MFResolveUEHeroName(expertID, names[@(heroID)]);
     }
 }
 
 static inline void MFFillUEHeroAttributes(MFReadBackend *reader, uint64_t actor, NSMutableDictionary *attributes) {
-    const uint64_t heroID = MFUEPlayerData::ReadHeroID(actor, [reader](uint64_t address, void *out, size_t size) {
+    const auto read = [reader](uint64_t address, void *out, size_t size) {
         return (bool)[reader readRemote:address into:out size:size];
-    });
+    };
+    const uint64_t heroID = MFUEPlayerData::ReadHeroID(actor, read);
+    const uint64_t expertID = MFUEPlayerData::ReadExpertID(actor, read);
     attributes[@"heroID"] = @(heroID);
-    NSString *name = MFReadUEHeroName(reader, heroID);
+    attributes[@"expertID"] = @(expertID);
+    NSString *name = MFReadUEHeroName(reader, heroID, expertID);
     if (name.length) attributes[@"heroName"] = name;
 }
 

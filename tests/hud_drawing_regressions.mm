@@ -183,6 +183,15 @@ static int ColoredVertices(ImDrawData *data, ImU32 color) {
     return count;
 }
 
+static int SolidVertices(ImDrawData *data) {
+    const ImVec2 white=ImGui::GetIO().Fonts->TexUvWhitePixel;
+    int count=0;
+    for(int list=0;list<data->CmdLists.Size;++list)
+        for(const ImDrawVert &v:data->CmdLists[list]->VtxBuffer)
+            if(fabsf(v.uv.x-white.x)<1e-7f && fabsf(v.uv.y-white.y)<1e-7f)++count;
+    return count;
+}
+
 @interface DrawingOverlayFixture : MFOverlayView
 @property (nonatomic, assign) double sampleFPS;
 @end
@@ -226,9 +235,10 @@ static void TestSyntheticDrawing(void) {
     unsigned char *pixels; int fontWidth, fontHeight;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &fontWidth, &fontHeight);
 
-    CHECK([MFReadUEHeroName([MFReadBackend shared], 10010) isEqualToString:@"威龙"] &&
-          MFReadUEHeroName([MFReadBackend shared], 99999) == nil,
-          "a missing live hero table must use exact local IDs without any remote read or invented name");
+    CHECK([MFReadUEHeroName([MFReadBackend shared],12345678901ULL,10010) isEqualToString:@"威龙"] &&
+          [MFReadUEHeroName([MFReadBackend shared],0,10007) isEqualToString:@"红狼"] &&
+          MFReadUEHeroName([MFReadBackend shared],10010,99999)==nil,
+          "local expert names must use ExpertId rather than the unrelated fashion HeroID");
     CHECK([MFResolveUEHeroName(20003, @"蜂医") isEqualToString:@"蜂医"],
           "live localized hero names must override a local nickname");
 
@@ -240,9 +250,10 @@ static void TestSyntheticDrawing(void) {
     const float rate59Width = ColoredWidth(fpsData, fpsText);
     CHECK(rate59Width > 20 && !drawing.lastCameraOK,
           "the top-left FPS badge must draw even when no game camera is connected");
+    CHECK(SolidVertices(fpsData)==0,"FPS must contain only text without a background or decorative dot");
     for (int list = 0; list < fpsData->CmdLists.Size; ++list)
         for (const ImDrawVert &v : fpsData->CmdLists[list]->VtxBuffer)
-            CHECK(v.pos.x >= 21 && v.pos.y >= 27 && v.pos.x <= 117 && v.pos.y <= 57,
+            CHECK(v.pos.x >= 20 && v.pos.y >= 26 && v.pos.x <= 117 && v.pos.y <= 57,
                   "the FPS badge must stay at the top-left inside the safe-area anchor");
     overlay.sampleFPS = 119;
     CHECK(ColoredWidth(Frame(drawing,overlay),fpsText) > rate59Width + 3,
@@ -515,9 +526,14 @@ static void TestSyntheticDrawing(void) {
     data=Frame(drawing, overlay);
     CHECK(data->TotalVtxCount > statsHidden + 8,
           "loot statistics must render independently while all loot markers are hidden");
-    for(int level=1;level<=6;++level)
+    CHECK(SolidVertices(data)==0,"quality totals must contain only outlined text without any panel background");
+    for(int level=2;level<=6;++level)
         CHECK(ColoredVertices(data,qualityColors[level])>0,
-              "the statistics list must render all six quality counters in their actual quality colors");
+              "statistics must render the five requested quality totals in their actual colors");
+    CHECK(ColoredVertices(data,qualityColors[1])==0,"white quality must not add a sixth statistics row");
+    for(int level=6;level>2;--level)
+        CHECK(ColoredBottom(data,qualityColors[level])<ColoredBottom(data,qualityColors[level-1]),
+              "quality totals must run vertically from red to gold, purple, blue and green");
     settings.showLootStats = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == statsHidden,
           "the statistics switch must remove the entire statistics window");

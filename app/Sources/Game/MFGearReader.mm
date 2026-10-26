@@ -1,54 +1,32 @@
 //
 //  MFGearReader.mm — 物资 / 装备属性读取的实现
 //
-//  ── 读取策略：三次读，带缓存 ──
+//  ── 读取策略：邻近字段批量读取，属性缓存 2 秒 ──
 //
-//  mach_vm_remap 每次映射一页、拷完立刻解除映射 —— 一次 readRemote 就是一次系统调用。
-//  一个关卡里有几百个 Actor，如果每个字段读一次，主线程会被钉死。
-//  所以这里把需要的字段**按页内邻近关系打包**，一个 Actor 最多读三次：
+//  PickupBase 与 InventoryItemInfo 的字段按邻近范围打包读取：
 //
 //    读 1  actor + 0x0FB8，0x70 字节   → PickupBase 头（来源/物品名/数量/耐久）
 //    读 2  actor + 0x1248，0x40 字节   → ItemID.Category / Sequence / ItemCount
 //    读 3  actor + 0x1768，0x40 字节   → ArchiveInfo.EquipmentValue / StarNum
 //
-//  三次都落在对象头部第一页（16KB 页内），不跨页，安全。
-//  读 2 / 读 3 只在"类名看起来是容器"时才做 —— 地面散落物没有 PickupItemInfo。
+//  类型、数量、来源和星级各自做值域校验；ArchiveInfo 只在物品主类型
+//  已成立时读取。其 EquipmentValue 是档案字段，不能保证每个地面物资都有值。
 //
-//  再加一层按地址的短 TTL 缓存（2 秒）：物品属性不会逐帧变，
-//  但 Actor 指针会被回收复用，所以 TTL 不能太长。
+//  品质、指导价格与本地化名称通过 InventoryIdName 查询 GameItem 配置表：
+//    FDFMCommonItemRow.Quality +0x68 / InitialGuidePrice +0xDC / Name +0x18。
+//  主表不可用时，参考运行时的 actor+0x1200 缓存行必须与拾取物的完整
+//  FName 匹配，才可补齐缺失字段；此缓存位不是 SDK 的反射字段。
+//  内置中文 ID 表补充名称，已知装备 ID 编码补充品质。
+//  品质仅接受 1..6，未知品质保持未知，StarNum 与价格均不能替代品质。
 //
-//  ── 能力边界（重要：别把话说满）──
-//
-//  静态 dump 能回答"字段在哪"，回答不了"值是多少"。所以本模块的真实能力是：
-//
-//    ✅ 能拿到
-//        · 物品主类型  ItemID.Category（= EEItemMainType，装备分类的依据）
-//        · 具体物品号  ItemID.Sequence
-//        · 数量        ItemCount（容器内）/ StackCount（地面）
-//        · 星级        StarNum（Actor + 0x17A4）
-//        · 来源        SourceType（= EEPickupSourceType）
-//        · 容器内容    RepItemArray → 盒子里每一件物品的类型与数量
-//
-//    ⚠️ 有条件
-//        · 价值 ArchiveInfo.EquipmentValue（Actor + 0x1768）
-//          它住在 FItemArchiveInfo 里 —— 那个结构是"击杀来历档案"，
-//          同一块里还有 KillerName / BeKilledUin / MapID / KillerAmmoLevel。
-//          所以它对**尸体 / 玩家掉落**有意义（"这人死时装备值多少"），
-//          对**自然刷新的地面物资**很可能是 0。真机必须抽样确认，不能当通用价值用。
-//
-//    ❌ 拿不到
-//        · 1–6 级品质。全库 12,619 个类里没有任何物品 Actor 带 Quality/Tier/Rarity；
-//          EEEquipLevel(0–6) 枚举 0 处字段引用。品质只存在于物品配置行
-//          FDFMCommonItemRow.Quality(0x68) 与 InitialGuidePrice(0xDC) ——
-//          而配置表是 UDataTable，RowMap 是 TMap，内部布局无 SDK 背书。
-//          ★ 白米饭之所以有 0x68/0xDC，正是因为它读的是**配置行**，不是 Actor。
-//            我们走 Actor 路径，这两项拿不到 —— 绘制层请按 StarNum / 价值分档配色，
-//            不要假装有品质。
+//  普通入口先按类名过滤；已通过结构验证的地面拾取物使用明确的 verified
+//  入口，随后共享同一字段校验路径。Actor 地址缓存 TTL 为 2 秒。
 //
 #import "MFGearReader.h"
 #import "MFGearCatalog.h"
 #import "MFItemNames.h"
 #include "MFUEDataTable.h"
+#include "MFUEItemData.h"
 #import "MFItemTable.h"      /* [M5.86] 物品定义表：等级/价值/名字的真实来源 */
 #import "MFUEOffsets.h"
 #import "../Read/MFReadBackend.h"
@@ -187,6 +165,13 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
 
 #pragma mark - MFGearReader
 
+@interface MFGearReader ()
+- (MFGearInfo *_Nullable)readGearForActor:(uint64_t)actor
+                              className:(NSString *_Nullable)className
+                                isActor:(BOOL *_Nullable)outIsActor
+                         verifiedPickup:(BOOL)verifiedPickup;
+@end
+
 @implementation MFGearReader {
     NSMutableDictionary<NSNumber *, MFGearInfo *> *_cache;
     NSMutableDictionary<NSNumber *, NSNumber *>   *_cacheAt;
@@ -241,6 +226,17 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
 - (MFGearInfo *_Nullable)readGearForActor:(uint64_t)actor
                                 className:(NSString *_Nullable)className
                                   isActor:(BOOL *)outIsActor {
+    return [self readGearForActor:actor className:className isActor:outIsActor verifiedPickup:NO];
+}
+
+- (MFGearInfo *_Nullable)readGearForVerifiedPickup:(uint64_t)actor {
+    return [self readGearForActor:actor className:nil isActor:NULL verifiedPickup:YES];
+}
+
+- (MFGearInfo *_Nullable)readGearForActor:(uint64_t)actor
+                              className:(NSString *_Nullable)className
+                                isActor:(BOOL *_Nullable)outIsActor
+                         verifiedPickup:(BOOL)verifiedPickup {
     if (outIsActor) *outIsActor = NO;
     if (!MFUEIsValidPtr(actor)) return nil;
 
@@ -250,7 +246,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
      *    在读内存之前把它们挡掉，是性能上最划算的一道闸。
      */
     MFGearCatalog *cat = [MFGearCatalog shared];
-    MFGearActorKind kind = [cat actorKindForClassName:className];
+    MFGearActorKind kind = verifiedPickup ? MFGearActorKindLoot : [cat actorKindForClassName:className];
     if (kind == MFGearActorKindIgnored) return nil;
     if (outIsActor) *outIsActor = YES;
     if (kind == MFGearActorKindCharacter) return nil;   // 人物不归本类管
@@ -263,7 +259,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     CFTimeInterval now = CACurrentMediaTime();
     NSNumber *key = @(actor);
     MFGearInfo *cached = _cache[key];
-    if (cached) {
+    if (cached && (!verifiedPickup || !cached.isContainer)) {
         NSNumber *at = _cacheAt[key];
         if (at && now - at.doubleValue <= kMFGear_CacheTTL) {
             return cached;
@@ -384,18 +380,25 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     if (displayName) info.displayName = [NSString stringWithUTF8String:displayName];
 
     // The reference runtime exposes a cached common-item row at +0x1200.
-    // Accept its quality only when its own ItemID matches the pickup FName.
-    if (!info.hasQuality && info.itemIdNameIndex > 0) {
+    // It is not an SDK reflected field: verify the entire FName before
+    // supplementing missing fields, independently of whether Quality is known.
+    if (info.itemIdNameIndex > 0 &&
+        (!info.hasQuality || !info.hasValue || info.value <= 0 || !info.displayName.length)) {
         uint64_t row = 0;
         if ([rb readU64:actor + 0x1200 out:&row] && MFUEIsValidPtr(row)) {
-            uint32_t itemName[2] = {};
-            int32_t quality = 0;
-            if ([rb readRemote:row + 0x10 into:itemName size:sizeof(itemName)] &&
-                itemName[0] == info.itemIdNameIndex && itemName[1] == info.itemIdNameNumber &&
-                [rb readRemote:row + 0x68 into:&quality size:sizeof(quality)] &&
-                MFUEDataTable::ValidQuality(quality)) {
-                info.quality = quality; info.hasQuality = YES;
+            const auto fields = MFUEItemData::ReadCommonRow(row, info.itemIdNameIndex,
+                info.itemIdNameNumber, [rb](uint64_t address, void *out, size_t size) {
+                    return (bool)[rb readRemote:address into:out size:size];
+                });
+            if (!info.hasQuality && fields.quality >= 1) {
+                info.quality = fields.quality; info.hasQuality = YES;
             }
+            if ((!info.hasValue || info.value <= 0) && fields.price >= 0) {
+                info.value = fields.price; info.hasValue = YES;
+            }
+            if (!info.displayName.length && !fields.name.empty())
+                info.displayName = [NSString stringWithCharacters:(const unichar *)fields.name.data()
+                                                          length:fields.name.size()];
         }
     }
     if (!info.hasQuality && info.rawItemID) {

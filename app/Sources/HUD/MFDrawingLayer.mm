@@ -19,6 +19,7 @@
 #import "../Read/MFReadBackend.h"
 #import "../Read/MFExternalFeed.h"
 #import "MFHUDLog.h"
+#include "../Game/MFUEActorState.h"
 #import "MFRadar.h"        /* [M5.139] 圆形雷达（移植自参考项目 radar.h） */
 #include "MFOffscreenIndicators.h"
 #import "../Game/MFBones.h"  /* [M5.141] 真骨骼（ComponentSpaceTransforms） */
@@ -253,7 +254,6 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     BOOL _camOK;
     MFDrawGeometryCache _botGeometry, _lootGeometry;
     MFLootSummary::Summary _lootStatsSummary;
-    std::vector<MFLootSummary::Row> _lootStatsRows;
     std::array<double,4> _lootStatsFilters;
     double _lootStatsAt;
     NSUInteger _lootStatsInputCount;
@@ -833,11 +833,11 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         [self recordKind:a.kind className:a.className];
 
         /*
-         * 分类可用时丢掉"认不出来"的 Actor —— ULevel::Actors 里有大量
-         * 地图静态物件，全画出来就是满屏框。分类不可用时（GNames 公式没对上）
-         * 退回全画，宁可糊也不能空。
+         * 类名未命中时，仍保留已经通过角色/拾取物结构验证的 Actor。
+         * 名称解析成功率是全局状态，不能让一个未知的蓝图类绕过后面的
+         * 结构回退。其余未知静态物件继续过滤。
          */
-        if (classify && a.kind == MFActorKindUnknown) continue;
+        if (classify && a.kind == MFActorKindUnknown && !a.charOK && !a.pickupOK) continue;
 
         /*
          * [M5.173] 已分类的人物每帧刷坐标。
@@ -1637,10 +1637,10 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     d[@"bot"] = @(MFIsUEBot(rb,actor,p.character_isAI));
     if (havePS) {
 
-        /* 观战 / 未激活：PS+0x4C0 bit0 */
-        uint8_t inactive = 0;
-        if ([rb readRemote:ps + kMFUE_PlayerState_Remove into:&inactive size:1] &&
-            (inactive & 1)) {
+        if (MFUEActorState::IsSpectatorOrInactive(ps,
+            [rb](uint64_t address, void *out, size_t size) {
+                return (bool)[rb readRemote:address into:out size:size];
+            })) {
             d[@"skip"] = @YES;
             return d;
         }
@@ -1712,13 +1712,26 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     e.isBox  = NO;
     if (e.name.length == 0) e.name = @"物资";
 
+    // This entry is reached only after pickupOK validated the actor structure.
+    // Use the same inventory FName/table path as classified pickups, including
+    // exact-ID cached-row recovery when the global item table is unavailable.
+    MFGearInfo *gear=[[MFGearReader shared] readGearForVerifiedPickup:actor];
+    const BOOL named=gear.displayName.length>0;
+    if(named)e.name=gear.displayName;
+    if(gear.hasQuality)e.level=gear.quality;
+    if(gear.hasValue)e.value=(int)MIN((long long)INT_MAX,MAX(0LL,gear.value));
+    if(gear.count>0)e.count=gear.count;
+    e.gearCategory=(uint32_t)gear.mainType;
+
     uint64_t item = 0;
     if (![rb readU64:actor + kMFUE_Actor_PickupInfo out:&item] || !MFUEIsValidPtr(item)) return;
 
     uint32_t quality = 0, price = 0;
-    if ([rb readRemote:item + kMFUE_Pickup_Quality into:&quality size:4] && MFUEDataTable::ValidQuality((int)quality))
+    if (!gear.hasQuality && [rb readRemote:item + kMFUE_Pickup_Quality into:&quality size:4] && MFUEDataTable::ValidQuality((int)quality))
         e.level = (int)quality;
-    if ([rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
+    // A zero archive value can mean no historical equipment snapshot; it must
+    // not suppress a positive guide price in the already validated pickup row.
+    if ((!gear.hasValue || gear.value<=0) && [rb readRemote:item + kMFUE_Pickup_Price into:&price size:4] &&
         price > 0 && price < 100000000u)
         e.value = (int)price;
 
@@ -1727,8 +1740,8 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         NSString *idName = [[MFUEGNames shared] classNameForID:(int32_t)itemNameIndex];
         const uint64_t rawID = MFUEDataTable::NumericID(idName.UTF8String);
         const char *knownName = MFItemNameForID(rawID);
-        if (knownName) e.name = [NSString stringWithUTF8String:knownName];
-        else {
+        if (!named && knownName) e.name = [NSString stringWithUTF8String:knownName];
+        else if (!named) {
             const auto text = MFUEPlayerData::ReadFText(item + 0x18, [rb](uint64_t address, void *out, size_t size) {
                 return (bool)[rb readRemote:address into:out size:size];
             });
@@ -1745,7 +1758,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
 
     /* 数量：+0x18 → +0x18 → +0x00 → +0x30，最后在 +0x20 读 u32 */
     uint64_t p = item;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 5 && gear.count<=0; i++) {
         if (!MFUEIsValidPtr(p)) break;
         const uint32_t off = kMFUE_PickupCountChain[i];
         if (i == 4) {
@@ -1763,9 +1776,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     static NSUInteger sLogged = 0;
     if (sLogged < 8) {
         sLogged++;
-        MFHUDLogLine(@"[物资] actor=0x%llx item=0x%llx quality=%u price=%u count=%d",
+        MFHUDLogLine(@"[物资] actor=0x%llx item=0x%llx quality=%d price=%d count=%d name=%@",
                      (unsigned long long)actor, (unsigned long long)item,
-                     quality, price, e.count);
+                     e.level, e.value, e.count, e.name);
     }
 }
 
@@ -1829,11 +1842,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     char label[32];
     if (isfinite(fps) && fps > 0) snprintf(label, sizeof(label), "FPS %.0f", fps);
     else snprintf(label, sizeof(label), "FPS --");
-    dl->AddRectFilled(ImVec2(x,y), ImVec2(MIN(size.width,x+94),MIN(size.height,y+28)),
-                      IM_COL32(12,18,26,205), 9.0f);
-    dl->AddCircleFilled(ImVec2(x+11,y+14), 2.5f,
-                        fps > 0 ? IM_COL32(74,222,128,255) : IM_COL32(148,163,184,255));
-    MFText(dl,14.0f,ImVec2(x+20,y+6),IM_COL32(246,248,252,255),label);
+    MFText(dl,14.0f,ImVec2(x,y),IM_COL32(246,248,252,255),label);
 }
 
 #pragma mark - 背敌提示（[M5.2] 新增，原版有我们之前没实现）
@@ -1869,10 +1878,8 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         const ImVec2 dir(cosf(rad), sinf(rad));
         const ImVec2 side(-dir.y, dir.x);
         const ImVec2 cardMin(marker.x - marker.width * 0.5f, marker.y - marker.height * 0.5f);
-        const ImVec2 cardMax(marker.x + marker.width * 0.5f, marker.y + marker.height * 0.5f);
         const ImVec2 p(marker.showLabel ? cardMin.x + 10.0f : marker.x, marker.y);
         const ImU32 shadow = IM_COL32(4, 8, 12, 225);
-        dl->AddRectFilled(cardMin, cardMax, IM_COL32(5, 10, 15, 185), 4.0f);
         const ImVec2 tip(p.x + dir.x * 6.0f, p.y + dir.y * 6.0f);
         const ImVec2 l(p.x - dir.x * 3.0f + side.x * 3.5f, p.y - dir.y * 3.0f + side.y * 3.5f);
         const ImVec2 r(p.x - dir.x * 3.0f - side.x * 3.5f, p.y - dir.y * 3.0f - side.y * 3.5f);
@@ -1945,65 +1952,40 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         if(st.minLootValue>0&&e.value>0&&e.value<st.minLootValue)continue;
         _lootStatsSummary.Add(e.name.UTF8String,e.level,e.count,e.value,e.distanceMeters,e.isBox);
       }
-      _lootStatsRows=_lootStatsSummary.SortedRows();
       _lootStatsAt=now;_lootStatsFilters=filters;_lootStatsInputCount=loot.count;_lootStatsKnown=YES;
     }
     const auto &summary=_lootStatsSummary;
-    const auto &rows=_lootStatsRows;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if(display.x<1||display.y<1)return;
-    const size_t maxRows=(size_t)MAX(0,MIN(8,(int)((display.y-212)/22)));
-    const size_t visibleRows=std::min(rows.size(),maxRows);
-    const ImVec2 panel(MIN(268.0f,display.x),MIN(display.y,212.0f+visibleRows*22.0f));
+    // Five plain quality totals, highest quality first. Keep the measured
+    // window solely as a movable anchor; all visible content is outlined text.
+    const float font=MAX(14.0f,st.fontInfo), lineHeight=font+8.0f;
+    const char *names[]={"红","金","紫","蓝","绿"};
+    char labels[5][96];
+    float width=0;
+    for(int i=0;i<5;++i){
+        const int level=6-i;
+        snprintf(labels[i],sizeof(labels[i]),"%s  %llu件  ¥%lld",names[i],
+                 (unsigned long long)summary.byQuality[level],(long long)summary.valueByQuality[level]);
+        width=MAX(width,MFTextSize(labels[i],font).x);
+    }
+    const ImVec2 panel(MIN(width+4.0f,display.x),MIN(display.y,5.0f*lineHeight+2.0f));
     const ImVec2 available(MAX(0.0f,display.x-panel.x),MAX(0.0f,display.y-panel.y));
     ImGui::SetNextWindowSize(panel,ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImVec2(available.x*st.lootStatsXRatio,available.y*st.lootStatsYRatio), ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(.055f,.075f,.11f,.96f));
-    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.96f,.97f,1,1));
-    ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.65f,.71f,.81f,1));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12,10));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,14);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(0,0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0);
     if (ImGui::Begin("物资统计", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::TextUnformatted("物资统计");
-        ImGui::TextDisabled("%llu 件 · %zu 类 · %llu 箱",(unsigned long long)summary.quantity,
-                            rows.size(),(unsigned long long)summary.boxes);
-        ImGui::Separator();
-        for(int i=0;i<6;++i){
-            const int level=6-i;
-            if(i%2)ImGui::SameLine(12+(panel.x-24)*.5f);
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(MFQualityColor(level,st)),
-                               "%d级 %llu",level,(unsigned long long)summary.byQuality[level]);
-        }
-        if(summary.byQuality[0])ImGui::TextDisabled("品质未知 %llu",(unsigned long long)summary.byQuality[0]);
-        ImGui::Separator();
-        if(rows.empty())ImGui::TextDisabled("范围内暂无物资");
-        for(size_t i=0;i<visibleRows;++i){
-            const auto &row=rows[i];
-            char suffix[48];
-            if(isfinite(row.nearest))snprintf(suffix,sizeof(suffix),"×%llu  %.0fm",(unsigned long long)row.quantity,row.nearest);
-            else snprintf(suffix,sizeof(suffix),"×%llu  ?m",(unsigned long long)row.quantity);
-            const float suffixWidth=ImGui::CalcTextSize(suffix).x;
-            const float room=MAX(12.0f,ImGui::GetContentRegionAvail().x-suffixWidth-12);
-            std::string name=row.name;
-            if(ImGui::CalcTextSize(name.c_str()).x>room){
-                do{
-                    size_t last=name.size()-1;
-                    while(last>0&&((unsigned char)name[last]&0xC0)==0x80)--last;
-                    name.resize(last);
-                }while(!name.empty()&&ImGui::CalcTextSize((name+"…").c_str()).x>room);
-                name+="…";
-            }
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(MFQualityColor(row.quality,st)),"%s",name.c_str());
-            ImGui::SameLine(panel.x-12-suffixWidth);
-            ImGui::TextDisabled("%s",suffix);
-        }
-        if(rows.size()>visibleRows)ImGui::TextDisabled("另有 %zu 类",rows.size()-visibleRows);
-        ImGui::TextDisabled("已读总值 %lld",(long long)summary.totalValue);
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground)) {
+        const ImVec2 origin=ImGui::GetWindowPos();
+        ImDrawList *dl=ImGui::GetWindowDrawList();
+        for(int i=0;i<5;++i)
+            MFText(dl,font,ImVec2(origin.x+1,origin.y+1+i*lineHeight),
+                   MFQualityColor(6-i,st),labels[i]);
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar(2);
 }
 
 #pragma mark - 渲染自检
