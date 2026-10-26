@@ -1,16 +1,13 @@
 #import "MFHUDIslandView.h"
 #import <QuartzCore/QuartzCore.h>
-#include <cmath>
 
 @implementation MFHUDIslandView {
-    UIView *_statusDot;
-    UILabel *_titleLabel;
-    UILabel *_actionLabel;
-    UIImageView *_chevron;
+    UILabel *_realLabel;
+    UILabel *_botLabel;
     UITouch *_trackingTouch;
     CGPoint _touchStart;
     BOOL _touchMoved;
-    NSInteger _realCount, _botCount, _lootCount;
+    NSInteger _realCount, _botCount;
     BOOL _cameraValid;
 }
 
@@ -38,33 +35,19 @@
     self.layer.shadowRadius = 5.0;
     self.layer.shadowOffset = CGSizeMake(0.0, 2.0);
 
-    _statusDot = [UIView new];
-    _statusDot.userInteractionEnabled = NO;
-    _statusDot.backgroundColor = [UIColor colorWithRed:0.49 green:0.91 blue:0.77 alpha:1.0];
-    _statusDot.layer.cornerRadius = 2.5;
-    _statusDot.layer.shadowColor = _statusDot.backgroundColor.CGColor;
-    _statusDot.layer.shadowOpacity = 0.35;
-    _statusDot.layer.shadowRadius = 3.0;
-    _statusDot.layer.shadowOffset = CGSizeZero;
-    [self addSubview:_statusDot];
+    _realLabel = [UILabel new];
+    _realLabel.userInteractionEnabled = NO;
+    _realLabel.font = [UIFont monospacedDigitSystemFontOfSize:20.0 weight:UIFontWeightBold];
+    _realLabel.textColor = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
+    _realLabel.textAlignment = NSTextAlignmentCenter;
+    [self addSubview:_realLabel];
 
-    _titleLabel = [UILabel new];
-    _titleLabel.userInteractionEnabled = NO;
-    _titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.5 weight:UIFontWeightSemibold];
-    _titleLabel.textColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-    [self addSubview:_titleLabel];
-
-    _actionLabel = [UILabel new];
-    _actionLabel.userInteractionEnabled = NO;
-    _actionLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightMedium];
-    _actionLabel.textColor = [UIColor colorWithWhite:0.83 alpha:1.0];
-    [self addSubview:_actionLabel];
-
-    _chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
-    _chevron.userInteractionEnabled = NO;
-    _chevron.contentMode = UIViewContentModeScaleAspectFit;
-    _chevron.tintColor = [UIColor colorWithWhite:0.65 alpha:1.0];
-    [self addSubview:_chevron];
+    _botLabel = [UILabel new];
+    _botLabel.userInteractionEnabled = NO;
+    _botLabel.font = _realLabel.font;
+    _botLabel.textColor = UIColor.whiteColor;
+    _botLabel.textAlignment = NSTextAlignmentCenter;
+    [self addSubview:_botLabel];
 
     self.isAccessibilityElement = YES;
     self.accessibilityTraits = UIAccessibilityTraitButton;
@@ -78,62 +61,38 @@
 - (void)layoutSubviews {
     [super layoutSubviews];
     const CGFloat width = CGRectGetWidth(self.bounds);
-    const CGFloat midY = CGRectGetMidY(self.bounds);
+    const CGFloat height = CGRectGetHeight(self.bounds);
     self.layer.cornerRadius = CGRectGetHeight(self.bounds) * 0.5;
     self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds
                                                    cornerRadius:self.layer.cornerRadius].CGPath;
-    _statusDot.frame = CGRectMake(13.0, midY - 2.5, 5.0, 5.0);
-    const CGFloat labelWidth = MAX(0.0, width - 51.0);
-    _titleLabel.frame = CGRectMake(26.0, midY - 16.0, labelWidth, 17.0);
-    _actionLabel.frame = CGRectMake(26.0, midY + 2.0, labelWidth, 15.0);
-    _chevron.frame = CGRectMake(width - 23.0, midY - 4.0, 9.0, 8.0);
+    const CGFloat inset = 20.0, gap = 12.0;
+    const CGFloat labelWidth = MAX(0.0, (width - 2.0 * inset - gap) * 0.5);
+    _realLabel.frame = CGRectMake(inset, 0.0, labelWidth, height);
+    _botLabel.frame = CGRectMake(inset + labelWidth + gap, 0.0, labelWidth, height);
 }
 
 - (void)setExpanded:(BOOL)expanded animated:(BOOL)animated {
-    if (_expanded == expanded && _actionLabel.text) return;
+    if (_expanded == expanded && _realLabel.text) return;
     _expanded = expanded;
     self.accessibilityHint = expanded ? @"轻点收起面板" : @"轻点展开面板";
-    void (^update)(void) = ^{
-        [self updateLabels];
-        self->_chevron.transform = expanded ? CGAffineTransformMakeRotation((CGFloat)M_PI) :
-                                             CGAffineTransformIdentity;
-    };
-    if (!animated || UIAccessibilityIsReduceMotionEnabled()) {
-        update();
-        return;
-    }
-    [UIView transitionWithView:_actionLabel duration:0.18
-                      options:UIViewAnimationOptionTransitionCrossDissolve |
-                              UIViewAnimationOptionBeginFromCurrentState |
-                              UIViewAnimationOptionAllowUserInteraction
-                   animations:update completion:nil];
+    [self updateLabels];
 }
 
 - (void)updateLabels {
-    NSString *action = _expanded ? @"收起" : @"展开";
     NSString *state = _expanded ? @"已展开" : @"已收起";
-    if (_cameraValid) {
-        _titleLabel.text = [NSString stringWithFormat:@"真人 %ld  人机 %ld", (long)_realCount, (long)_botCount];
-        _actionLabel.text = [NSString stringWithFormat:@"物资 %ld · %@", (long)_lootCount, action];
-        self.accessibilityValue = [NSString stringWithFormat:@"%@，真人%ld，人机%ld，物资%ld",
-                                   state, (long)_realCount, (long)_botCount, (long)_lootCount];
-    } else {
-        _titleLabel.text = @"小玉 · 等待画面";
-        _actionLabel.text = [@"轻点" stringByAppendingString:action];
-        self.accessibilityValue = state;
-    }
-    _statusDot.backgroundColor = _cameraValid ?
-        [UIColor colorWithRed:0.49 green:0.91 blue:0.77 alpha:1.0] :
-        [UIColor colorWithWhite:0.55 alpha:1.0];
+    const NSInteger real = _cameraValid ? _realCount : 0;
+    const NSInteger bot = _cameraValid ? _botCount : 0;
+    _realLabel.text = [NSString stringWithFormat:@"%ld", (long)real];
+    _botLabel.text = [NSString stringWithFormat:@"%ld", (long)bot];
+    self.accessibilityValue = [NSString stringWithFormat:@"%@%@，真人%ld，人机%ld",
+                               state, _cameraValid ? @"" : @"，等待画面", (long)real, (long)bot];
 }
 
 - (void)updateRealCount:(NSInteger)real botCount:(NSInteger)bot
-             lootCount:(NSInteger)loot cameraValid:(BOOL)cameraValid {
+           cameraValid:(BOOL)cameraValid {
     real = MAX(0, MIN(real, 999)); bot = MAX(0, MIN(bot, 999));
-    loot = MAX(0, MIN(loot, 9999));
-    if (_titleLabel.text && _realCount == real && _botCount == bot &&
-        _lootCount == loot && _cameraValid == cameraValid) return;
-    _realCount = real; _botCount = bot; _lootCount = loot; _cameraValid = cameraValid;
+    if (_realLabel.text && _realCount == real && _botCount == bot && _cameraValid == cameraValid) return;
+    _realCount = real; _botCount = bot; _cameraValid = cameraValid;
     [self updateLabels];
 }
 

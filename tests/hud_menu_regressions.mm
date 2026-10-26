@@ -241,36 +241,44 @@ static void TestNativeIslandInputAndAccessibility(void) {
           [island.accessibilityIdentifier isEqual:@"hud.dynamicIsland"],
           "the native island must keep its compact, accessible touch surface");
     [island setExpanded:YES animated:NO];
-    CHECK(island.isExpanded && [island.accessibilityValue isEqual:@"已展开"],
+    CHECK(island.isExpanded && [island.accessibilityValue hasPrefix:@"已展开"],
           "island accessibility must reflect the current expanded state");
     [island setExpanded:NO animated:NO];
-    CHECK(!island.isExpanded && [island.accessibilityValue isEqual:@"已收起"],
+    CHECK(!island.isExpanded && [island.accessibilityValue hasPrefix:@"已收起"],
           "island accessibility must reflect the current collapsed state");
-    [island updateRealCount:3 botCount:7 lootCount:12 cameraValid:YES];
-    UILabel *summary = [island valueForKey:@"titleLabel"];
-    UILabel *detail = [island valueForKey:@"actionLabel"];
-    CHECK([summary.text isEqual:@"真人 3  人机 7"] && [detail.text isEqual:@"物资 12 · 展开"],
-          "native island must display real counters as system-font text");
-    CHECK([island.accessibilityValue containsString:@"真人3，人机7，物资12"],
-          "island counters must also reach accessibility");
+    [island updateRealCount:4 botCount:5 cameraValid:YES];
+    UILabel *realLabel = [island valueForKey:@"realLabel"];
+    UILabel *botLabel = [island valueForKey:@"botLabel"];
+    CHECK([realLabel.text isEqual:@"4"] && [botLabel.text isEqual:@"5"] && island.subviews.count == 2,
+          "native island must show only two numbers without category, loot or action text");
+    CHECK([realLabel.textColor isEqual:[UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0]] &&
+          [botLabel.textColor isEqual:UIColor.whiteColor] &&
+          CGRectGetMaxX(realLabel.frame) < CGRectGetMinX(botLabel.frame) &&
+          CGRectGetMidY(realLabel.frame) == CGRectGetMidY(botLabel.frame),
+          "real players must be red on the left and bots white on the right in a single row");
+    CHECK([island.accessibilityValue containsString:@"真人4，人机5"] &&
+          ![island.accessibilityValue containsString:@"物资"],
+          "VoiceOver must identify both numeric counters without announcing loot");
     [island setExpanded:YES animated:NO];
-    CHECK([detail.text isEqual:@"物资 12 · 收起"],
+    CHECK([realLabel.text isEqual:@"4"] && [botLabel.text isEqual:@"5"] &&
+          [island.accessibilityValue hasPrefix:@"已展开"],
           "toggling the menu must preserve the current island statistics");
-    [island updateRealCount:99 botCount:99 lootCount:99 cameraValid:NO];
-    CHECK([summary.text isEqual:@"小玉 · 等待画面"] && [detail.text isEqual:@"轻点收起"],
+    [island updateRealCount:99 botCount:99 cameraValid:NO];
+    CHECK([realLabel.text isEqual:@"0"] && [botLabel.text isEqual:@"0"] &&
+          [island.accessibilityValue containsString:@"等待画面"],
           "an unavailable camera must clear stale counts instead of advertising old data");
     __block NSUInteger deliveries = 0;
     MFMenuPanelReportStats(0, 0, 0, NO, 0);
     MFMenuPanelSetStatsChangeHandler(^(int real, int bot, int loot, BOOL cameraOK) {
         deliveries++;
-        [island updateRealCount:real botCount:bot lootCount:loot cameraValid:cameraOK];
+        [island updateRealCount:real botCount:bot cameraValid:cameraOK];
     });
     MFMenuPanelReportStats(2, 4, 31, YES, 0);
     MFMenuPanelReportStats(2, 4, 31, YES, 0);
-    CHECK(deliveries == 2 && [summary.text isEqual:@"真人 2  人机 4"],
+    CHECK(deliveries == 2 && [realLabel.text isEqual:@"2"] && [botLabel.text isEqual:@"4"],
           "production stats must reach the island even without panel rendering and skip unchanged counts");
     MFMenuPanelReportStats(2, 4, 31, NO, 0);
-    CHECK([summary.text isEqual:@"小玉 · 等待画面"],
+    CHECK([realLabel.text isEqual:@"0"] && [botLabel.text isEqual:@"0"],
           "production stats must clear the native island after acquisition fails");
     MFMenuPanelSetStatsChangeHandler(nil);
     __block NSUInteger activations = 0;
@@ -320,7 +328,7 @@ static void PreviewProductionMenu(void) {
     sPreviewIslandWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
     MFHUDIslandView *previewIsland = [[MFHUDIslandView alloc] initWithFrame:sPreviewIslandWindow.bounds];
     [previewIsland setExpanded:YES animated:NO];
-    [previewIsland updateRealCount:3 botCount:7 lootCount:12 cameraValid:YES];
+    [previewIsland updateRealCount:4 botCount:5 cameraValid:YES];
     [sPreviewIslandWindow.rootViewController.view addSubview:previewIsland];
     sPreviewIslandWindow.hidden = NO;
     [sPreviewIslandWindow layoutIfNeeded];

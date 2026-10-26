@@ -304,7 +304,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     [self.islandView setExpanded:![MFMenuUI collapsed] animated:NO];
     __weak MFHUDIslandView *weakStatsIsland = self.islandView;
     MFMenuPanelSetStatsChangeHandler(^(int real, int bot, int loot, BOOL cameraOK) {
-        [weakStatsIsland updateRealCount:real botCount:bot lootCount:loot cameraValid:cameraOK];
+        [weakStatsIsland updateRealCount:real botCount:bot cameraValid:cameraOK];
     });
     /*
      * ★ [M5.134] 启动时强制关掉防录屏，并清掉持久化的开关。
