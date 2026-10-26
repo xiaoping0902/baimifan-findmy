@@ -1,7 +1,9 @@
 # 白米饭复刻 · FindMy
 
 一个 iOS 工具 App：**伪装成系统「查找」**，带主界面控制台、悬浮 HUD（C++ ImGui/Metal）、内核读取链与系统清理功能。
-当前核实设备：**iPad14,4 / J618AP / 2022 款 11 英寸 iPad Pro M2（蜂窝网络版）· iPadOS 16.1**。历史 M5.72 等测试使用的是 iPad8,11 / A12Z · iPadOS 16.6.1；此前交接报告将 iPad14,4 写成 mini 6 / A15 是错误的。源码在 Windows 上维护，Apple SDK 编译与 simulator 回归在 GitHub Actions macOS 执行。
+2026-10-26 当前 USB 核实设备：**iPad8,11 / A12Z · iPadOS 16.6.1（20G81）**，已安装 M5.223。设备导出的启动报告确认旧 HUD 在 `physpuppet.h:111` 失败；新代码改为按系统选择已有读取方式。历史已核实设备还包括 **iPad14,4 / J618AP / 11 英寸 iPad Pro M2 · iPadOS 16.1**。源码在 Windows 上维护，Apple SDK 编译与 simulator 回归在 GitHub Actions macOS 执行。
+
+手机和平板使用同一 IPA。应用最低系统为 iOS 15.0；**当前内核配置范围为 iOS/iPadOS 16.0–16.6.1、A12–A16 / M1–M2**，这表示配置范围，不代表所有机型均已完成实机验证。iOS 15、A8–A11 及未知芯片不再套用 iOS 16 arm64e 偏移。具体边界与验证状态见 [设备兼容说明](docs/device-support.md)。
 
 > 本工程为**独立重写**，参考对象是 `白米饭无验证.ipa` 的静态逆向分析结论（见 `docs/复刻总方案.md` §3）。
 > 不含任何授权校验、联网上报或设备指纹采集。

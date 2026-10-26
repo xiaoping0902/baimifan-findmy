@@ -1899,7 +1899,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     for (MFEntity *e in ents) {
         if (n >= kMaxBlips) break;
         if (e.isLoot || e.isBox) continue;                       /* 雷达只放人 */
-        if (e.isBot && !st.showBot) continue;
+        if (e.isBot) continue;                                  /* 雷达始终排除普通/特殊 NPC */
         if (gMFUELocalTeam != 0 && e.teamId == (int)gMFUELocalTeam) continue;
         if (e.worldX == 0.0f && e.worldY == 0.0f) continue;      /* 未读到坐标 */
         if (!isfinite(e.worldX) || !isfinite(e.worldY)) continue;

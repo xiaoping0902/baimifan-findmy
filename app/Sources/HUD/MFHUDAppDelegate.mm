@@ -732,8 +732,10 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 
         /* ① 开内核（只开一次；失败不重试，重试只会养脏 PUAF 页） */
         if (!mf_is_open()) {
-            int rc = mf_kopen(1024, MF_PUAF_PHYSPUPPET,
-                              MF_KREAD_SEM_OPEN, MF_KWRITE_SEM_OPEN);
+            const MFDeviceConfiguration device = mf_current_device_configuration();
+            [log appendFormat:@"[device] status=%d method=%d pages=%llu\n", device.status,
+                              device.method, (unsigned long long)device.pages];
+            int rc = mf_kopen_default();
             const char *err = mf_last_error();
             [log appendFormat:@"[kopen] rc=%d %@\n", rc,
              rc == 0 ? @"OK"
@@ -750,6 +752,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                         @"  → 内核被上一次会话占用（perfmon 独占）。\n"
                         @"    重试和换参数都没用，只能【重启设备】清掉。\n"
                         @"    以后请用悬浮窗菜单里的「退出」关闭，不要上滑硬杀。\n"];
+                } else if (rc == -5) {
+                    [log appendString:@"  → 此设备/系统尚不支持当前读取后端；本次没有执行内核操作。\n"];
                 } else {
                     [log appendString:@"  → 不再重试。杀掉 HUD 与 App 后重开，或重启设备。\n"];
                 }

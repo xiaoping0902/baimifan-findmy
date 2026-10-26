@@ -67,6 +67,12 @@ extern "C" {
 #define MF_DEFAULT_KREAD_METHOD        MF_KREAD_SEM_OPEN
 #define MF_DEFAULT_KWRITE_METHOD       MF_KWRITE_SEM_OPEN
 
+#include "MFDeviceCompatibility.h"
+/* Device policy shared by console and HUD. Does not start a kernel session. */
+MFDeviceConfiguration mf_current_device_configuration(void);
+/* pages == 0 chooses the device recommendation; nonzero keeps the caller's allocation. */
+int mf_kopen_for_device(uint64_t pages);
+
 /*
  * ★ [M5.14] 上下限 —— 上限从 2048 改成 3072，原因是 Dopamine。
  *
@@ -106,6 +112,7 @@ extern "C" {
  *    -4  另一个进程已持有内核（跨进程 flock 哨兵）。
  *        这个码表示【内核一个字节都没动】，调用方可以放心重试，
  *        不要像 -1 那样把进程锁死。
+ *    -5  系统、芯片或方法不在现有偏移/方法范围；未执行内核操作。
  *
  * 与上游 kopen() 的关键差别：上游断言失败会 sleep(30) + exit(1)，
  * 让 App 表现为「卡 30 秒后闪退」。本实现把断言转换成
@@ -119,7 +126,7 @@ int mf_kopen(uint64_t puaf_pages,
              int      kread_method,
              int      kwrite_method);
 
-/* 用 iPad Pro M2 / 16.6.1 的推荐参数打开（见上方 MF_DEFAULT_*）。 */
+/* 按当前设备选择参数；不再固定为旧系统的 physpuppet。 */
 int mf_kopen_default(void);
 
 /* 释放内核通道（对应 libkfd 的 kclose）。未打开时是安全的空操作。 */

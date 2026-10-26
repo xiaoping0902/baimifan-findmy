@@ -33,5 +33,17 @@ int main() {
     assert(Near(tiny.x,50) && Near(tiny.y,18));
     Point oversized=ClampCenter({-20,1000},{500,1000},screen);
     assert(Near(oversized.x,195) && Near(oversized.y,422));
+    const Size devices[]={{375,667},{390,844},{430,932},{768,1024},{1024,1366}};
+    for (Size fixed:devices) for (int o=1;o<=4;++o) for(double zoom:{0.8,1.0,1.2}) {
+        const Rect viewport{0,0,fixed.width,fixed.height};
+        const Size logical=LogicalSize(fixed,o);
+        const Size panel=PhysicalSize({240*zoom,300*zoom},o);
+        const Point low=ClampCenter({-10000,-10000},panel,viewport);
+        const Point high=ClampCenter({10000,10000},panel,viewport);
+        assert(low.x-panel.width/2>=-0.00001 && low.y-panel.height/2>=-0.00001);
+        assert(high.x+panel.width/2<=fixed.width+0.00001 && high.y+panel.height/2<=fixed.height+0.00001);
+        const Point island=IslandCenter(logical,{142,36},12);
+        assert(Near(island.x,logical.width/2) && Near(island.y,30));
+    }
     std::puts("floating layout: portrait/landscape island, full-screen drag and zoom bounds passed");
 }

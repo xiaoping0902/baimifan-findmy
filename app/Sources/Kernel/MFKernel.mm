@@ -139,31 +139,10 @@ extern "C" {
  * 本机（iPad8,11 / A12Z）hw.memsize ≈ 6GB → 应该用 3072。
  */
 + (uint64_t)recommendedPuafPages {
-    uint64_t mem = 0;
-    size_t sz = sizeof(mem);
-    if (sysctlbyname("hw.memsize", &mem, &sz, NULL, 0) != 0) mem = 0;
-
-    int cpuFamily = 0;
-    size_t cs = sizeof(cpuFamily);
-    sysctlbyname("hw.cpufamily", &cpuFamily, &cs, NULL, 0);
-
-    // CPUFAMILY_ARM_TWISTER = A9 = 0x37b32da7
-    const int kTwister = 0x37b32da7;
-    // CPUFAMILY_ARM_TYPHOON = A8 = 0x37a09642
-    const int kTyphoon = 0x37a09642;
-
-    uint64_t pages = 512;
-    if (mem >= 5ULL * 1024 * 1024 * 1024) {
-        pages = 3072;                       // ★ 6GB+ 设备（Dopamine 的推荐值）
-    } else if (cpuFamily == kTwister) {
-        pages = 160;                        // A9 + iOS16（128 会被 sem_open 拒绝）
-    } else if (cpuFamily == kTyphoon) {
-        pages = 256;                        // A8
-    }
-
-    NSLog(@"[MF][Kernel] 自动 PUAF 页数：%llu  （RAM=%.2fGB cpufamily=0x%x）",
-          (unsigned long long)pages, mem / 1073741824.0, cpuFamily);
-    return pages;
+    const MFDeviceConfiguration device = mf_current_device_configuration();
+    NSLog(@"[MF][Kernel] 设备配置 status=%d method=%d pages=%llu", device.status,
+          device.method, (unsigned long long)device.pages);
+    return device.pages;
 }
 
 /// 当前进程可用内存 —— Dopamine 用它做 hog 决策，我们用它做诊断
@@ -236,31 +215,17 @@ static BOOL gMFKernelPoisoned = NO;
         NSLog(@"[MF][Kernel] 机型判定：%@（arm64_link_addr 将由 patchfinder 定）",
               isM ? @"M 系列" : @"A 系列");
 
-        /*
-         * [M5.11] PUAF 方法可切换
-         *
-         * 真机证据：landa 路径下 grab_free_pages 历史最好恒为 0/256，
-         * 99999 轮一次都没命中 —— 这不是随机性问题，是【结构性】的，
-         * 说明 landa 在这台机器上根本没建立悬空页。
-         *
-         * 所以把方法做成可切换，让用户能试另外两条：
-         *   0 = physpuppet
-         *   1 = smith
-         *   2 = landa（默认）
-         *
-         * 注意：kread/kwrite 仍必须是 sem_open(1/1) —— 16.3+ 上 kqueue_workloop_ctl 已废。
-         */
-        NSInteger pm = [[NSUserDefaults standardUserDefaults] integerForKey:@"mf.kfd.puafMethod"];
-        /* [M5.135] 兜底默认改成 physpuppet：landa 在 16.1 上会卡死 12 分钟（见 M5.113） */
-        if (pm < 0 || pm > 2) pm = 0;      // 0 = physpuppet
+        /* Select one method for the current OS. Do not cycle through methods
+         * after failure: partial attempts can leave kernel state behind. */
+        // The old persisted selection can be invalid after moving devices.
+        // Use the same OS/chip policy as HUD automatic startup.
+        const MFDeviceConfiguration device = mf_current_device_configuration();
+        NSInteger pm = device.method;
 
         NSLog(@"[MF][Kernel] 开始 kopen：pages=%llu method=%ld（0=physpuppet 1=smith 2=landa）",
               (unsigned long long)pages, (long)pm);
 
-        int rc = mf_kopen(pages,
-                          (int)pm,   // PUAF 方法（可切换）
-                          1,         // kread_sem_open
-                          1);        // kwrite_sem_open
+        int rc = mf_kopen_for_device(pages);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (rc != 0) {
@@ -270,12 +235,12 @@ static BOOL gMFKernelPoisoned = NO;
                  * 这种情况内核一个字节都没动，【不能】算成失败上锁 ——
                  * 否则用户关掉悬浮窗之后还得重启 App 才能再连。
                  */
-                if (rc != -4) {
+                if (rc != -4 && rc != -5) {
                     gMFKernelPoisoned = YES;
                 }
                 self.lastError = [NSString stringWithUTF8String:mf_last_error() ?: "kopen 失败"];
                 NSLog(@"[MF][Kernel] kopen 失败: %@ —— %@", self.lastError,
-                      (rc == -4) ? @"内核未被动过，关掉占用方后可直接重试"
+                      (rc == -4 || rc == -5) ? @"未执行内核操作"
                                  : @"已上锁，需重启 App");
                 /* [M5.11] 自动把内核日志镜像到 Media —— 这样电脑侧一条命令就能拉，
                    不用再让用户「点按钮 → 复制全文 → 粘贴」 */

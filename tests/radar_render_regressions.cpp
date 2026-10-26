@@ -67,6 +67,10 @@ int main() {
     Bounds point = TargetBounds(Frame(cfg, &blip));
     CHECK(point.count > 0 && point.r - point.l < 8 && point.b - point.t < 8,
           "an unknown heading must render only its point");
+    blip.isBot = true; blip.yawDeg = 90; blip.distM = 30;
+    CHECK(TargetBounds(Frame(cfg, &blip)).count == 0,
+          "ordinary NPCs must never render a radar point, heading, or distance label");
+    blip.isBot = false; blip.yawDeg = NAN; blip.distM = 0;
     blip.yawDeg = 90;
     Bounds east = TargetBounds(Frame(cfg, &blip));
     CHECK(east.r > point.r + 2 && fabsf(east.l - point.l) < 0.1f,

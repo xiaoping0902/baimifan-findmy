@@ -247,6 +247,14 @@ static void TestSyntheticDrawing(void) {
           "local expert names must use ExpertId rather than the unrelated fashion HeroID");
     CHECK([MFResolveUEHeroName(20003, @"蜂医") isEqualToString:@"蜂医"],
           "live localized hero names must override a local nickname");
+    MFEntity *operatorAI = [MFEntity new]; operatorAI.isBot = YES;
+    MFApplyUEHeroAttributes(operatorAI, @{@"heroID":@12345678901ULL, @"expertID":@10010, @"heroName":@"威龙"});
+    MFApplyUENPCAttributes(operatorAI, @{@"npcName":@"人机"});
+    CHECK(!operatorAI.isBot && operatorAI.npcName == nil && [operatorAI.heroName isEqualToString:@"威龙"],
+          "shared attribute application must classify playable operator AI before counters, styles and radar");
+    operatorAI.isBot = YES;
+    MFApplyUEHeroAttributes(operatorAI, @{@"heroID":@10010, @"expertID":@99999, @"heroName":@"Unknown"});
+    CHECK(operatorAI.isBot, "fashion IDs and arbitrary localized labels must not establish a playable operator");
 
     // FPS remains available before a game source connects, follows the actual
     // presented rate rather than the configured target, and has its own switch.
@@ -416,6 +424,12 @@ static void TestSyntheticDrawing(void) {
     radarTarget.teamId = 8; radarTarget.isBot = YES; settings.showBot = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == radarBase,
           "the bot filter must remove radar points and their facing markers");
+    settings.showBot = YES;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == radarBase,
+          "enabling bot HUD must never put ordinary NPCs back on radar");
+    MFApplyUEHeroAttributes(radarTarget, @{@"expertID":@10007, @"heroName":@"红狼"});
+    CHECK(Frame(drawing, overlay)->TotalVtxCount > radarBase + 8,
+          "a verified playable operator AI must appear on radar under human rules");
     settings.showBot = YES; radarTarget.isBot = NO; radarTarget.yawDeg = 90;
     CHECK(Frame(drawing, overlay)->TotalVtxCount > radarEnemy,
           "a validated enemy heading must add actual radar direction geometry");

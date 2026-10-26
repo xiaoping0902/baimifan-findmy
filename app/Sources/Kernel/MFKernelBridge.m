@@ -28,6 +28,8 @@
 
 /* ── 公共接口头（纯 C，不含 libkfd.h）────────────────────────────── */
 #include "MFKernelBridge.h"
+#import <Foundation/Foundation.h>
+#include <sys/sysctl.h>
 
 /* [M5.87] proc patch 段用到 snprintf / memcpy：显式带上，不指望 libkfd 间接引入 */
 #include <stdio.h>
@@ -426,8 +428,30 @@ char *mf_read_klog(void)
 /* 2) 生命周期                                                       */
 /* ================================================================ */
 
+MFDeviceConfiguration mf_current_device_configuration(void)
+{
+    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+    uint32_t family = 0;
+    uint64_t memory = 0;
+    size_t family_size = sizeof(family), memory_size = sizeof(memory);
+    sysctlbyname("hw.cpufamily", &family, &family_size, NULL, 0);
+    sysctlbyname("hw.memsize", &memory, &memory_size, NULL, 0);
+    return mf_device_configuration((int)os.majorVersion, (int)os.minorVersion,
+                                   (int)os.patchVersion, family, memory);
+}
+
 static int mf_kopen_locked(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
 {
+    MFDeviceConfiguration device = mf_current_device_configuration();
+    if (device.status != MF_DEVICE_SUPPORTED || !mf_device_method_allowed(device, puaf_method)) {
+        const char *reason = device.status == MF_DEVICE_UNSUPPORTED_OS
+            ? "unsupported OS: bundled kernel offsets require iOS/iPadOS 16.0-16.6.1"
+            : device.status == MF_DEVICE_UNSUPPORTED_CHIP
+            ? "unsupported chip: bundled kernel offsets require A12-A16 / M1-M2"
+            : "PUAF method is patched or unreliable on this OS; use device automatic startup";
+        mf_strlcpy(g_err, sizeof(g_err), reason);
+        return -5; /* Before redirect, allocations, sentinel or any KFD operation. */
+    }
     /* 先把 kfd 内部的 printf 诊断接进文件，失败时才能看出死在 9 个偏移里的哪一个 */
     mf_redirect_klog();
 
@@ -527,13 +551,16 @@ static int mf_kopen_locked(uint64_t puaf_pages, int puaf_method, int kread_metho
     return 0;
 }
 
-int mf_kopen_default(void)
+int mf_kopen_for_device(uint64_t pages)
 {
-    return mf_kopen(MF_DEFAULT_PUAF_PAGES,
-                    MF_DEFAULT_PUAF_METHOD,
+    const MFDeviceConfiguration device = mf_current_device_configuration();
+    return mf_kopen(pages ? pages : device.pages,
+                    device.method,
                     MF_DEFAULT_KREAD_METHOD,
                     MF_DEFAULT_KWRITE_METHOD);
 }
+
+int mf_kopen_default(void) { return mf_kopen_for_device(0); }
 
 static void mf_kclose_locked(void)
 {

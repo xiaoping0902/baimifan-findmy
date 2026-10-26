@@ -181,7 +181,8 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
 
     for (int i = 0; i < count; i++) {
         const MFRadarBlip *b = &blips[i];
-        float markerR = (b->isBot ? 2.8f : 3.5f) * scale;
+        if (b->isBot) continue;
+        float markerR = 3.5f * scale;
         const bool hasHeading = isfinite(b->yawDeg) && fabsf(b->yawDeg) <= 720.0f;
         // Reserve the full facing marker, including its anti-aliased edge.
         const float footprintR = markerR + (hasHeading ? 10.0f * scale : 1.2f * scale);

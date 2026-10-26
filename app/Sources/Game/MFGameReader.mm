@@ -494,7 +494,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
     if (p.entityIsBotOffset) {
         int v = [rb readInt32:e.address + p.entityIsBotOffset];
-        e.isBot = (v != 0);
+        e.isBot = MFHeroNames::UsesBotHUD(v != 0, e.expertID);
     }
     if (p.entityTeamOffset) {
         int v = [rb readInt32:e.address + p.entityTeamOffset];

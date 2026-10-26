@@ -70,7 +70,9 @@ static inline void MFFillUEHeroAttributes(MFReadBackend *reader, uint64_t actor,
 
 static inline void MFApplyUEHeroAttributes(MFEntity *entity, NSDictionary *attributes) {
     entity.heroID = [attributes[@"heroID"] unsignedLongLongValue];
+    entity.expertID = [attributes[@"expertID"] unsignedLongLongValue];
     entity.heroName = attributes[@"heroName"];
+    entity.isBot = MFHeroNames::UsesBotHUD(entity.isBot, entity.expertID);
 }
 
 static inline NSString *MFNPCString(const std::u16string &text) {
@@ -118,7 +120,7 @@ static inline NSString *MFReadUENPCTemplateName(MFReadBackend *reader, const MFU
 
 static inline void MFFillUENPCAttributes(MFReadBackend *reader, uint64_t actor, BOOL isBot,
                                         NSString *existingName, NSMutableDictionary *attributes) {
-    if (!isBot) return;
+    if (!MFHeroNames::UsesBotHUD(isBot, [attributes[@"expertID"] unsignedLongLongValue])) return;
     static NSMutableDictionary<NSNumber *, NSDictionary *> *cache;
     static uint64_t cachedBase = 0;
     static uint64_t cachedTask = 0;

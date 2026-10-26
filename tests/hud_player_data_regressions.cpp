@@ -3,6 +3,7 @@
 #include "../app/Sources/Game/MFHeldWeapons.h"
 #include "../app/Sources/Game/MFHeroNames.h"
 #include "../app/Sources/Game/MFNPCNames.h"
+#include "../app/Sources/Kernel/MFDeviceCompatibility.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,40 @@
 #define CHECK(c, msg) do { if (!(c)) { std::fprintf(stderr, "FAIL: %s\n", msg); std::exit(1); } } while (0)
 
 int main() {
+    constexpr uint64_t gb = 1024ULL * 1024 * 1024;
+    auto device = mf_device_configuration(16, 6, 1, 0x07d34b9f, 6 * gb);
+    CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == 2 && device.pages == 3072,
+          "the connected A12Z tablet on 16.6.1 must select landa and its large-memory allocation");
+    CHECK(!mf_device_method_allowed(device, 0) && !mf_device_method_allowed(device, 1),
+          "patched old methods must be refused on 16.6.1 before an attempt");
+    device = mf_device_configuration(16, 1, 0, 0xda33d83d, 8 * gb);
+    CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == 0 && device.pages == 1024,
+          "the previously validated M2 16.1 bootstrap must retain physpuppet and 1024 pages");
+    CHECK(!mf_device_method_allowed(device, 2), "the known unreliable landa-on-16.1 route must not run");
+    for (auto v : {std::array<int,3>{16,3,1}, {16,4,0}, {16,5,0}, {16,5,1}, {16,6,0}, {16,6,1}}) {
+        device = mf_device_configuration(v[0], v[1], v[2], 0x462504d2, 4 * gb);
+        const int expected = v[1] <= 3 ? 0 : (v[1] < 5 || (v[1] == 5 && v[2] == 0) ? 1 : 2);
+        CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == expected && device.pages == 512 &&
+              mf_device_method_allowed(device, expected), "method boundaries must honor patched OS releases on phones");
+    }
+    for (auto family : {0x07d34b9fu, 0x462504d2u, 0x1b588bb3u, 0xda33d83du, 0x8765edeau})
+        CHECK(mf_device_configuration(16,6,1,family,6*gb).status == MF_DEVICE_SUPPORTED,
+              "the existing arm64e offset family must accept A12 through A16 and M1/M2 chips");
+    for (auto v : {std::array<int,3>{14,8,0}, {15,8,0}, {16,6,2}, {16,7,0}, {17,0,0}, {16,-1,0}}) {
+        device = mf_device_configuration(v[0], v[1], v[2], 0x07d34b9f, 6 * gb);
+        CHECK(device.status == MF_DEVICE_UNSUPPORTED_OS && device.method == -1 && device.pages == 0 &&
+              !mf_device_method_allowed(device, 0), "unsupported offset releases must not produce executable kernel settings");
+    }
+    CHECK(mf_device_configuration(16,6,1,0x37b32da7,2*gb).status == MF_DEVICE_UNSUPPORTED_CHIP &&
+          mf_device_configuration(16,6,1,0,6*gb).status == MF_DEVICE_UNSUPPORTED_CHIP,
+          "A8-A11 and unknown chips must not reuse arm64e offsets");
+    CHECK(!MFHeroNames::UsesBotHUD(true, 10007) && !MFHeroNames::UsesBotHUD(true, 40011),
+          "AI using a verified playable operator must use human HUD rules");
+    CHECK(MFHeroNames::UsesBotHUD(true, 0) && MFHeroNames::UsesBotHUD(true, 99999) &&
+          MFHeroNames::UsesBotHUD(true, 10010007),
+          "ordinary AI and unknown IDs must not be promoted by an ID suffix or a guessed hero");
+    CHECK(!MFHeroNames::UsesBotHUD(false, 0) && !MFHeroNames::UsesBotHUD(false, 20003),
+          "human targets remain human with or without operator metadata");
     const uint64_t ps = 0x100001000, nameData = 0x100002000;
     const uint64_t actor = 0x100003000, equipment = 0x100004000;
     const uint64_t armorData = 0x100005000, infoData = 0x100006000;

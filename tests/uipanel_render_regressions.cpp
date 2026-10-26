@@ -56,7 +56,8 @@ static void ScrollToBottom(UIState& state,const UIPanelLayout& layout) {
     for(int i=0;i<180;++i)Frame(state,layout);
 }
 static void TestHostedLayoutUsesTheNativeViewport(void) {
-    const ImVec2 screens[] = {{390,844}, {844,390}, {768,1024}, {1024,768}};
+    const ImVec2 screens[] = {{375,667}, {667,375}, {390,844}, {844,390},
+                             {430,932}, {932,430}, {768,1024}, {1024,768}, {1024,1366}, {1366,1024}};
     const float scales[] = {kPanelScaleMinimum, 1.0f, kPanelScaleMaximum};
     for (ImVec2 screen : screens) for (float scale : scales) {
         UIState state;

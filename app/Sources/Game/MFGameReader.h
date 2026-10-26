@@ -39,7 +39,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL isVisible;   // 投影成功
 
 #pragma mark 人物属性（[M5.2] 为「开关接线」新增）
-/// 人机标志。偏移未校准时恒为 NO —— 此时「人机显示」不会误判
+/// HUD 分类：普通/特殊 NPC 为 YES；已确认的可玩干员（包括 AI 干员）为 NO。
 @property (nonatomic, assign) BOOL isBot;
 /// 队伍编号。0 = 未知（未校准）—— 此时所有目标同队，队伍颜色不影响显示
 @property (nonatomic, assign) int teamId;
@@ -61,6 +61,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) uint64_t uin;
 /// Live operator identity, distinct from the player-authored nickname / UIN.
 @property (nonatomic, assign) uint64_t heroID;
+@property (nonatomic, assign) uint64_t expertID;
 @property (nonatomic, copy, nullable) NSString *heroName;
 /// Bot-only display name: ordinary AI is 人机; verified special AI has its own name.
 @property (nonatomic, copy, nullable) NSString *npcName;

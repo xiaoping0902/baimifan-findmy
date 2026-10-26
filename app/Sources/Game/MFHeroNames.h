@@ -30,4 +30,11 @@ inline const char *NameForID(uint64_t id) {
 inline const char *Resolve(uint64_t id, const char *localized) {
     return localized && *localized ? localized : NameForID(id);
 }
+
+// This is display classification, not proof that a human controls the actor.
+// Only an exact playable ExpertId may override raw AI flags. Fashion HeroID,
+// a nickname, a positive unknown ID or a special NPC label are insufficient.
+inline bool UsesBotHUD(bool rawAI, uint64_t expertID) {
+    return rawAI && NameForID(expertID) == nullptr;
+}
 }
