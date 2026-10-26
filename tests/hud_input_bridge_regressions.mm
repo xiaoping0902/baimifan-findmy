@@ -19,11 +19,12 @@ typedef CFTypeRef (*CreateDigitizer)(CFAllocatorRef, uint64_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double,
     Boolean, Boolean, uint32_t);
 typedef void (*AppendEvent)(CFTypeRef, CFTypeRef, uint32_t);
-typedef CFTypeRef (*CreateVendor)(CFAllocatorRef, uint64_t, uint16_t, uint16_t,
-    uint32_t, const uint8_t *, uint32_t, uint32_t);
+typedef CFTypeRef (*CreateKeyboard)(CFAllocatorRef, uint64_t, uint16_t, uint16_t,
+    Boolean, uint32_t);
 static CreateDigitizer createDigitizer;
 static AppendEvent appendEvent;
-static CreateVendor createVendor;
+static CreateKeyboard createKeyboard;
+static uint32_t (*eventType)(CFTypeRef);
 
 @interface MFHUDInputBridge (Regression)
 - (void)receiveHIDEvent:(CFTypeRef)event queuedAt:(CFTimeInterval)queuedAt;
@@ -263,15 +264,19 @@ static void TestMultipleContactsCancelWithoutActivating(void) {
     w.hidden = YES;
 }
 static CFTypeRef Metadata(void) {
-    uint8_t byte = 0;
-    CFTypeRef event = createVendor(kCFAllocatorDefault, 0, 0xFF00, 1, 0, &byte, 1, 0);
+    // The bridge ignores any event without digitizer contacts. Use a real
+    // keyboard event because the vendor-defined factory returns NULL on the
+    // Intel iOS 18.6 simulator. This is fed directly to the bridge, never
+    // dispatched as a system keyboard event.
+    CFTypeRef event = createKeyboard(kCFAllocatorDefault, 0, 0x07, 0x04, false, 0);
     CHECK(event, "the test must create real non-digitizer metadata events");
+    CHECK(eventType(event) == 3, "the metadata fixture must be a real keyboard event without digitizer contacts");
     return event;
 }
 static void TestMetadataWrappersAndStandaloneFinger(void) {
     UIWindow *w; InputPanel *p; MFHUDInputBridge *b = NewBridge(&w, &p);
     CFTypeRef wrapper = Metadata(), hand = Hand(424, YES), metadata = Metadata();
-    // The first hand child is a vendor event; the contact is further down.
+    // The first wrapper child is non-digitizer; the contact is further down.
     appendEvent(wrapper, metadata, 0); appendEvent(wrapper, hand, 0);
     CFRelease(metadata); CFRelease(hand);
     Deliver(b, w, p, wrapper, 3, 0, CGPointMake(80, 100)); CFRelease(wrapper);
@@ -613,8 +618,10 @@ static void TestTitleCanReachEveryScreenEdge(void) {
         dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_GLOBAL);
         createDigitizer = (CreateDigitizer)dlsym(RTLD_DEFAULT, "IOHIDEventCreateDigitizerEvent");
         appendEvent = (AppendEvent)dlsym(RTLD_DEFAULT, "IOHIDEventAppendEvent");
-        createVendor = (CreateVendor)dlsym(RTLD_DEFAULT, "IOHIDEventCreateVendorDefinedEvent");
-        CHECK(createDigitizer && appendEvent && createVendor, "real IOKit event factories must be available");
+        createKeyboard = (CreateKeyboard)dlsym(RTLD_DEFAULT, "IOHIDEventCreateKeyboardEvent");
+        eventType = (uint32_t (*)(CFTypeRef))dlsym(RTLD_DEFAULT, "IOHIDEventGetType");
+        CHECK(createDigitizer && appendEvent && createKeyboard && eventType,
+              "real IOKit event factories and type inspection must be available");
         TestDeviceIndexOwnsTheCompleteGesture();
         TestOnlyTheIndexDeterminesContactValidity();
         TestDeviceTapReleasesDespiteChangingAXIdentity();
