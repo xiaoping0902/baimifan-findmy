@@ -54,15 +54,16 @@ static void TestDrawingReadSessions(void) {
         [drawing setValue:@YES forKey:@"lootStatsKnown"];
     };
     auto empty = [&] {
-        for (NSString *key in @[@"ueActors", @"personAttrs", @"personHealth", @"smoothCache", @"classNameByID", @"kindHistogram", @"ueActorAddrs"])
-            if ([[drawing valueForKey:key] count] != 0) return false;
+        for (NSString *key in @[@"ueActors", @"personAttrs", @"personHealth", @"smoothCache", @"classNameByID", @"kindHistogram"])
+            if ([(NSDictionary *)[drawing valueForKey:key] count] != 0) return false;
+        if ([(NSArray *)[drawing valueForKey:@"ueActorAddrs"] count] != 0) return false;
         for (NSString *key in @[@"ueCursor", @"lastCameraAt", @"ueResolveGoodAt", @"classResolved", @"classFailed", @"classifySticky", @"geometrySettingsKnown", @"lootStatsKnown"])
             if ([[drawing valueForKey:key] doubleValue] != 0) return false;
         return [drawing valueForKey:@"ueResolve"] == nil && [drawing valueForKey:@"ueResolveGood"] == nil;
     };
     seed();
     [drawing acquireUE4FrameWithSize:CGSizeMake(640,720) camera:NULL entities:NULL loot:NULL source:NULL];
-    CHECK([[drawing valueForKey:@"ueActors"] count] == 1,
+    CHECK([(NSDictionary *)[drawing valueForKey:@"ueActors"] count] == 1,
           "an unchanged closed session retains short read-failure grace");
     backend.kfdRoot += 0x1000;
     [drawing acquireUE4FrameWithSize:CGSizeMake(640,720) camera:NULL entities:NULL loot:NULL source:NULL];
@@ -75,7 +76,7 @@ static void TestDrawingReadSessions(void) {
     first.gworld = 0x120000000ULL; first.level = 0x130000000ULL;
     [drawing synchronizeReadSessionWithResult:first]; seed();
     [drawing synchronizeReadSessionWithResult:first];
-    CHECK([[drawing valueForKey:@"ueActors"] count] == 1, "an unchanged world retains its actor cache");
+    CHECK([(NSDictionary *)[drawing valueForKey:@"ueActors"] count] == 1, "an unchanged world retains its actor cache");
     MFUEResolveResult *loading = [MFUEResolveResult new];
     loading.gworld = 0x140000000ULL; loading.brokenAt = @"new world still loading";
     [drawing synchronizeReadSessionWithResult:loading];
