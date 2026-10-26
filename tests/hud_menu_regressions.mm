@@ -122,9 +122,12 @@ static void ResizeProtectedMenu(UIWindow *window, MFHUDCaptureShieldView *shield
     shield.center = CGPointMake(physical.width / 2, physical.height / 2);
     shield.transform = CGAffineTransformMakeRotation(angle);
     // Match the production host's layout, including while already rotated.
-    overlay.bounds = shield.bounds;
-    overlay.center = CGPointMake(panel.width / 2, panel.height / 2);
-    [window layoutIfNeeded]; [overlay layoutIfNeeded];
+    [window layoutIfNeeded];
+    [shield setNeedsLayout]; [shield layoutIfNeeded];
+    const CGRect content = shield.contentView.bounds;
+    overlay.bounds = (CGRect){CGPointZero, content.size};
+    overlay.center = CGPointMake(CGRectGetMidX(content), CGRectGetMidY(content));
+    [overlay layoutIfNeeded];
     fprintf(stderr, "TRACE: angle=%.17g panel=%s window=%s root=%s shieldBounds=%s shieldFrame=%s content=%s overlayFrame=%s overlayBounds=%s\n",
             (double)angle, NSStringFromCGSize(panel).UTF8String,
             NSStringFromCGRect(window.bounds).UTF8String,
@@ -206,7 +209,9 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
                   !CGRectIsEmpty(overlay.headerDragRect) && !CGRectIsNull(overlay.captureRect),
                   "native island expansion must restore the same complete, draggable panel");
         }
-        const CGFloat angles[] = {(CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0};
+        const CGFloat angles[] = {(CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0,
+                                 (CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0,
+                                 (CGFloat)M_PI_2, (CGFloat)-M_PI_2, 0};
         for (CGFloat angle : angles) {
             ResizeProtectedMenu(window, shield, overlay, panel, angle);
             Frame(menu, overlay); Frame(menu, overlay);

@@ -1354,9 +1354,15 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
     self.menuContent.bounds = (CGRect){CGPointZero, panel};
     self.menuContent.center = CGPointMake(physical.width/2, physical.height/2);
     self.menuContent.transform = CGAffineTransformMakeRotation(angle);
-    self.menuOverlay.bounds = self.menuContent.bounds;
-    self.menuOverlay.center = CGPointMake(panel.width/2, panel.height/2);
-    [window layoutIfNeeded]; [self.menuOverlay layoutIfNeeded];
+    // UIKit may round the secure canvas to display pixels during rotation.
+    // Finish its layout before sizing Metal; otherwise flexible autoresizing
+    // can add a second pixel adjustment after the explicit panel assignment.
+    [window layoutIfNeeded];
+    [self.menuContent setNeedsLayout]; [self.menuContent layoutIfNeeded];
+    const CGRect content = self.menuContent.contentView.bounds;
+    self.menuOverlay.bounds = (CGRect){CGPointZero, content.size};
+    self.menuOverlay.center = CGPointMake(CGRectGetMidX(content), CGRectGetMidY(content));
+    [self.menuOverlay layoutIfNeeded];
     [self.menuOverlay requestRedraw];
     [CATransaction flush];
     if (self.menuHost && [self nativeContextIDForWindow:window] != self.menuHost.contextID)
