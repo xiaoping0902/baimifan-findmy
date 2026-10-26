@@ -564,14 +564,14 @@ static void TestSyntheticDrawing(void) {
           "loot statistics must render independently while all loot markers are hidden");
     CHECK(SolidVertices(data)==0,"item statistics must contain only outlined names without any panel background");
     MFEntity *heart=Entity(1000,0,YES,NO), *watch=Entity(1000,10,YES,NO), *cup=Entity(1000,20,YES,NO);
-    MFEntity *purple=Entity(1000,30,YES,NO), *blue=Entity(1000,40,YES,NO), *green=Entity(1000,50,YES,NO);
+    MFEntity *purple=Entity(1000,30,YES,NO), *blueItem=Entity(1000,40,YES,NO), *greenItem=Entity(1000,50,YES,NO);
     heart.name=@"Heart of Africa"; heart.level=6; heart.value=100;
     watch.name=@"Pocket Watch"; watch.level=5; watch.value=200;
     cup.name=@"Gold Cup"; cup.level=5; cup.value=100;
     purple.name=@"Purple Item"; purple.level=4;
-    blue.name=@"Blue Item"; blue.level=3;
-    green.name=@"Green Item"; green.level=2;
-    sLoot=@[green,blue,purple,cup,watch,heart];
+    blueItem.name=@"Blue Item"; blueItem.level=3;
+    greenItem.name=@"Green Item"; greenItem.level=2;
+    sLoot=@[greenItem,blueItem,purple,cup,watch,heart];
     Frame(drawing,overlay);data=Frame(drawing,overlay);
     for(int level=3;level<=6;++level)
         CHECK(ColoredVertices(data,qualityColors[level])>0,
