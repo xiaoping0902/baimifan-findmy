@@ -285,7 +285,8 @@ static void TestSyntheticDrawing(void) {
     const ImU32 redLine=packed(MFColorSlotSkeleton), greenLine=packed(MFColorSlotBotSkeleton);
     data=Frame(drawing,overlay,1.f/120);
     const float firstBot=ColoredWidth(data,greenLine), firstReal=ColoredWidth(data,redLine);
-    real.screen.x-=30; bot.screen.x+=30;
+    MFPoint2D movedReal=real.screen,movedBot=bot.screen;
+    movedReal.x-=30;movedBot.x+=30;real.screen=movedReal;bot.screen=movedBot;
     data=Frame(drawing,overlay,1.f/120);
     CHECK(fabsf(ColoredWidth(data,greenLine)-firstBot)<.01f &&
           fabsf(ColoredWidth(data,redLine)-firstReal)>20,
