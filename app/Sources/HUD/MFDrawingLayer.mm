@@ -4,6 +4,7 @@
 #import "MFDrawingLayer.h"
 #import "../Render/MFOverlayView.h"
 #import "../Game/MFGameReader.h"
+#include "../Game/MFUEHealth.h"
 #import "../Game/MFUEReader.h"
 #import "../Game/MFSettings.h"
 #import "../Game/MFUEGNames.h"       /* [M5.85] 类名解析（FNamePool，已核实布局） */
@@ -109,7 +110,8 @@ static const NSTimeInterval kMFUEHistogramInterval = 15.0; // 类名直方图多
  */
 static const NSTimeInterval kMFUEResolveGrace = 3.0;      // 链解析失败时沿用上次成功结果
 static const NSTimeInterval kMFUECameraGrace  = 1.5;      // [M5.177] 0.5→1.5：相机读失败时沿用上一帧更久
-static const NSTimeInterval kMFUEPersonAttrTTL = 1.2;     // 人物属性缓存（队伍/头甲/血量/武器/UIN/名字）
+static const NSTimeInterval kMFUEPersonAttrTTL = 1.2;     // 队伍、装备、武器、UIN、名字
+static const NSTimeInterval kMFUEPersonHealthTTL = 1.0 / 15.0; // 当前血量独立刷新
 static const NSTimeInterval kMFUEPersonPosInterval = 0.012; // 人物坐标（约 80Hz 上限，够跟手了）
 
 @interface MFDrawingLayer ()
@@ -312,6 +314,12 @@ static ImVec2 MFTextSize(const char *s, float size) {
     return ImVec2(t.x * k, t.y * k);
 }
 static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char *s) {
+    // A narrow dark outline keeps the labels legible on bright scenery.
+    const ImU32 stroke = IM_COL32(0, 0, 0, 190);
+    dl->AddText(ImGui::GetFont(), MAX(8.0f, size), ImVec2(pos.x - 1, pos.y), stroke, s);
+    dl->AddText(ImGui::GetFont(), MAX(8.0f, size), ImVec2(pos.x + 1, pos.y), stroke, s);
+    dl->AddText(ImGui::GetFont(), MAX(8.0f, size), ImVec2(pos.x, pos.y - 1), stroke, s);
+    dl->AddText(ImGui::GetFont(), MAX(8.0f, size), ImVec2(pos.x, pos.y + 1), stroke, s);
     dl->AddText(ImGui::GetFont(), MAX(8.0f, size), pos, col, s);
 }
 
@@ -350,6 +358,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
 
     /* ── [M5.173] 稳定化与人物属性 ───────────────────── */
     NSMutableDictionary<NSNumber *, NSDictionary *> *_personAttrs;  // actor → 属性缓存
+    NSMutableDictionary<NSNumber *, NSDictionary *> *_personHealth; // 15 Hz health cache
     MFUEResolveResult *_ueResolveGood;      // 上一次成功的链解析（失败时沿用）
     CFTimeInterval _ueResolveGoodAt;
     MFCamera _lastCamera;                   // 上一帧的相机（读失败时沿用）
@@ -369,6 +378,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         _classNameByID = [NSMutableDictionary dictionary];
         _kindHistogram = [NSMutableDictionary dictionary];
         _personAttrs = [NSMutableDictionary dictionary];
+        _personHealth = [NSMutableDictionary dictionary];
 
         /*
          * [M5.85] 把「名字索引 → 字符串」接给物资读取器。
@@ -651,6 +661,7 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         e.armorLevel    = fe.armor;
         e.backpackLevel = fe.bag;
         e.health        = fe.health;
+        e.maxHealth     = 100.0f; // Legacy v2 packet explicitly encodes HP on a 0..100 scale.
         e.uin           = fe.uin;
         e.weaponRawID   = fe.weaponId;
         if (fe.helmet || fe.armor || fe.bag) {
@@ -1037,12 +1048,6 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     if (outLoot) *outLoot = lootOut;
     if (outSource) *outSource = MFDrawSourceUE4;
 
-    /* [M5.183] 喂给面板的灵动岛：真人 / 人机 / 物资 */
-    {
-        int realN = 0, botN = 0;
-        for (MFEntity *e in ents) { if (e.isBot) botN++; else realN++; }
-        MFMenuPanelReportStats(realN, botN, (int)lootOut.count, YES, 0);
-    }
     return YES;
 }
 
@@ -1114,14 +1119,21 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     _camOK = NO;
 
     MFSettings *st = [MFSettings shared];
-    if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) { [self noteDrawingActivity:NO]; return; }
+    if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) {
+        MFMenuPanelReportStats(0, 0, 0, NO, 0);
+        [self noteDrawingActivity:NO]; return;
+    }
 
     const CGSize size = overlay.bounds.size;
-    if (size.width < 1 || size.height < 1) { [self noteDrawingActivity:NO]; return; }
+    if (size.width < 1 || size.height < 1) {
+        MFMenuPanelReportStats(0, 0, 0, NO, 0);
+        [self noteDrawingActivity:NO]; return;
+    }
 
     // ── 渲染自检：不碰游戏内存，纯合成数据 ──
     //   用途：在偏移校准之前，独立验证 ImGui → Metal → 透明层 → 投影 这条链。
     if (st.renderSelfTest) {
+        MFMenuPanelReportStats(0, 0, 0, NO, 0);
         [self runSelfTest:st overlay:overlay];
         [self noteDrawingActivity:YES];
         return;
@@ -1135,10 +1147,16 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
     MFDrawSource source = MFDrawSourceNone;
     _camOK = [self acquireFrameWithSize:size camera:&cam entities:&ents loot:&loot source:&source];
     _source = source;
-    if (!_camOK) { [self noteDrawingActivity:NO]; return; }
+    if (!_camOK) {
+        MFMenuPanelReportStats(0, 0, 0, NO, 0);
+        [self noteDrawingActivity:NO]; return;
+    }
 
     _entCount = ents.count;
     _lootCount = loot.count;
+    int realN = 0, botN = 0;
+    for (MFEntity *entity in ents) { if (entity.isBot) botN++; else realN++; }
+    MFMenuPanelReportStats(realN, botN, (int)loot.count, YES, 0);
 
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
     if (!dl) return;
@@ -1237,156 +1255,100 @@ static void MFText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char
         ? MFU32([st colorForSlot:MFColorSlotTeam], 0.9f)
         : MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.85f);
 
-    // 框
-    dl->AddRect(p1, p2, boxCol, 0.0f, 0, 1.5f);
-
-    /* ── 血条（[M5.2] 接线：三种样式 + 真实血量）──
-     * health < 0 = 未校准 → 按满格画（保持原占位行为，不显示假数据）
-     */
-    if (st.showHealth) {
-        /*
-         * [M5.173] 血量现在真的从 healthComp+0x258 读回来了。
-         *   · health < 0  → 未知，画满格（绝不把"没读到"画成空血）
-         *   · 带甲/护盾时读数可能 >100 → 钳到满格，不越界涂出去
-         */
-        const float ratioRaw = (e.health >= kMFHealthMin) ? (e.health / 100.0f) : 1.0f;
-        const float ratio = MIN(1.0f, MAX(0.0f, ratioRaw));
-        ImU32 hpCol = MFU32(ratio > 0.5f ? [UIColor systemGreenColor]
-                                         : [UIColor systemRedColor], 0.92f);
-
-        switch (st.healthBarStyle) {
-            case 0: {   /* 细线：贴在框底的一根 2px 线 */
-                ImVec2 b1(p1.x, p2.y + 1.0f), b2(p2.x, p2.y + 3.0f);
-                dl->AddRectFilled(b1, b2, IM_COL32(0, 0, 0, 150));
-                dl->AddRectFilled(b1, ImVec2(b1.x + (b2.x - b1.x) * ratio, b2.y), hpCol);
-                break;
-            }
-            case 1: {   /* 圆头：左侧竖条 + 圆角 */
-                float bw = MAX(3.0f, w * 0.13f);
-                ImVec2 b1(p1.x - bw - 3.0f, p1.y), b2(p1.x - 3.0f, p2.y);
-                dl->AddRectFilled(b1, b2, IM_COL32(0, 0, 0, 150), bw * 0.5f);
-                ImVec2 f2(b2.x, b1.y + (b2.y - b1.y) * ratio);
-                dl->AddRectFilled(ImVec2(b1.x, f2.y), f2, hpCol, bw * 0.5f);
-                break;
-            }
-            default: {  /* 分段：6 格，一格一格的 */
-                const int segs = 6;
-                float bw = MAX(3.0f, w * 0.13f);
-                float gap = 1.5f;
-                float totalH = p2.y - p1.y;
-                float segH = (totalH - gap * (segs - 1)) / segs;
-                float x1 = p1.x - bw - 3.0f, x2 = p1.x - 3.0f;
-                dl->AddRectFilled(ImVec2(x1, p1.y), ImVec2(x2, p2.y),
-                                  IM_COL32(0, 0, 0, 150), 1.0f);
-                for (int i = 0; i < segs; i++) {
-                    // 从下往上填：血量越低，顶部格越少
-                    float segTop = p2.y - (i + 1) * segH - i * gap;
-                    float fillTop = segTop + segH * (1.0f - MIN(1.0f, MAX(0.0f, ratio * segs - i)));
-                    if (ratio * segs <= i) continue;
-                    dl->AddRectFilled(ImVec2(x1 + 1, fillTop), ImVec2(x2 - 1, segTop + segH),
-                                      hpCol, 1.0f);
-                }
-                break;
-            }
-        }
-    }
-
-    /* ── 距离（[M5.2] 用 fontInfo 字号）── */
-    if (st.showDistance) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "[%.0fm]", e.distanceMeters);
-        ImVec2 ts = MFTextSize(buf, st.fontInfo);
-        MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, p2.y + 2.0f), boxCol, buf);
-    }
-
-    /* ══════════ [M5.148] 文字块：按小玉的排版自下而上堆 ══════════
-     *      手持
-     *      头X 甲Y 包Z
-     *      队N : 人物ID
-     *      名字   血条
-     *   框顶 = 骨骼头，框底 = 骨骼脚，距离在框下面
-     */
-    {
-        const char *name = e.name.length ? e.name.UTF8String
-                          : (e.isBot ? "人机" : "敌人");
-
-        char lHeld[32], lArmor[112], lTeam[48], lName[96];
-        {
-            const char *wn = e.weaponRawID ? MFItemNameForID(e.weaponRawID) : NULL;
-            if (wn)              snprintf(lHeld, sizeof(lHeld), "持 %s", wn);
-            else if (e.weaponId) snprintf(lHeld, sizeof(lHeld), "持 W%d", e.weaponId);
-            else                 snprintf(lHeld, sizeof(lHeld), "持 空手");
-        }
-
-        ImU32 armorCol = MFU32([st colorForSlot:MFColorSlotArmor]);
-        if (e.equipKnown) {
-            int h = e.helmetLevel, a = e.armorLevel, b = e.backpackLevel;
-            /* [M5.176] 带耐久：头5(45/45) 甲5(30/30) 包0 */
-            char hPart[40], aPart[40];
-            if (e.helmetMaxHP > 0.5f)
-                snprintf(hPart, sizeof(hPart), "头%d(%.0f/%.0f)", h, e.helmetHP, e.helmetMaxHP);
-            else
-                snprintf(hPart, sizeof(hPart), "头%d", h);
-            if (e.armorMaxHP > 0.5f)
-                snprintf(aPart, sizeof(aPart), "甲%d(%.0f/%.0f)", a, e.armorHP, e.armorMaxHP);
-            else
-                snprintf(aPart, sizeof(aPart), "甲%d", a);
-            snprintf(lArmor, sizeof(lArmor), "%s %s 包%d", hPart, aPart, b);
-            switch (MAX(h, MAX(a, b))) {
-                case 2: armorCol = IM_COL32(0, 255, 0, 235); break;
-                case 3: armorCol = IM_COL32(135, 206, 250, 235); break;
-                case 4: armorCol = IM_COL32(122, 103, 238, 235); break;
-                case 5: armorCol = IM_COL32(255, 219, 0, 235); break;
-                case 6: armorCol = IM_COL32(255, 0, 0, 235); break;
-                default: break;
-            }
-        } else {
-            snprintf(lArmor, sizeof(lArmor), "头- 甲- 包-");
-        }
-
-        if (e.uin) snprintf(lTeam, sizeof(lTeam), "队%d : %llu", e.teamId,
-                            (unsigned long long)e.uin);
-        else       snprintf(lTeam, sizeof(lTeam), "队%d", e.teamId);
-
-        if (e.health >= kMFHealthMin)
-            snprintf(lName, sizeof(lName), "%s  %d", name, e.health);
-        else
-            snprintf(lName, sizeof(lName), "%s", name);
-
-        const float lh = MAX(13.0f, st.fontInfo + 2.0f);
-        const float topY0 = p1.y - 4.0f - lh * (st.showHeld ? 3.0f : 3.0f);
-        float y = topY0;
-
-        if (st.showHeld) {
-            ImVec2 ts = MFTextSize(lHeld, st.fontInfo);
-            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y),
-                   MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.9f), lHeld);
-        }
-        if (st.showArmor) {
-            ImVec2 ts = MFTextSize(lArmor, st.fontInfo);
-            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y + lh), armorCol, lArmor);
-        }
-        if (st.showTeam) {
-            ImVec2 ts = MFTextSize(lTeam, st.fontInfo);
-            MFText(dl, st.fontInfo, ImVec2(pt.x - ts.x * 0.5f, y + lh * 2.0f),
-                   MFU32([st colorForSlot:MFColorSlotTeam]), lTeam);
-        }
-        if (st.showName) {
-            ImVec2 ts = MFTextSize(lName, st.fontPerson);
-            MFText(dl, st.fontPerson, ImVec2(pt.x - ts.x * 0.5f, y + lh * 3.0f),
-                   boxCol, lName);
-        }
-    }
-
-    /*
-     * ── 射线 ──
-     * [M5.183] 起点改成【灵动岛中心】，和小玉原版一致：
-     *   岛在顶部中间，射线从岛上射出去，展开成面板时自动跟随岛的位置/缩放。
-     */
+    // Rows collapse when their switches are off. The final name/health row
+    // stays above the projected head; distance stays below the feet.
+    const float lineHeight = MAX(14.0f, MAX(st.fontInfo, st.fontPerson) + 3.0f);
+    const bool nameHealthRow = st.showName || st.showHealth;
+    const int rowCount = (st.showHeld ? 1 : 0) + (st.showArmor ? 1 : 0) +
+                         (st.showTeam ? 1 : 0) + (nameHealthRow ? 1 : 0);
+    const float labelTop = p1.y - 6.0f - rowCount * lineHeight;
+    const float gearY = labelTop + (st.showHeld ? lineHeight : 0.0f);
+    const ImVec2 tracerTarget(pt.x, st.showArmor ? gearY + st.fontInfo * 0.5f
+                                               : (rowCount ? labelTop + st.fontInfo * 0.5f : p1.y));
     if (st.showTracer) {
-        const ImVec2 tracerOrigin = MFMenuPanelIslandCenter(screen);
-        dl->AddLine(tracerOrigin, pt,
+        dl->AddLine(MFMenuPanelIslandCenter(screen), tracerTarget,
                     MFU32([st colorForSlot:MFColorSlotPersonInfo], 0.55f), 1.0f);
+    }
+
+    char held[256], gear[128], team[64];
+    const char *weapon = e.weaponRawID ? MFItemNameForID(e.weaponRawID) : NULL;
+    snprintf(held, sizeof(held), "%s", weapon ?: "武器未知");
+    ImU32 gearColor = MFU32([st colorForSlot:MFColorSlotArmor]);
+    if (e.equipKnown) {
+        char head[48], armor[48];
+        if (e.helmetMaxHP > 0.5f && isfinite(e.helmetHP))
+            snprintf(head, sizeof(head), "%d头%.0f", e.helmetLevel, MAX(0.0f, e.helmetHP));
+        else snprintf(head, sizeof(head), "%d头%s", e.helmetLevel, e.helmetLevel ? "?" : "");
+        if (e.armorMaxHP > 0.5f && isfinite(e.armorHP))
+            snprintf(armor, sizeof(armor), "%d甲%.0f", e.armorLevel, MAX(0.0f, e.armorHP));
+        else snprintf(armor, sizeof(armor), "%d甲%s", e.armorLevel, e.armorLevel ? "?" : "");
+        snprintf(gear, sizeof(gear), "%s  %s  %d包", head, armor, e.backpackLevel);
+        switch (MAX(e.helmetLevel, MAX(e.armorLevel, e.backpackLevel))) {
+            case 2: gearColor = IM_COL32(75, 222, 128, 245); break;
+            case 3: gearColor = IM_COL32(135, 206, 250, 245); break;
+            case 4: gearColor = IM_COL32(167, 139, 250, 245); break;
+            case 5: gearColor = IM_COL32(255, 219, 0, 245); break;
+            case 6: gearColor = IM_COL32(255, 100, 100, 245); break;
+            default: break;
+        }
+    } else snprintf(gear, sizeof(gear), "头?  甲?  包?");
+    if (e.uin) snprintf(team, sizeof(team), "%d : %llu", e.teamId, (unsigned long long)e.uin);
+    else snprintf(team, sizeof(team), "%d : ?", e.teamId);
+
+    float rowY = labelTop;
+    auto textRow = [&](const char *text, ImU32 color) {
+        const ImVec2 measured = MFTextSize(text, st.fontInfo);
+        MFText(dl, st.fontInfo, ImVec2(pt.x - measured.x * 0.5f, rowY), color, text);
+        rowY += lineHeight;
+    };
+    if (st.showHeld) textRow(held, boxCol);
+    if (st.showArmor) textRow(gear, gearColor);
+    if (st.showTeam) textRow(team, MFU32([st colorForSlot:MFColorSlotTeam]));
+    if (nameHealthRow) {
+        const char *name = e.name.length ? e.name.UTF8String : (e.isBot ? "人机" : "敌人");
+        const float nameWidth = st.showName ? MFTextSize(name, st.fontPerson).x : 0;
+        const MFUEHealth::Snapshot hp{(float)e.health, e.maxHealth};
+        char number[32];
+        if (hp.known()) snprintf(number, sizeof(number), "%.0f", hp.current);
+        else snprintf(number, sizeof(number), "?");
+        const float barWidth = 64.0f;
+        const float gap = st.showName && st.showHealth ? 6.0f : 0.0f;
+        const float healthWidth = st.showHealth ? barWidth + 5.0f + MFTextSize(number, st.fontInfo).x : 0;
+        float x = pt.x - (nameWidth + gap + healthWidth) * 0.5f;
+        if (st.showName) MFText(dl, st.fontPerson, ImVec2(x, rowY), boxCol, name);
+        if (st.showHealth) {
+            x += nameWidth + gap;
+            const NSInteger style = MIN(2, MAX(0, st.healthBarStyle));
+            const float height = style == 0 ? 3.0f : 6.0f;
+            const float radius = style == 1 ? height * 0.5f : 0.0f;
+            const float y = rowY + MAX(st.fontPerson, st.fontInfo) * 0.5f - height * 0.5f;
+            const ImVec2 a(x, y), b(x + barWidth, y + height);
+            dl->AddRectFilled(ImVec2(a.x - 1, a.y - 1), ImVec2(b.x + 1, b.y + 1), IM_COL32(0, 0, 0, 210), radius + 1);
+            dl->AddRectFilled(a, b, IM_COL32(70, 76, 86, 210), radius);
+            if (hp.known() && hp.current > 0) {
+                const ImU32 color = hp.ratio() > 0.5f ? IM_COL32(52, 211, 153, 245)
+                                                     : IM_COL32(248, 113, 113, 245);
+                if (style == 2) {
+                    const int segments = 8;
+                    const float stride = barWidth / segments;
+                    for (int i = 0; i < segments; ++i) {
+                        const float fraction = MIN(1.0f, MAX(0.0f, hp.ratio() * segments - i));
+                        if (fraction <= 0) break;
+                        const float left = a.x + i * stride;
+                        dl->AddRectFilled(ImVec2(left, a.y), ImVec2(left + (stride - 1.0f) * fraction, b.y), color);
+                    }
+                } else {
+                    dl->AddRectFilled(a, ImVec2(a.x + barWidth * hp.ratio(), b.y), color, radius);
+                }
+            }
+            MFText(dl, st.fontInfo, ImVec2(b.x + 5, rowY), boxCol, number);
+        }
+    }
+    if (st.showDistance) {
+        char distance[32];
+        snprintf(distance, sizeof(distance), "%.0fm", e.distanceMeters);
+        const ImVec2 measured = MFTextSize(distance, st.fontInfo);
+        MFText(dl, st.fontInfo, ImVec2(pt.x - measured.x * 0.5f, p2.y + 3.0f), boxCol, distance);
     }
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
@@ -1600,7 +1562,17 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     e.isBot         = [a[@"bot"] boolValue];
     e.teamId        = [a[@"team"] intValue];
     e.uin           = [a[@"uin"] unsignedLongLongValue];
-    e.health        = [a[@"hp"] intValue];
+    NSDictionary *health = _personHealth[key];
+    if (!health || now - [health[@"t"] doubleValue] >= kMFUEPersonHealthTTL) {
+        const auto hp = MFUEHealth::Read(actor, [&](uint64_t address, void *out, size_t size) {
+            return (bool)[rb readRemote:address into:out size:size];
+        });
+        health = @{@"t": @(now), @"hp": @(hp.current), @"max": @(hp.maximum)};
+        if (_personHealth.count > 512) [_personHealth removeAllObjects];
+        _personHealth[key] = health;
+    }
+    e.health        = [health[@"hp"] floatValue];
+    e.maxHealth     = [health[@"max"] floatValue];
     e.helmetLevel   = [a[@"h"] intValue];
     e.armorLevel    = [a[@"a"] intValue];
     e.backpackLevel = [a[@"b"] intValue];
@@ -1625,7 +1597,6 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     d[@"t"]    = @(now);
     d[@"skip"] = @NO;
-    d[@"hp"]   = @(-1);        // -1 = 未知 → 绘制层按满格画，不显示假数字
     d[@"bot"]  = @NO;          // 读失败一律"当真人画"：宁可多一个框，也不能让人凭空消失
     d[@"team"] = @0;
     d[@"uin"]  = @0;
@@ -1726,15 +1697,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         return d;
     }
 
-    /* ⑥ 血量：healthComp(+0x10B8) → +0x258 float */
-    uint64_t hc = 0;
-    if ([rb readU64:actor + kMFUE_Pawn_HealthComponent out:&hc] && MFUEIsValidPtr(hc)) {
-        float hp = 0.0f;
-        if ([rb readRemote:hc + kMFUE_Health_Value into:&hp size:4] &&
-            isfinite(hp) && hp >= 0.0f && hp <= kMFUE_HealthMax) {
-            d[@"hp"] = @((int)lroundf(hp));
-        }
-    }
+    /* ⑥ 当前血量由 fillPersonFields 的独立 15 Hz 缓存读取。 */
 
     /* ⑦ 手持：combat(+0x1020) → +0x4D8，空则 +0x588 → +0x838 */
     uint64_t combat = 0;
@@ -2008,12 +1971,13 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
 #pragma mark - 统计窗
 
 - (void)drawStats:(MFSettings *)st loot:(NSArray<MFEntity *> *)loot {
-    // 已证：程序里有独立的「物资统计窗口」，等级/价值分组展示
-    static BOOL open = YES;
+    // Visibility belongs to showLootStats. The drawing overlay passes touches
+    // through, so it must not offer an unreachable close/resize control.
     ImGui::SetNextWindowSize(ImVec2(220, 160), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(24, 120), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("物资统计", &open,
+    if (ImGui::Begin("物资统计", nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_AlwaysAutoResize)) {
         NSUInteger byLevel[7] = {0};
         long long totalValue = 0;
@@ -2032,8 +1996,6 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         if (byLevel[0]) ImGui::TextDisabled("其他：%lu", (unsigned long)byLevel[0]);
         ImGui::Separator();
         ImGui::Text("总价值：%lld", totalValue);
-        // ImGui 的格式化不认 %@，必须转成 UTF-8 C 串
-        ImGui::TextDisabled("%s", [[MFOffsets shared] summary].UTF8String);
     }
     ImGui::End();
 }

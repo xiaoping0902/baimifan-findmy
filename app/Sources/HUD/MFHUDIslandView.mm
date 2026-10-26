@@ -10,9 +10,11 @@
     UITouch *_trackingTouch;
     CGPoint _touchStart;
     BOOL _touchMoved;
+    NSInteger _realCount, _botCount, _lootCount;
+    BOOL _cameraValid;
 }
 
-+ (CGSize)preferredSize { return CGSizeMake(142.0, 36.0); }
++ (CGSize)preferredSize { return CGSizeMake(212.0, 44.0); }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) [self configureIsland];
@@ -48,15 +50,14 @@
 
     _titleLabel = [UILabel new];
     _titleLabel.userInteractionEnabled = NO;
-    _titleLabel.text = @"灵动岛";
-    _titleLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+    _titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.5 weight:UIFontWeightSemibold];
     _titleLabel.textColor = [UIColor colorWithWhite:0.97 alpha:1.0];
     [self addSubview:_titleLabel];
 
     _actionLabel = [UILabel new];
     _actionLabel.userInteractionEnabled = NO;
-    _actionLabel.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
-    _actionLabel.textColor = [UIColor colorWithWhite:0.66 alpha:1.0];
+    _actionLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightMedium];
+    _actionLabel.textColor = [UIColor colorWithWhite:0.83 alpha:1.0];
     [self addSubview:_actionLabel];
 
     _chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
@@ -68,7 +69,7 @@
     self.isAccessibilityElement = YES;
     self.accessibilityTraits = UIAccessibilityTraitButton;
     self.accessibilityIdentifier = @"hud.dynamicIsland";
-    self.accessibilityLabel = @"灵动岛";
+    self.accessibilityLabel = @"小玉灵动岛";
     [self setExpanded:NO animated:NO];
 }
 
@@ -83,18 +84,17 @@
                                                    cornerRadius:self.layer.cornerRadius].CGPath;
     _statusDot.frame = CGRectMake(13.0, midY - 2.5, 5.0, 5.0);
     const CGFloat labelWidth = MAX(0.0, width - 51.0);
-    _titleLabel.frame = CGRectMake(26.0, midY - 13.0, labelWidth, 13.0);
-    _actionLabel.frame = CGRectMake(26.0, midY + 1.0, labelWidth, 11.0);
+    _titleLabel.frame = CGRectMake(26.0, midY - 16.0, labelWidth, 17.0);
+    _actionLabel.frame = CGRectMake(26.0, midY + 2.0, labelWidth, 15.0);
     _chevron.frame = CGRectMake(width - 23.0, midY - 4.0, 9.0, 8.0);
 }
 
 - (void)setExpanded:(BOOL)expanded animated:(BOOL)animated {
     if (_expanded == expanded && _actionLabel.text) return;
     _expanded = expanded;
-    self.accessibilityValue = expanded ? @"已展开" : @"已收起";
     self.accessibilityHint = expanded ? @"轻点收起面板" : @"轻点展开面板";
     void (^update)(void) = ^{
-        self->_actionLabel.text = expanded ? @"轻点收起" : @"轻点展开";
+        [self updateLabels];
         self->_chevron.transform = expanded ? CGAffineTransformMakeRotation((CGFloat)M_PI) :
                                              CGAffineTransformIdentity;
     };
@@ -107,6 +107,34 @@
                               UIViewAnimationOptionBeginFromCurrentState |
                               UIViewAnimationOptionAllowUserInteraction
                    animations:update completion:nil];
+}
+
+- (void)updateLabels {
+    NSString *action = _expanded ? @"收起" : @"展开";
+    NSString *state = _expanded ? @"已展开" : @"已收起";
+    if (_cameraValid) {
+        _titleLabel.text = [NSString stringWithFormat:@"真人 %ld  人机 %ld", (long)_realCount, (long)_botCount];
+        _actionLabel.text = [NSString stringWithFormat:@"物资 %ld · %@", (long)_lootCount, action];
+        self.accessibilityValue = [NSString stringWithFormat:@"%@，真人%ld，人机%ld，物资%ld",
+                                   state, (long)_realCount, (long)_botCount, (long)_lootCount];
+    } else {
+        _titleLabel.text = @"小玉 · 等待画面";
+        _actionLabel.text = [@"轻点" stringByAppendingString:action];
+        self.accessibilityValue = state;
+    }
+    _statusDot.backgroundColor = _cameraValid ?
+        [UIColor colorWithRed:0.49 green:0.91 blue:0.77 alpha:1.0] :
+        [UIColor colorWithWhite:0.55 alpha:1.0];
+}
+
+- (void)updateRealCount:(NSInteger)real botCount:(NSInteger)bot
+             lootCount:(NSInteger)loot cameraValid:(BOOL)cameraValid {
+    real = MAX(0, MIN(real, 999)); bot = MAX(0, MIN(bot, 999));
+    loot = MAX(0, MIN(loot, 9999));
+    if (_titleLabel.text && _realCount == real && _botCount == bot &&
+        _lootCount == loot && _cameraValid == cameraValid) return;
+    _realCount = real; _botCount = bot; _lootCount = loot; _cameraValid = cameraValid;
+    [self updateLabels];
 }
 
 - (void)setPressed:(BOOL)pressed animated:(BOOL)animated {

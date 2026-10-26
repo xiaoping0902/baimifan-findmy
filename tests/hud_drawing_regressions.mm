@@ -73,6 +73,40 @@ static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay) {
     return ImGui::GetDrawData();
 }
 
+static float ColoredWidth(ImDrawData *data, ImU32 color) {
+    float left = INFINITY, right = -INFINITY;
+    for (int list = 0; list < data->CmdLists.Size; ++list) {
+        for (const ImDrawVert &vertex : data->CmdLists[list]->VtxBuffer) {
+            if (vertex.col == color) { left = fminf(left, vertex.pos.x); right = fmaxf(right, vertex.pos.x); }
+        }
+    }
+    return std::isfinite(left) ? right - left : 0;
+}
+
+static float ColoredBottom(ImDrawData *data, ImU32 color) {
+    float bottom = -INFINITY;
+    for (int list = 0; list < data->CmdLists.Size; ++list)
+        for (const ImDrawVert &vertex : data->CmdLists[list]->VtxBuffer)
+            if (vertex.col == color) bottom = fmaxf(bottom, vertex.pos.y);
+    return bottom;
+}
+
+static float ColoredHeight(ImDrawData *data, ImU32 color) {
+    float top = INFINITY, bottom = -INFINITY;
+    for (int list = 0; list < data->CmdLists.Size; ++list)
+        for (const ImDrawVert &vertex : data->CmdLists[list]->VtxBuffer)
+            if (vertex.col == color) { top = fminf(top, vertex.pos.y); bottom = fmaxf(bottom, vertex.pos.y); }
+    return std::isfinite(top) ? bottom - top : 0;
+}
+
+static int ColoredVertices(ImDrawData *data, ImU32 color) {
+    int count = 0;
+    for (int list = 0; list < data->CmdLists.Size; ++list)
+        for (const ImDrawVert &vertex : data->CmdLists[list]->VtxBuffer)
+            if (vertex.col == color) ++count;
+    return count;
+}
+
 static void TestSyntheticDrawing(void) {
     MFGameReader *reader = [MFGameReader shared];
     reader.targetTaskPort = MACH_PORT_NULL;
@@ -90,6 +124,9 @@ static void TestSyntheticDrawing(void) {
     settings.renderSelfTest = NO;
     settings.showName = settings.showArmor = settings.showHealth = NO;
     settings.showDistance = settings.showTeam = NO;
+    settings.showHeld = settings.showSkeleton = NO;
+    settings.showTracer = YES;
+
     [MFDrawingLayer setEnabled:YES];
     MFExternalFeed *feed = [MFExternalFeed shared];
     MFOverlayView *overlay = [[MFOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 720)
@@ -132,6 +169,68 @@ static void TestSyntheticDrawing(void) {
     }
     CHECK(visibleVertex, "synthetic drawing must generate a nontransparent vertex inside the logical screen");
 
+    // Damage must change actual colored geometry; unknown data must not become
+    // a fabricated full bar. These colors belong only to the health fill.
+    MFEntity *patient = Entity(1000, 0, NO, NO);
+    patient.health = 100; patient.maxHealth = 100;
+    sEntities = @[patient]; settings.showTracer = NO; settings.showHealth = YES;
+    const ImU32 healthyColor = IM_COL32(52, 211, 153, 245);
+    const ImU32 injuredColor = IM_COL32(248, 113, 113, 245);
+    const float fullWidth = ColoredWidth(Frame(drawing, overlay), healthyColor);
+    patient.health = 25;
+    const float quarterWidth = ColoredWidth(Frame(drawing, overlay), injuredColor);
+    CHECK(fullWidth > 50 && quarterWidth > 10 && fabsf(quarterWidth / fullWidth - 0.25f) < 0.035f,
+          "actual health fill must shrink to a quarter at 25/100 HP");
+    patient.health = 50; patient.maxHealth = 200;
+    const float quarterOf200 = ColoredWidth(Frame(drawing, overlay), injuredColor);
+    CHECK(fabsf(quarterOf200 - quarterWidth) < 0.1f, "actual maximum HP must control the fill width");
+    patient.health = -1; patient.maxHealth = 0;
+    data = Frame(drawing, overlay);
+    CHECK(ColoredWidth(data, healthyColor) == 0 && ColoredWidth(data, injuredColor) == 0,
+          "unavailable health must have no colored fill");
+    patient.health = 100; patient.maxHealth = 100;
+    settings.healthBarStyle = 0;
+    data = Frame(drawing, overlay);
+    const float thinHeight = ColoredHeight(data, healthyColor);
+    const int solidVertices = ColoredVertices(data, healthyColor);
+    settings.healthBarStyle = 1;
+    CHECK(ColoredHeight(Frame(drawing, overlay), healthyColor) > thinHeight + 2,
+          "capsule health style must produce a thicker readable bar");
+    settings.healthBarStyle = 2;
+    data = Frame(drawing, overlay);
+    const int segmentedFullVertices = ColoredVertices(data, healthyColor);
+    CHECK(segmentedFullVertices > solidVertices,
+          "segmented health style must render separate fill segments");
+    patient.health = 25;
+    data = Frame(drawing, overlay);
+    CHECK(ColoredVertices(data, injuredColor) * 4 == segmentedFullVertices,
+          "25/100 HP must fill two of eight health segments");
+    patient.health = 0;
+    CHECK(ColoredWidth(Frame(drawing, overlay), injuredColor) == 0,
+          "zero health must leave every health segment empty");
+    settings.healthBarStyle = 0;
+    settings.showHealth = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "hiding all information must leave no unwanted entity rectangle");
+    settings.showTracer = YES;
+
+    settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = YES;
+    patient.equipKnown = YES; patient.helmetLevel = 4; patient.helmetHP = 35; patient.helmetMaxHP = 45;
+    patient.armorLevel = 5; patient.armorHP = 105; patient.armorMaxHP = 120; patient.backpackLevel = 6;
+    patient.weaponRawID = 18010000001ULL;
+    CGFloat red = 1, green = 1, blue = 1, alpha = 1;
+    [[settings colorForSlot:MFColorSlotPersonInfo] getRed:&red green:&green blue:&blue alpha:&alpha];
+    const ImU32 tracerColor = IM_COL32((int)(red * 255), (int)(green * 255), (int)(blue * 255), (int)(alpha * 0.55f * 255));
+    MFCamera camera = {0}; camera.fov = 90;
+    const float headWorld[] = {1000, 0, 88};
+    MFScreen projection = [MFProjection screenWithSize:CGSizeMake(640, 720) fov:90];
+    const MFPoint2D head = [MFProjection projectTarget:headWorld camera:camera screen:projection];
+    const float lineHeight = fmaxf(14, fmaxf(settings.fontInfo, settings.fontPerson) + 3);
+    const float gearCenter = head.y - 6 - 3 * lineHeight + settings.fontInfo * 0.5f;
+    CHECK(fabsf(ColoredBottom(Frame(drawing, overlay), tracerColor) - gearCenter) <= 2,
+          "tracer must end at the center of the gear row above the head, not at the hip");
+    settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = NO;
+
     sEntities = @[Entity(1000, 0, NO, NO), Entity(-1000, 0, NO, NO)];
     settings.backEnemyEnabled = NO;
     // Copy counts: ImGui reuses its ImDrawData object on the next frame.
@@ -158,6 +257,17 @@ static void TestSyntheticDrawing(void) {
           "the loot switch must hide item labels while independently enabled boxes remain visible");
     CHECK(lootMarker + 8 < lootDetails,
           "the loot-name switch must reduce detailed labels to simple markers");
+
+    settings.showLoot = settings.showBox = settings.showTracer = NO;
+    settings.showLootStats = NO;
+    const int statsHidden = Frame(drawing, overlay)->TotalVtxCount;
+    settings.showLootStats = YES;
+    Frame(drawing, overlay); // ImGui measures a new auto-sized window on its first frame.
+    CHECK(Frame(drawing, overlay)->TotalVtxCount > statsHidden + 8,
+          "loot statistics must render independently while all loot markers are hidden");
+    settings.showLootStats = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == statsHidden,
+          "the statistics switch must remove the entire statistics window");
 
     const NSUInteger acquiredBeforeDisable = sAcquisitions;
     settings.drawEnabled = NO;

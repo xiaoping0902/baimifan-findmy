@@ -277,6 +277,22 @@ static void TestActualFrameTime(dispatch_block_t completion) {
     texture.usage = MTLTextureUsageRenderTarget;
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = [device newTextureWithDescriptor:texture];
+    const CGFloat framebufferScales[] = {1.0, 2.0, 3.0};
+    for (CGFloat scale : framebufferScales) {
+        [context beginFrameWithSize:CGSizeMake(64, 64) scale:scale descriptor:pass];
+        ImFont *font = ImGui::GetFont();
+        Expect(font->Sources.Size == 1 && font->Sources[0]->RasterizerDensity == 1.0f,
+               "Retina density must be applied once by the modern Metal backend");
+        ImFontBaked *baked = ImGui::GetFontBaked();
+        Expect(std::fabs(baked->RasterizerDensity - scale) < 0.001,
+               "actual glyph rasterization must follow 1x, 2x and 3x framebuffer pixels");
+        const ImWchar fields[] = {0x5C0F, 0x7389, 0x771F, 0x4EBA, 0x673A, 0x7269, 0x8D44, 0x5934, 0x7532};
+        for (ImWchar codepoint : fields) {
+            Expect(baked->FindGlyphNoFallback(codepoint) != nullptr,
+                   "the production font must render Chinese branding, statistics and gear without tofu");
+        }
+        ImGui::EndFrame();
+    }
     [context beginFrameWithSize:CGSizeMake(64, 64) scale:1 descriptor:pass];
     ImGui::EndFrame();
     CFTimeInterval started = CACurrentMediaTime();

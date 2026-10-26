@@ -73,15 +73,18 @@ static void TestHostedLayoutUsesTheNativeViewport(void) {
               "hosted layout must produce actual page geometry at every supported size");
     }
 }
-static void TestAllSevenProductionPagesAndMinimize(void) {
+static void TestUsefulProductionPagesAndMinimize(void) {
     UIState state;
     state.expanded = true; state.anim = 1;
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
-    const int sequence[] = {1, 2, 3, 4, 5, 6, 0, 6, 1, 0};
+    CHECK(std::count_if(hits.begin(), hits.end(), [](const Hit& hit) {
+              return hit.name == "nav";
+          }) == 4, "navigation must expose the four implemented pages without inactive feature pages");
+    const int sequence[] = {1, 2, 3, 0, 3, 1, 0};
     for (int tab : sequence) {
         Click(state, layout, Item("nav", tab));
-        CHECK(state.tab == tab, "each of the seven visible navigation buttons must select its production page");
+        CHECK(state.tab == tab, "each visible navigation button must select its production page");
         CHECK(ImGui::GetActiveID() == 0, "a page change must not retain a stuck touch owner");
     }
     Click(state, layout, Item("nav", 1));
@@ -126,12 +129,36 @@ static void TestResizeAllowsSmallerAndLargerPanels(void) {
     CHECK(larger.size.x > layout.size.x && larger.size.y > layout.size.y,
           "a changed resize preference must change the native host dimensions");
 }
+static void TestIndependentLootControls(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1;
+    state.lootEnabled = false; state.boxesEnabled = false;
+    state.lootStatsEnabled = false; state.lootNamesEnabled = true;
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    Click(state, layout, Item("nav", 2));
+    Click(state, layout, Item("loot_stats"));
+    CHECK(state.lootStatsEnabled && !state.lootEnabled && !state.boxesEnabled,
+          "loot statistics must have an independent switch without enabling markers");
+    Click(state, layout, Item("loot_enabled"));
+    CHECK(state.lootEnabled && state.lootStatsEnabled && !state.boxesEnabled,
+          "item markers must not change container or statistics preferences");
+    Click(state, layout, Item("loot_boxes"));
+    Click(state, layout, Item("loot_names"));
+    CHECK(state.boxesEnabled && !state.lootNamesEnabled && state.lootEnabled && state.lootStatsEnabled,
+          "container markers and item names must keep separate preferences");
+    CHECK(std::none_of(hits.begin(), hits.end(), [](const Hit& hit) {
+              return hit.name == "track_enabled" || hit.name == "aim_enabled" ||
+                     hit.name == "loot_zipline" || hit.name == "loot_weapon_box";
+          }), "implemented loot controls must not expose inactive imported features");
+}
 static void TestInertiaKeepsFramesActiveUntilSettled(void) {
     UIState state;
     state.expanded = true; state.anim = 1; state.tab = 2;
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
-    CHECK(state.pageHeights[2] > 700, "the real long settings page must provide a scrollable viewport");
+    CHECK(state.pageHeights[2] > layout.baseHeight - 158,
+          "the real loot settings page must provide a scrollable viewport");
     state.pageOffsets[2] = 100;
     state.pageSpeeds[2] = 500;
     const float initial = state.pageOffsets[2];
@@ -148,7 +175,7 @@ static void TestPersonalitySizeSliderAndFixedIsland(void) {
     state.uiScale = state.uiScaleVisual = 1.0f;
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
-    Click(state, layout, Item("nav", 5));
+    Click(state, layout, Item("nav", 3));
     CHECK(std::none_of(hits.begin(), hits.end(), [](const Hit& hit) {
               return hit.name == "island_y" || hit.name == "island_alpha";
           }), "hosted appearance settings must not advertise controls that move or hide the fixed native island");
@@ -171,10 +198,11 @@ int main() {
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     TestHostedLayoutUsesTheNativeViewport();
-    TestAllSevenProductionPagesAndMinimize();
+    TestUsefulProductionPagesAndMinimize();
     TestResizeAllowsSmallerAndLargerPanels();
+    TestIndependentLootControls();
     TestInertiaKeepsFramesActiveUntilSettled();
     TestPersonalitySizeSliderAndFixedIsland();
     ImGui::DestroyContext();
-    std::puts("PASS: production hosted panel geometry, seven pages, minimize and bidirectional resize");
+    std::puts("PASS: production hosted panel geometry, useful pages, minimize and bidirectional resize");
 }

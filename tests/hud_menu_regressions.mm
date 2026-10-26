@@ -31,7 +31,7 @@ static void ClickMenu(MFMenuUI *menu, MFOverlayView *overlay, CGPoint point) {
 }
 
 static CGFloat PanelScale(MFOverlayView *overlay) {
-    return overlay.bounds.size.width / 640.0;
+    return overlay.bounds.size.width / 360.0;
 }
 static CGPoint NavPoint(MFOverlayView *overlay, int tab) {
     const CGFloat scale = PanelScale(overlay);
@@ -55,8 +55,8 @@ static void TestDrawingTileAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overl
     const BOOL initial = settings.showBot;
     ClickMenu(menu, overlay, NavPoint(overlay, 1));
     const CGFloat scale = PanelScale(overlay);
-    // Actual seven-page renderer: second tile in the first drawing grid row.
-    const CGPoint botTile = CGPointMake(296.25 * scale, 189 * scale);
+    // Actual production renderer: first full-width row on the people page.
+    const CGPoint botTile = CGPointMake(222 * scale, 192 * scale);
     CHECK([overlay acceptsInteractionAtPoint:botTile],
           "the visible production drawing tile must accept input");
     ClickMenu(menu, overlay, botTile);
@@ -66,6 +66,38 @@ static void TestDrawingTileAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overl
         ClickMenu(menu, overlay, botTile);
         CHECK(settings.showBot == initial, "a second drawing tap must restore its preference");
         WaitForSettingsSave(initial, [NSDate dateWithTimeIntervalSinceNow:3], ^{
+            ClickMenu(menu, overlay, NavPoint(overlay, 0));
+            completion();
+        });
+    });
+}
+static void WaitForLootStatsSave(BOOL expected, NSDate *deadline, void (^completion)(void)) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        MFSettings *reloaded = [[MFSettings alloc] init];
+        if (reloaded.showLootStats == expected) { completion(); return; }
+        CHECK(deadline.timeIntervalSinceNow > 0,
+              "an independent loot statistics edit must persist while idle");
+        WaitForLootStatsSave(expected, deadline, completion);
+    });
+}
+static void TestIndependentLootStatsAndSave(MFMenuUI *menu, MFOverlayView *overlay,
+                                           void (^completion)(void)) {
+    MFSettings *settings = [MFSettings shared];
+    const BOOL initial = settings.showLootStats;
+    const BOOL loot = settings.showLoot, boxes = settings.showBox, names = settings.showLootName;
+    ClickMenu(menu, overlay, NavPoint(overlay, 2));
+    const CGFloat scale = PanelScale(overlay);
+    const CGPoint statsRow = CGPointMake(222 * scale, 300 * scale);
+    ClickMenu(menu, overlay, statsRow);
+    CHECK(settings.showLootStats != initial && settings.showLoot == loot &&
+          settings.showBox == boxes && settings.showLootName == names,
+          "the production statistics row must change only its own loot setting");
+    WaitForLootStatsSave(!initial, [NSDate dateWithTimeIntervalSinceNow:3], ^{
+        ClickMenu(menu, overlay, statsRow);
+        CHECK(settings.showLootStats == initial,
+              "a second statistics tap must restore the original preference");
+        WaitForLootStatsSave(initial, [NSDate dateWithTimeIntervalSinceNow:3], ^{
             ClickMenu(menu, overlay, NavPoint(overlay, 0));
             completion();
         });
@@ -113,6 +145,8 @@ static void InitializeImGui(void) {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
 }
 static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
+    MFSettings *settings = [MFSettings shared];
+    settings.masterEnabled = NO; settings.drawEnabled = YES;
     const CGSize panel = MFMenuPanelPreferredSize(CGSizeMake(390, 844));
     UIWindow *window = [[UIWindow alloc] initWithFrame:(CGRect){CGPointMake(0, 100), panel}];
     window.rootViewController = [UIViewController new];
@@ -138,18 +172,29 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
     CHECK(!CGRectIsNull(header) && !CGRectIsEmpty(header) &&
           CGRectGetMaxX(header) < panel.width && CGRectGetMaxY(header) < panel.height / 4,
           "the active menu must publish a bounded native title drag area excluding its buttons");
-    const int tabs[] = {1,2,3,4,5,6,0};
+    // The previous UI only enabled drawEnabled, leaving a persisted master
+    // gate off. Re-enable a mixed legacy configuration through the actual row.
+    const CGFloat masterScale = PanelScale(overlay);
+    ClickMenu(menu, overlay, CGPointMake(222 * masterScale, 348 * masterScale));
+    CHECK(settings.masterEnabled && settings.drawEnabled,
+          "the visible drawing master must enable both production draw gates");
+    ClickMenu(menu, overlay, CGPointMake(222 * masterScale, 348 * masterScale));
+    CHECK(!settings.masterEnabled && !settings.drawEnabled,
+          "the drawing master must also disable both gates");
+    ClickMenu(menu, overlay, CGPointMake(222 * masterScale, 348 * masterScale));
+    const int tabs[] = {1,2,3,0};
     for (int tab : tabs) {
         const CGPoint point = NavPoint(overlay, tab);
-        CHECK([overlay acceptsInteractionAtPoint:point], "each of seven navigation targets must be reachable");
+        CHECK([overlay acceptsInteractionAtPoint:point], "each useful navigation target must be reachable");
         ClickMenu(menu, overlay, point);
         CHECK(ImGui::GetDrawData()->TotalVtxCount > 100 && ImGui::GetActiveID() == 0,
               "page selection must render content and release its touch owner");
     }
     TestDrawingTileAndAutomaticSave(menu, overlay, ^{
+      TestIndependentLootStatsAndSave(menu, overlay, ^{
         for (int cycle = 0; cycle < 3; cycle++) {
             const CGFloat scale = PanelScale(overlay);
-            ClickMenu(menu, overlay, CGPointMake((640 - 78) * scale, 30 * scale));
+            ClickMenu(menu, overlay, CGPointMake((360 - 78) * scale, 30 * scale));
             CHECK([MFMenuUI collapsed] && collapseChanges == (NSUInteger)(cycle * 2 + 1),
                   "the active minimize button must notify the native presentation owner once");
             Frame(menu, overlay); Frame(menu, overlay);
@@ -174,6 +219,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
         [MFMenuUI setCollapseChangeHandler:nil];
         ImGui::DestroyContext(); window.hidden = YES;
         completion();
+      });
     });
 }
 
@@ -186,7 +232,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
 static void TestNativeIslandInputAndAccessibility(void) {
     MFHUDIslandView *island = [[MFHUDIslandView alloc] initWithFrame:(CGRect){CGPointZero, MFHUDIslandView.preferredSize}];
     [island layoutIfNeeded];
-    CHECK(CGSizeEqualToSize(island.intrinsicContentSize, CGSizeMake(142,36)) &&
+    CHECK(CGSizeEqualToSize(island.intrinsicContentSize, CGSizeMake(212,44)) &&
           [island.accessibilityIdentifier isEqual:@"hud.dynamicIsland"],
           "the native island must keep its compact, accessible touch surface");
     [island setExpanded:YES animated:NO];
@@ -195,6 +241,33 @@ static void TestNativeIslandInputAndAccessibility(void) {
     [island setExpanded:NO animated:NO];
     CHECK(!island.isExpanded && [island.accessibilityValue isEqual:@"已收起"],
           "island accessibility must reflect the current collapsed state");
+    [island updateRealCount:3 botCount:7 lootCount:12 cameraValid:YES];
+    UILabel *summary = [island valueForKey:@"titleLabel"];
+    UILabel *detail = [island valueForKey:@"actionLabel"];
+    CHECK([summary.text isEqual:@"真人 3  人机 7"] && [detail.text isEqual:@"物资 12 · 展开"],
+          "native island must display real counters as system-font text");
+    CHECK([island.accessibilityValue containsString:@"真人3，人机7，物资12"],
+          "island counters must also reach accessibility");
+    [island setExpanded:YES animated:NO];
+    CHECK([detail.text isEqual:@"物资 12 · 收起"],
+          "toggling the menu must preserve the current island statistics");
+    [island updateRealCount:99 botCount:99 lootCount:99 cameraValid:NO];
+    CHECK([summary.text isEqual:@"小玉 · 等待画面"] && [detail.text isEqual:@"轻点收起"],
+          "an unavailable camera must clear stale counts instead of advertising old data");
+    __block NSUInteger deliveries = 0;
+    MFMenuPanelReportStats(0, 0, 0, NO, 0);
+    MFMenuPanelSetStatsChangeHandler(^(int real, int bot, int loot, BOOL cameraOK) {
+        deliveries++;
+        [island updateRealCount:real botCount:bot lootCount:loot cameraValid:cameraOK];
+    });
+    MFMenuPanelReportStats(2, 4, 31, YES, 0);
+    MFMenuPanelReportStats(2, 4, 31, YES, 0);
+    CHECK(deliveries == 2 && [summary.text isEqual:@"真人 2  人机 4"],
+          "production stats must reach the island even without panel rendering and skip unchanged counts");
+    MFMenuPanelReportStats(2, 4, 31, NO, 0);
+    CHECK([summary.text isEqual:@"小玉 · 等待画面"],
+          "production stats must clear the native island after acquisition fails");
+    MFMenuPanelSetStatsChangeHandler(nil);
     __block NSUInteger activations = 0;
     island.activationHandler = ^{ activations++; };
     IslandFixtureTouch *touch = [IslandFixtureTouch new]; touch.point = CGPointMake(71,18);
@@ -218,6 +291,7 @@ static void TestNativeIslandInputAndAccessibility(void) {
 static UIWindow *sPreviewWindow;
 static MFOverlayView *sPreviewOverlay;
 static MFMenuUI *sPreviewMenu;
+static UIWindow *sPreviewIslandWindow;
 static BOOL sPreviewFinished;
 static void PreviewProductionMenu(void) {
     const CGSize size = MFMenuPanelPreferredSize(UIScreen.mainScreen.fixedCoordinateSpace.bounds.size);
@@ -233,6 +307,18 @@ static void PreviewProductionMenu(void) {
     sPreviewWindow.hidden = NO;
     [sPreviewWindow makeKeyAndVisible];
     [sPreviewWindow layoutIfNeeded]; [sPreviewOverlay layoutIfNeeded];
+    sPreviewIslandWindow = [[UIWindow alloc] initWithFrame:CGRectMake(
+        (UIScreen.mainScreen.bounds.size.width - MFHUDIslandView.preferredSize.width) * .5,
+        42, MFHUDIslandView.preferredSize.width, MFHUDIslandView.preferredSize.height)];
+    sPreviewIslandWindow.windowLevel = UIWindowLevelAlert + 1;
+    sPreviewIslandWindow.rootViewController = [UIViewController new];
+    sPreviewIslandWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
+    MFHUDIslandView *previewIsland = [[MFHUDIslandView alloc] initWithFrame:sPreviewIslandWindow.bounds];
+    [previewIsland setExpanded:YES animated:NO];
+    [previewIsland updateRealCount:3 botCount:7 lootCount:12 cameraValid:YES];
+    [sPreviewIslandWindow.rootViewController.view addSubview:previewIsland];
+    sPreviewIslandWindow.hidden = NO;
+    [sPreviewIslandWindow layoutIfNeeded];
     sPreviewOverlay.firstFrameCompletion = ^(NSString *error) {
         CHECK(error == nil, "the production menu must complete a real GPU frame");
         const char *ackPath = getenv("MF_REGRESSION_SCREENSHOT_ACK");

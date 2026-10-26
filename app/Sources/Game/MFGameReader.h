@@ -45,8 +45,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) int teamId;
 /// 手持武器编号。0 = 未知
 @property (nonatomic, assign) int weaponId;
-/// 血量 0..100。-1 = 未知（未校准）—— 此时按满格画，与原占位行为一致
-@property (nonatomic, assign) int health;
+/// 当前血量。-1 = 未知；读取失败不显示满血。
+@property (nonatomic, assign) float health;
+/// 当前最大血量。0 = 未知；血条按 health / maxHealth 绘制。
+@property (nonatomic, assign) float maxHealth;
 /// 头甲等级 0=无甲
 @property (nonatomic, assign) int armorLevel;
 /* [M5.144] 头/甲/包等级（从装备槽物品 ID 的十进制编码解出，1~6；0=未读到） */

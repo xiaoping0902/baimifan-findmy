@@ -322,7 +322,9 @@ static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
  *    名字 Num  PlayerState+0x478  int32（UTF-16 码元数）
  *        ★ 本作是【指针在前】，UE4 标准是 Num 在前 —— 照着标准读永远是 null
  *
- *    血量组件  actor+0x10B8 → 组件，组件 +0x258 = float（实测 100.0）
+ *    血量组件 actor+0x10B8 → 组件；+0x258 是 HealthMAX，不能作为当前血量。
+ *    当前值：组件+0x280 → HealthSet；Health+0x0C = +0x3C，MaxHealth+0x0C = +0x54。
+ *    具体解码与校验见 MFUEHealth.h（UGPHealthDataComponent / UGPAttributeSetHealth）。
  *
  * 之前这些只写在不被调用的两条链里，现役路径一个都没读 → 头甲/血量/队伍全空。
  */
@@ -330,10 +332,6 @@ static const uint32_t kMFUE_PlayerState_UIN      = 0x0320;
 static const uint32_t kMFUE_PlayerState_NameData = 0x0470;
 static const uint32_t kMFUE_PlayerState_NameNum  = 0x0478;
 
-static const uint32_t kMFUE_Pawn_HealthComponent = 0x10B8;
-static const uint32_t kMFUE_Health_Value         = 0x0258;
-/// 血量合理上限：超出即视为读错/未映射，不当真
-static const float    kMFUE_HealthMax            = 2000.0f;
 
 /*
  * ★ [M5.178] 朝向（雷达上的"他在看哪边"）

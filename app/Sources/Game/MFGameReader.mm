@@ -5,6 +5,7 @@
 #import "Offsets.h"
 #import "MFSettings.h"
 #import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
+#include "MFUEHealth.h"
 #import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Read/MFReadBackend.h"
 #import <mach/mach.h>
@@ -58,6 +59,13 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 @end
 
 @implementation MFEntity
+- (instancetype)init {
+    if ((self = [super init])) {
+        _health = -1;
+        _maxHealth = 0;
+    }
+    return self;
+}
 - (NSString *)description {
     return [NSString stringWithFormat:@"<%@ (%.0f,%.0f,%.0f) %.1fm → (%.0f,%.0f)%@>",
             self.isLoot ? @"物资" : (self.isBox ? @"盒子" : @"人"),
@@ -244,9 +252,9 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             /*
              * ══════════ [M5.164] 分层读取：位置每帧，属性每秒 ══════════
              *
-             * 相机和坐标决定"框跟不跟手"，必须每帧读；队伍/头甲/血量/武器/骨骼
-             * 这些一秒内不会变，按 Actor 缓存 1 秒即可。
-             * 这样每帧的内核读从"每角色 10+ 次"降到"每角色 1 次"，不再卡。
+             * 相机和坐标每帧读取，队伍/装备/武器按 Actor 缓存约 1 秒。
+             * 血量使用单独的 15 Hz 缓存，避免受伤状态延迟一秒以上。
+             * 静态资料不再每帧重复读取，血量也不会被一秒缓存锁住。
              */
             {
                 if (item == gMFUELocalPawn) continue;
@@ -326,16 +334,6 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                         uint64_t uinVal = 0;
                         if (havePS && [rb readU64:ps + 0x320 out:&uinVal]) a[@"uin"] = @(uinVal);
 
-                        /* 血量 */
-                        uint64_t hc = 0;
-                        if ([rb readU64:item + 0x10B8 out:&hc] && hc) {
-                            float hp = 0.0f;
-                            if ([rb readRemote:hc + 0x258 into:&hp size:4] &&
-                                hp >= 0.0f && hp <= 2000.0f) {
-                                a[@"hp"] = @((int)lroundf(hp));
-                            }
-                        }
-
                         /* 手持 */
                         uint64_t combat = 0;
                         if ([rb readU64:item + 0x1020 out:&combat] && combat) {
@@ -389,7 +387,24 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 e.teamId = [attr[@"team"] intValue];
                 e.isBot = [attr[@"bot"] boolValue];
                 e.uin = [attr[@"uin"] unsignedLongLongValue];
-                e.health = [attr[@"hp"] intValue];
+                static NSMutableDictionary<NSNumber *, NSDictionary *> *healthCache;
+                static dispatch_once_t healthOnce;
+                dispatch_once(&healthOnce, ^{ healthCache = [NSMutableDictionary dictionary]; });
+                const double healthNow = CFAbsoluteTimeGetCurrent();
+                NSDictionary *health;
+                @synchronized (healthCache) { health = healthCache[@(item)]; }
+                if (!health || healthNow - [health[@"t"] doubleValue] >= 1.0 / 15.0) {
+                    const auto hp = MFUEHealth::Read(item, [&](uint64_t address, void *out, size_t size) {
+                        return (bool)[rb readRemote:address into:out size:size];
+                    });
+                    health = @{@"t": @(healthNow), @"hp": @(hp.current), @"max": @(hp.maximum)};
+                    @synchronized (healthCache) {
+                        if (healthCache.count > 1024) [healthCache removeAllObjects];
+                        healthCache[@(item)] = health;
+                    }
+                }
+                e.health = [health[@"hp"] floatValue];
+                e.maxHealth = [health[@"max"] floatValue];
                 e.weaponRawID = [attr[@"wid"] unsignedLongLongValue];
                 if (e.weaponRawID) {
                     e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
@@ -452,7 +467,6 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     e.isBot      = NO;
     e.teamId     = 0;
     e.weaponId   = 0;
-    e.health     = -1;          // -1 = 未知 → 绘制层按满格处理
     e.armorLevel = 0;
     e.armorKnown = NO;
 
@@ -471,8 +485,13 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
         if (v >= 0 && v < 4096) e.weaponId = v;
     }
     if (p.entityHealthOffset) {
-        int v = [rb readInt32:e.address + p.entityHealthOffset];
-        if (v >= kMFHealthMin && v <= kMFHealthMax) e.health = v;
+        int32_t v = -1;
+        e.health = -1; e.maxHealth = 0;
+        if ([rb readRemote:e.address + p.entityHealthOffset into:&v size:sizeof(v)] &&
+            v >= kMFHealthMin && v <= kMFHealthMax) {
+            e.health = v;
+            e.maxHealth = kMFHealthMax; // Calibrated legacy profile explicitly uses a 0..100 scale.
+        }
     }
     if (p.entityArmorOffset) {
         int v = [rb readInt32:e.address + p.entityArmorOffset];

@@ -69,9 +69,11 @@ def main():
                 "UIDeviceFamily": [1, 2],
                 "UILaunchScreen": {},
             }))
-            if args.suite == "menu":
-                for font in (ROOT / "app/Resources").rglob("NotoSansSC-subset.ttf"):
-                    shutil.copy2(font, app / font.name)
+            if args.suite in ("menu", "overlay", "drawing"):
+                # Match production's first-choice asset. Testing the old tiny
+                # subset alone hid coverage failures behind fallback glyphs.
+                font = ROOT / "app/Resources/NotoSansSC-full.ttf"
+                shutil.copy2(font, app / font.name)
             architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
             if args.suite == "windows":
                 sources = [ROOT / "tests/hud_uikit_regressions.mm", source]

@@ -36,13 +36,13 @@ struct Canvas {
     void card(float x,float y,float w,float h,const char* title) {
         rect(x,y,w,h,tc.surface,15);
         dl->AddRect(p(x,y),p(x+w,y+h),tc.border,15*s,0,ImMax(.5f*s,.5f));
-        if(title){rect(x+14,y+14,3,10,tc.accent,2);text(x+23,y+11,11,tc.textMuted,title);}
+        if(title)text(x+14,y+12,14,tc.textMuted,title);
     }
-    void section(float x,float y,const char* title){text(x,y,12,tc.textMuted,title);}
+    void section(float x,float y,const char* title){text(x,y,14,tc.textMuted,title);}
     void info(float x,float y,float w,const char* label,const char* value,ImU32 color=0) {
-        text(x,y+10,12,tc.textMuted,label);
-        float tw=TextSize(font,11*s,value).x/s;
-        text(x+w-tw,y+11,11,color?color:tc.textMuted,value);
+        text(x,y+10,14,tc.textMuted,label);
+        float tw=TextSize(font,13*s,value).x/s;
+        text(x+w-tw,y+11,13,color?color:tc.textMuted,value);
     }
     void switchShape(float x,float y,bool value,ImGuiID id) {
         const float t=Motion(st,id^0x635091u,value?1.0f:0.0f);
@@ -55,7 +55,7 @@ struct Canvas {
         bool changed=hit(x,y,w,36,id);
         if(changed){value=!value;st.configDirty=true;}
         ImGuiID key=ImGui::GetID(id);
-        text(x,y+10,12,tc.text,label);
+        text(x,y+9,15,tc.text,label);
         switchShape(x+w-38,y+6.5f,value,key);
         return changed;
     }
@@ -76,7 +76,7 @@ struct Canvas {
     }
     bool segment(float x,float y,float w,const char* label,const char* const* options,int count,int& selected,const char* id) {
         float labelW=(label&&*label)?ImMin(83.0f,w*.30f):0;
-        if(labelW)text(x,y+10,12,tc.text,label);
+        if(labelW)text(x,y+10,14,tc.text,label);
         float cx=x+labelW,cw=w-labelW,part=(cw-4)/count;
         rect(cx,y+4,cw,29,MixColor(tc.surface,tc.textFaint,.14f),9);
         bool changed=false;
@@ -104,7 +104,7 @@ struct Canvas {
         const float valueW=ImMax(43.0f,TextSize(font,10*s,valueText).x/s+4);
         const float labelW=ImMin(89.0f,w*.34f);
         const float trackX=x+labelW,trackW=ImMax(24.0f,w-labelW-valueW-8);
-        text(x,y+13,12,tc.text,label);
+        text(x,y+12,14,tc.text,label);
         const bool tapped=hit(trackX,y+4,trackW,32,id);
         const bool active=ImGui::IsItemActive();
         // Capture pointer mapping once so a live panel resize cannot feed back
@@ -123,7 +123,11 @@ struct Canvas {
         if((dragging||tapped)&&!blockClick&&hi>lo){
             const float left=storage->GetFloat(key^0x741u,currentLeft);
             const float span=storage->GetFloat(key^0x742u,currentSpan);
-            float t=ImClamp((ImGui::GetIO().MousePos.x-left)/span,0.0f,1.0f);
+            const float pointer=ImGui::GetIO().MousePos.x;
+            // ImGui rounds pointer positions to whole framebuffer points.
+            // Keep both endpoints reachable on compact, fractional tracks.
+            float t=pointer<=left+1.0f?0.0f:pointer>=left+span-1.0f?1.0f:
+                ImClamp((pointer-left)/span,0.0f,1.0f);
             float next=lo+t*(hi-lo);
             if(step>0)next=lo+std::round((next-lo)/step)*step;
             next=ImClamp(next,lo,hi);
@@ -410,7 +414,7 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     st.hostedViewport=hosted;
     if(hosted&&!st.expanded){st.animationActive=false;return;}
     st.animationActive=io.MouseDown[0];
-    st.tab=ImClamp(st.tab,0,6);
+    st.tab=ImClamp(st.tab,0,kNavTabCount-1);
     const float boundedScale=ImClamp(st.uiScale,kPanelScaleMinimum,kPanelScaleMaximum);
     if(st.uiScale!=boundedScale){st.uiScale=boundedScale;st.configDirty=true;}
     st.uiScaleVisual=ImClamp(st.uiScaleVisual,kPanelScaleMinimum,kPanelScaleMaximum);
@@ -527,13 +531,12 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
                             ImVec2(0,0),ImVec2(1,1),MultiplyAlpha(IM_COL32_WHITE,contentAlpha),11*s);
     }else{
         shell.rect(18,11,38,38,tc.accentSoft,11);
-        DrawTextCentered(dl,font,19*s,shell.p(18,11),shell.p(56,49),tc.accent,"黑");
+        DrawTextCentered(dl,font,19*s,shell.p(18,11),shell.p(56,49),tc.accent,"玉");
     }
-    shell.text(66,20,18,tc.text,"黑皇");
+    shell.text(66,20,18,tc.text,"小玉");
     char status[32];ImU32 tone=tc.success;
     if(st.tab==1)snprintf(status,sizeof(status),"%d / %d",CountEnabledDrawing(st),kVisibleDrawingItemCount);
-    else if(st.tab==4){snprintf(status,sizeof(status),"%d / 17",CountEnabledConfigurableLoot(st));tone=tc.warning;}
-    else if(st.tab==2||st.tab==3){bool enabled=st.tab==2?st.aim.enabled:st.aim.trackingEnabled;snprintf(status,sizeof(status),"%s",enabled?"已开启":"已关闭");tone=enabled?tc.success:tc.textMuted;}
+    else if(st.tab==2){snprintf(status,sizeof(status),"物资 %d",st.lootCount);tone=tc.warning;}
     else snprintf(status,sizeof(status),"运行正常");
     shell.rect(baseW-207,18,83,25,WithAlpha(tone,22),13);
     DrawTextCentered(dl,font,10.5f*s,shell.p(baseW-203,18),shell.p(baseW-128,43),tone,status);
@@ -546,18 +549,19 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     shell.rect(baseW-50,14,32,32,WithAlpha(tc.textFaint,18),16);
     DrawPowerIcon(dl,shell.p(baseW-34,30),13*s,tc.textMuted);
     if(close)st.wantExit=true;
-    const char* labels[]={"主页","绘制","自瞄","追踪","物资","个性","设置"};
-    const char* subtitles[]={"界面与状态一目了然","基础绘制与个性绘制","辅助参数调整","武器追踪参数","物资显示筛选","主题与界面外观","应用运行选项"};
+    const char* labels[]={"主页","人物","物资","外观"};
+    const char* subtitles[]={"","","",""};
+    const int navIcons[]={0,1,4,5};
     ImGui::PushID("navigation");
-    for(int i=0;i<7;i++){
+    for(int i=0;i<kNavTabCount;i++){
         ImGui::PushID(i);
         bool pressed=shell.hit(10,top+15+i*49,side-20,43,"nav");
         if(pressed&&st.tab!=i){st.tab=i;st.pageReveal=0;st.gesturePage=-1;for(float& v:st.pageSpeeds)v=0;}
         float selected=ios::Motion(st,ImGui::GetID("selected"),st.tab==i?1.0f:0.0f);
         shell.rect(10,top+15+i*49,side-20,43,MultiplyAlpha(tc.accentSoft,selected),11);
         ImU32 color=MixColor(tc.textMuted,tc.accent,selected);
-        DrawNavIcon(dl,i,shell.p(28,top+36.5f+i*49),17*s,color);
-        shell.text(43,top+29+i*49,12,color,labels[i]);
+        DrawNavIcon(dl,navIcons[i],shell.p(28,top+36.5f+i*49),17*s,color);
+        shell.text(43,top+28+i*49,14,color,labels[i]);
         ImGui::PopID();
     }
     ImGui::PopID();

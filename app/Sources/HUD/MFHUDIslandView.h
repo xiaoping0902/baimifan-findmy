@@ -12,6 +12,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (CGSize)preferredSize;
 - (void)setExpanded:(BOOL)expanded animated:(BOOL)animated;
 - (void)setPressed:(BOOL)pressed animated:(BOOL)animated;
+/// Plain system-font text avoids icon-font dependencies for live counters.
+- (void)updateRealCount:(NSInteger)real botCount:(NSInteger)bot
+             lootCount:(NSInteger)loot cameraValid:(BOOL)cameraValid;
 @end
 
 NS_ASSUME_NONNULL_END

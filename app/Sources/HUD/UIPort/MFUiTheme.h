@@ -21,7 +21,7 @@ static constexpr int kConfigurableLootCategoryIndices[kConfigurableLootItemCount
     2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14,
     17, 18, 19, 20 // 地铁独立开关: 军事宝箱17/保险箱18/超级物资箱19/海盗福利箱20
 };
-static constexpr int kNavTabCount = 7;
+static constexpr int kNavTabCount = 4;
 static constexpr int kUIBackgroundCount = 3;
 static constexpr float kUIBackgroundCycleSeconds = 10.0f;
 static constexpr float kUIBackgroundFadeSeconds = 0.7f;
@@ -45,8 +45,11 @@ struct UIPanelLayout
 static UIPanelLayout ComputePanelLayout(ImVec2 screenSize, float uiScale)
 {
     const bool portrait = screenSize.y > screenSize.x * 1.08f;
-    const float baseWidth = portrait ? 640.0f : 860.0f;
-    const float baseHeight = portrait ? 820.0f : 540.0f;
+    // A phone-sized design grid keeps the text readable at the default zoom.
+    // Scaling a desktop-width 640px grid into a 296pt window made 12px labels
+    // only 5.5pt tall, regardless of the font atlas resolution.
+    const float baseWidth = portrait ? 360.0f : 620.0f;
+    const float baseHeight = portrait ? 500.0f : 400.0f;
     const float requested = screenSize.x * kPanelDefaultWidthRatio / baseWidth *
         ImClamp(uiScale, kPanelScaleMinimum, kPanelScaleMaximum);
     const float available = ImMin(ImMax(1.0f, screenSize.x - 24.0f) / baseWidth,
@@ -83,18 +86,16 @@ static constexpr int kStandaloneOffscreenDistanceItem = -2;
 static constexpr int kStandaloneWeaponIconItem = -3; // 手持贴图(独立开关, 不进 feat 序列化)
 static constexpr int kStandaloneVehicleIconItem = -4; // 载具贴图(独立开关, 不进 feat 序列化)
 static constexpr int kStandaloneRadarDrawingItem = -5;
-static constexpr int kVisibleDrawingItemCount = kConfigurableDrawingItemCount + 4;
+static constexpr int kVisibleDrawingItemCount = 11;
 static constexpr int kVisibleDrawingFeatureIndices[kVisibleDrawingItemCount] = {
     DrawingHuman, DrawingBot, DrawingSkeleton, DrawingRay, DrawingHealth, DrawingName,
-    DrawingTeam, DrawingWeapon, DrawingOffscreen, DrawingDistance, DrawingVehicle,
-    kStandaloneWeaponIconItem, kStandaloneVehicleIconItem, DrawingEquipment,
-    DrawingStance, kStandaloneHorseDrawingItem, kStandaloneOffscreenDistanceItem,
-    DrawingExplosiveRange, DrawingSmokeTime, kStandaloneRadarDrawingItem
+    DrawingTeam, DrawingWeapon, DrawingOffscreen, DrawingDistance, DrawingEquipment
 };
 static constexpr int kVisibleLootItemCount = kConfigurableLootItemCount + 1;
-static constexpr int kHealthBarStyleOptionCount = 2;
-static constexpr int kHealthBarStyleSegmented = 1;
-static constexpr int kHealthBarStyleCapsule = 2;
+static constexpr int kHealthBarStyleOptionCount = 3;
+static constexpr int kHealthBarStyleThin = 0;
+static constexpr int kHealthBarStyleCapsule = 1;
+static constexpr int kHealthBarStyleSegmented = 2;
 static constexpr float kDynamicIslandScale = 1.18f;
 static constexpr float kDynamicIslandHeightUnits = 46.0f;
 static constexpr float kDynamicIslandBaseTopUnits = 27.0f;
@@ -104,9 +105,8 @@ static constexpr float kDynamicIslandTopUnits = kDynamicIslandBaseTopUnits +
 
 static constexpr int NormalizeHealthBarStyleId(int style)
 {
-    return style == kHealthBarStyleCapsule
-        ? kHealthBarStyleCapsule
-        : kHealthBarStyleSegmented;
+    return style >= kHealthBarStyleThin && style < kHealthBarStyleOptionCount
+        ? style : kHealthBarStyleThin;
 }
 
 // "Only horses" narrows the vehicle master switch; it never enables vehicle
@@ -174,7 +174,7 @@ struct UIState
     int   fpsSel = 90;
     float uiScale = 1.0f;            // 1.0 = 66% of screen width
     float uiScaleVisual = 1.0f;
-    int   healthBarStyle = kHealthBarStyleSegmented;
+    int   healthBarStyle = kHealthBarStyleThin;
     float islandYOffset = 0.0f;
     float islandAlpha = 1.0f;
     float panelCenterXRatio = 0.5f;
@@ -276,6 +276,19 @@ struct UIState
     ImVec2 resizeStartHalfSize = ImVec2(1.0f, 1.0f);
 
     bool  configDirty = false;
+    // Settings that have real consumers in the drawing layer. Unimplemented
+    // imported feature slots remain private for source compatibility.
+    bool  showTeammates = false;
+    bool  lootEnabled = false;
+    bool  boxesEnabled = false;
+    bool  lootNamesEnabled = true;
+    bool  lootStatsEnabled = false;
+    float minLootLevel = 0;
+    float minLootValue = 0;
+    float lootDistance = 120;
+    float boxDistance = 200;
+    float skeletonDistance = 80;
+    float backEnemyDistance = 80;
     // Set by the home page and consumed by the main loop.  Keeping the
     // file operation out of the UI module prevents a frame from blocking on
     // filesystem I/O and gives reset the same persistence path as edits.
@@ -608,8 +621,8 @@ static int CountEnabledConfigurableLoot(const UIState& st)
 
 static bool HasActiveOverlay(const UIState& st)
 {
-    return CountEnabledDrawing(st) > 0 || CountEnabledLoot(st) > 0 ||
-           st.aim.enabled || st.developerMode;
+    return st.feat[DrawingHuman] &&
+        (CountEnabledDrawing(st) > 1 || st.lootEnabled || st.boxesEnabled || st.lootStatsEnabled);
 }
 
 static void DrawStatusDot(ImDrawList* dl, ImVec2 center, float radius, ImU32 color)

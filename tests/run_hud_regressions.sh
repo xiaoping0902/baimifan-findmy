@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bash tests/run_hud_binding_regressions.sh
+python3 tests/run_hud_health_regressions.py
 sources=(tests/hud_regressions.mm)
 for source in app/Sources/HUD/MFHUDWindowHost.mm app/Sources/HUD/MFHUDStartupStatus.mm; do
     if [[ -f "$source" ]]; then sources+=("$source"); fi

@@ -1,9 +1,9 @@
 //
-//  MFMenuPanel.h — 七页签面板接入层
+//  MFMenuPanel.h — 精简面板接入层
 //
 //  渲染实体全部来自 UIPort/（原样搬运的 ui.h / ios_ui.h / ios_pages.h）：
 //    · RenderUI       —— 面板外框、分页条、滚动、缩放
-//    · ios::DrawPage  —— 七个页面（首页/绘制/自瞄/追踪/物资/外观/设置）
+//    · ios::DrawPage  —— 首页、人物、物资、外观
 //
 //  这一层只做三件事：把游戏数据喂进 UIState、把 UIState 的改动写回 MFSettings、
 //  把「哪些像素能点」上报给 MFOverlayView。
@@ -37,5 +37,7 @@ BOOL MFMenuPanelConsumeExitRequest(void);
 
 /// 绘制层每帧把统计塞进来：真人 / 人机 / 物资 / 相机是否正常 / 观战者
 void MFMenuPanelReportStats(int real, int bot, int loot, BOOL cameraOK, int observers);
+/// Main-thread observer for the independent native island; receives current data immediately.
+void MFMenuPanelSetStatsChangeHandler(void (^ _Nullable handler)(int real, int bot, int loot, BOOL cameraOK));
 
 NS_ASSUME_NONNULL_END
