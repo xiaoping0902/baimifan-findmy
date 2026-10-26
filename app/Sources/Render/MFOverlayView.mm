@@ -61,6 +61,25 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     BOOL _drawablePending;
     uint64_t _renderGeneration;
 
+    /*
+     * [M5.211] 渲染活性自愈。
+     *
+     * 两个卡死点都出现在"换局 / 场景切换"这种高负载时刻，而且表现完全一样：
+     * 进程没崩、菜单还能点，但画面从此不动。
+     *
+     *   ① _drawablePending 永远为 YES：nextDrawable 在窗口/场景重建时可能迟迟
+     *      不回，取 drawable 的回调没跑回主线程，于是此后每个 tick 都在这里 return；
+     *   ② 帧信用（_frameCredits）泄漏：commandBuffer 的完成回调没来（GPU 被系统
+     *      回收 / 提交失败），信用少还一个，几次之后 wait 永远失败。
+     *
+     * 两条都是"静默永久停摆"，没有异常、没有错误码 —— 所以必须靠时间戳兜底，
+     * 不能指望错误分支。
+     */
+    CFTimeInterval _drawablePendingAt;      // _drawablePending 置 YES 的时刻，0 = 没在途
+    CFTimeInterval _lastTickAt;             // 最近一次 tick 的时刻
+    dispatch_source_t _livenessTimer;       // 独立于 displayLink 的看门狗
+    unsigned _stuckRecoveries;              // 自愈次数（诊断用）
+
     // ── 局部命中（穿透）──────────────────────────────────
     CGRect _interactiveRects[kMFOverlayMaxInteractiveRects];
     NSUInteger _interactiveRectCount;
@@ -165,15 +184,77 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self requestRedraw];   // 首帧必须马上出来，不能被空闲降频拖住
+    [self startLivenessWatchdog];
     NSLog(@"[MF][Overlay] 渲染已启动 (interactive=%d, %.0fx%.0f, 满帧%ld/空闲%ld)",
           self.interactive, self.bounds.size.width, self.bounds.size.height,
           (long)_preferredFPS, (long)_idleFPS);
     return YES;
 }
 
+/*
+ * [M5.211] 渲染看门狗。
+ *
+ * 为什么必须有：displayLink 的回调一旦停（系统因为遮挡 / 场景切换把它暂停，
+ * 或者 link 被失效），我们就没有任何机会再被调用 —— 所有"在 tick 里检查"的
+ * 兜底都失去意义。所以活性检查必须挂在独立定时器上。
+ *
+ * 阈值 2 秒：正常帧间隔是 8~33ms，2 秒没有任何回调只可能是真停了。
+ */
+- (void)startLivenessWatchdog {
+    if (_livenessTimer) return;
+    _livenessTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                            dispatch_get_main_queue());
+    if (!_livenessTimer) return;
+    const uint64_t interval = (uint64_t)(0.5 * NSEC_PER_SEC);
+    dispatch_source_set_timer(_livenessTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval),
+                              interval, (uint64_t)(50 * NSEC_PER_MSEC));
+    __weak MFOverlayView *weakSelf = self;
+    dispatch_source_set_event_handler(_livenessTimer, ^{
+        MFOverlayView *owner = weakSelf;
+        if (!owner || !owner->_rendering) return;
+        const CFTimeInterval now = CACurrentMediaTime();
+        /*
+         * 先排掉"本来就不该出帧"的状态：暂停、隐藏、尚未挂到窗口、ImGui 未就绪。
+         * 这些情况下 tick 被前面的守卫挡掉是设计如此，不是停摆 —— 不排掉的话
+         * 看门狗会每 2 秒重建一次渲染循环，日志刷屏还白烧 CPU。
+         */
+        if (owner.paused || owner.hidden || !owner.window || owner.window.hidden || !owner->_ready) {
+            owner->_lastTickAt = now;
+            return;
+        }
+        // 还没开始 tick（刚启动）不算异常
+        if (owner->_lastTickAt <= 0) return;
+        if (now - owner->_lastTickAt < 2.0) return;
+
+        MFHUDLogLine(@"%@ 渲染看门狗：displayLink %.1fs 无回调，重建渲染循环",
+                     owner.interactive ? @"菜单" : @"绘制", now - owner->_lastTickAt);
+        owner->_lastTickAt = now;
+        if (owner->_link) {
+            owner->_link.paused = NO;
+            [owner->_link invalidate];
+            owner->_link = nil;
+        }
+        owner->_drawablePending = NO;
+        owner->_drawablePendingAt = 0;
+        owner->_rendering = YES;
+        NSString *error = nil;
+        if (![owner startRenderingWithError:&error])
+            MFHUDLogLine(@"%@ 渲染看门狗：重建失败 %@",
+                         owner.interactive ? @"菜单" : @"绘制", error ?: @"");
+    });
+    dispatch_resume(_livenessTimer);
+}
+
 - (void)stopRendering {
     NSAssert(NSThread.isMainThread, @"Overlay rendering is owned by main");
     _rendering = NO;
+    if (_livenessTimer) {
+        dispatch_source_cancel(_livenessTimer);
+        _livenessTimer = nil;
+    }
+    _drawablePendingAt = 0;
+    _lastTickAt = 0;
     [self invalidateRenderingGeneration];
     [_link invalidate];
     _link = nil;
@@ -206,6 +287,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 
 - (void)tick:(CADisplayLink *)link {
     NSAssert(NSThread.isMainThread, @"Overlay ticks are owned by main");
+    _lastTickAt = CACurrentMediaTime();
     if (!_rendering || self.paused || !self.window || self.window.hidden || self.hidden) return;
     if (!_ready) return;
     if (self.bounds.size.width < 1 || self.bounds.size.height < 1) return;
@@ -215,8 +297,30 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
 
     CAMetalLayer *ml = self.metalLayer;
     [self layoutSubviews];
+
+    /*
+     * [M5.211] 在途 drawable 超时放行。
+     *
+     * 正常一帧"取 drawable → 画 → 提交"在 16ms 量级；超过 1.2 秒还没回到主线程，
+     * 只可能是那条路断了（窗口/场景重建时合成器迟迟不回收 drawable）。
+     * 此时补偿一次帧信用并清掉在途标记 —— 不这么做，此后每个 tick 都在下面那行
+     * return，画面永久停摆且没有任何错误码。
+     */
+    if (_drawablePending && _drawablePendingAt > 0) {
+        const CFTimeInterval elapsed = CACurrentMediaTime() - _drawablePendingAt;
+        if (elapsed > 1.2) {
+            _drawablePending = NO;
+            _drawablePendingAt = 0;
+            _stuckRecoveries++;
+            dispatch_semaphore_signal(_frameCredits);
+            MFHUDLogLine(@"%@ 渲染自愈 #%u：drawable 在途 %.1fs 未完成，已放行并补回一个帧信用",
+                         self.interactive ? @"菜单" : @"绘制", _stuckRecoveries, elapsed);
+        }
+    }
+
     if (_drawablePending || dispatch_semaphore_wait(_frameCredits, DISPATCH_TIME_NOW) != 0) return;
     _drawablePending = YES;
+    _drawablePendingAt = CACurrentMediaTime();
     uint64_t generation = _renderGeneration;
     CGSize size = self.bounds.size;
     CGSize pixels = ml.drawableSize;
@@ -237,6 +341,7 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
                 MFOverlayView *owner = weakSelf;
                 if (!owner) { dispatch_semaphore_signal(credits); return; }
                 owner->_drawablePending = NO;
+                owner->_drawablePendingAt = 0;
                 if (!owner->_rendering || generation != owner->_renderGeneration || owner.paused ||
                     !owner.window || owner.window.hidden || owner.hidden ||
                     !CGSizeEqualToSize(size, owner.bounds.size) ||

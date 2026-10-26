@@ -42,6 +42,30 @@ extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 #include <dlfcn.h>
 #include <errno.h>
 
+/*
+ * [M5.211] 让 HUD 窗口在「被系统应用遮挡」时不参与遮挡仲裁。
+ *
+ * 我们是挂在 SpringBoard 上的 accessibility window，不属于任何前台 App 场景，
+ * 系统很容易在换局 / 切场景 / 下拉通知中心这类时刻把这种窗口判成被遮挡，
+ * 然后暂停它的 CADisplayLink —— 表现正是「画面从此不动，但菜单还能点」。
+ *
+ * ignoreOcclusionReasons 是 UIWindow 私有属性（iOS 13+）：写入 "SystemApp"
+ * 表示当遮挡原因被标记为系统应用层时忽略该判定。设不上就静默跳过 ——
+ * 绝不能因为一个私有能力让启动失败（本项目在 entitlements 上已经踩过这个坑）。
+ */
+static void MFIgnoreSystemAppOcclusion(UIWindow *window) {
+    if (!window) return;
+    @try {
+        SEL sel = NSSelectorFromString(@"setIgnoreOcclusionReasons:");
+        if (![window respondsToSelector:sel]) return;
+        NSSet *reasons = [NSSet setWithObject:@"SystemApp"];
+        ((void (*)(id, SEL, id))objc_msgSend)(window, sel, reasons);
+        MFHUDLogLine(@"遮挡仲裁：窗口 %p 已声明忽略 SystemApp 遮挡",
+                     (__bridge void *)window);
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 // Validate the process instance before using a persisted PID or absolute base.
 static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName, NSString **error) {
     if (pid <= 0 || !expectedName.length) {
@@ -251,6 +275,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     [self.drawingContent.contentView addSubview:drawView];
     drawWin.hidden = NO;
     self.drawingWindow = drawWin;
+    MFIgnoreSystemAppOcclusion(drawWin);
 
     // ── ② 菜单窗（可交互）────────────────────────────
     // [M5.22] 对齐 TrollSpeed（绘制窗 10000010，菜单窗略低一点）
@@ -284,6 +309,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     menuWin.hidden = NO;
     [menuWin makeKeyAndVisible];
     self.hudMenuWindow = menuWin;
+    MFIgnoreSystemAppOcclusion(menuWin);
 
     // The island owns only its small capsule surface, even while the panel is
     // expanded. A separate bounded window keeps the rest of the screen free.
@@ -297,6 +323,7 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     islandWin.rootViewController = islandVC;
     islandVC.view.frame = islandWin.bounds;
     self.islandWindow = islandWin;
+    MFIgnoreSystemAppOcclusion(islandWin);
     self.islandContent = [[MFHUDCaptureShieldView alloc] initWithFrame:islandVC.view.bounds error:&captureError];
     if (!self.islandContent) { [self failStartup:captureError]; return YES; }
     [islandVC.view addSubview:self.islandContent];
