@@ -10,6 +10,7 @@
 #include "MFUEActorState.h"
 #import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Read/MFReadBackend.h"
+#import "../HUD/MFHUDLog.h"     /* [M5.212] 帧预算截断要写一条限流日志 */
 #import <mach/mach.h>
 #include <sys/sysctl.h>
 #include <sys/proc.h>

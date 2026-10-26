@@ -92,7 +92,8 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
         self.kfdRoot = 0;
         self.kfdPid = 0;
         self.modeFlag = NO;
-        _sessionIdentity = nil;
+        _identityPid = 0;
+        _identityCache = nil;
         return NO;
     }
     self.kfdPid = pid;
