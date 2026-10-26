@@ -27,8 +27,8 @@ static void TestLootSessionCaches(void) {
         [(NSMutableDictionary *)[table valueForKey:@"rowCache"] setObject:[MFItemRow new] forKey:@123];
     };
     auto tableEmpty = [&] {
-        return [[table valueForKey:@"rowIndex"] count] == 0 &&
-               [[table valueForKey:@"rowCache"] count] == 0 && table.rowCount == 0 &&
+        return [(NSDictionary *)[table valueForKey:@"rowIndex"] count] == 0 &&
+               [(NSDictionary *)[table valueForKey:@"rowCache"] count] == 0 && table.rowCount == 0 &&
                [[table valueForKey:@"gameItem"] unsignedLongLongValue] == 0 &&
                [[table valueForKey:@"rowStructExpected"] unsignedLongLongValue] == 0;
     };
@@ -59,8 +59,8 @@ static void TestLootSessionCaches(void) {
         [gear setValue:@(CACurrentMediaTime()) forKey:@"tableRetryAt"];
     };
     auto gearEmpty = [&] {
-        return [[gear valueForKey:@"cache"] count] == 0 && [[gear valueForKey:@"cacheAt"] count] == 0 &&
-               [[gear valueForKey:@"itemsCache"] count] == 0 && [[gear valueForKey:@"itemsCacheAt"] count] == 0 &&
+        return [(NSDictionary *)[gear valueForKey:@"cache"] count] == 0 && [(NSDictionary *)[gear valueForKey:@"cacheAt"] count] == 0 &&
+               [(NSDictionary *)[gear valueForKey:@"itemsCache"] count] == 0 && [(NSDictionary *)[gear valueForKey:@"itemsCacheAt"] count] == 0 &&
                [[gear valueForKey:@"tableRetryAt"] doubleValue] == 0;
     };
     seedGear();
