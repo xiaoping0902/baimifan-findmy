@@ -44,98 +44,8 @@ extern "C" {
 #define HOST_NODENAME 5
 #endif
 
-/*
- * ★★★ [M5.78] 用 processor_set_tasks 拿 task port ★★★
- *
- * 为什么需要它：
- *   task_for_pid 对 App Store 正版应用（尤其带反作弊的游戏）会返回
- *   kr=0x5 KERN_FAILURE —— 这是 taskgated 按代码签名标志（CS_HARD/CS_RESTRICT）
- *   拒绝，跟我们的 entitlement 无关。三角洲行动带 ACE 反作弊，实测就是 0x5。
- *
- *   processor_set_tasks 走的是另一条内核路径：先拿 processor_set 端口，
- *   再让内核把**全系统 task 端口数组**一次性交出来，不经过 taskgated 的
- *   code-signing 检查。白米饭的「内核端口 → 枚举 task → 端口缓存」就是这条路。
- *
- * 注意：拿到的端口要自己 mach_port_deallocate；数组本身用 vm_deallocate。
- */
-static uint32_t MFGetTaskPortViaProcessorSet(int targetPid, NSString **errOut) {
-    #define MF_PS_FAIL(fmt, ...) do {                                        \
-        if (errOut) *errOut = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
-        return MACH_PORT_NULL;                                                \
-    } while (0)
-
-    // processor_set_default returns a name port; processor_set_tasks needs
-    // a control port obtained through host_processor_set_priv. Availability
-    // still depends on the current process's actual host privileges.
-    processor_set_name_t psetName = MACH_PORT_NULL;
-    kern_return_t kr = processor_set_default(mach_host_self(), &psetName);
-    NSString *firstFailure = nil;
-
-    if (kr != KERN_SUCCESS || psetName == MACH_PORT_NULL) {
-        firstFailure = [NSString stringWithFormat:@"processor_set_default kr=0x%x", kr];
-        psetName = MACH_PORT_NULL;
-    }
-
-    processor_set_t pset = MACH_PORT_NULL;
-
-    // The previous revision referenced processor_set_name_to_control, which
-    // is not an available iOS SDK API and prevented the application building.
-    if (pset == MACH_PORT_NULL) {
-        mach_port_t hostPriv = MACH_PORT_NULL;
-        host_get_special_port(mach_host_self(), HOST_NODENAME, HOST_PRIV_PORT, &hostPriv);
-        if (hostPriv != MACH_PORT_NULL) {
-            processor_set_name_array_t sets = NULL;
-            natural_t setCnt = 0;
-            if (host_processor_sets(mach_host_self(), &sets, &setCnt) == KERN_SUCCESS && sets) {
-                if (setCnt > 0) {
-                    kr = host_processor_set_priv(hostPriv, sets[0], &pset);
-                }
-                vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
-            }
-            mach_port_deallocate(mach_task_self(), hostPriv);
-            if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
-                pset = MACH_PORT_NULL;
-                if (psetName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), psetName);
-                MF_PS_FAIL(@"%@；host_priv 路也失败 kr=0x%x", firstFailure ?: @"", kr);
-            }
-        } else {
-            if (psetName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), psetName);
-            MF_PS_FAIL(@"%@；且拿不到 host_priv", firstFailure ?: @"");
-        }
-    }
-
-    /* name 端口用完就放；control 端口留到 tasks 取完之后再放 */
-    if (psetName != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self(), psetName);
-    }
-
-    mach_port_array_t tasks = NULL;
-    natural_t taskCnt = 0;
-    kr = processor_set_tasks(pset, &tasks, &taskCnt);
-    mach_port_deallocate(mach_task_self(), pset);
-    if (kr != KERN_SUCCESS || tasks == NULL) {
-        MF_PS_FAIL(@"processor_set_tasks kr=0x%x（pset 已是 control 端口）", kr);
-    }
-
-    uint32_t found = MACH_PORT_NULL;
-    for (natural_t i = 0; i < taskCnt; i++) {
-        if (tasks[i] == MACH_PORT_NULL) continue;
-        int tpid = 0;
-        if (pid_for_task(tasks[i], &tpid) == KERN_SUCCESS && tpid == targetPid) {
-            found = tasks[i];
-            tasks[i] = MACH_PORT_NULL;       // 归我们了，别在下面释放
-            continue;
-        }
-        mach_port_deallocate(mach_task_self(), tasks[i]);
-    }
-    vm_deallocate(mach_task_self(), (vm_address_t)tasks, taskCnt * sizeof(mach_port_t));
-
-    if (found == MACH_PORT_NULL) {
-        MF_PS_FAIL(@"枚举了 %u 个 task，里面没有 pid=%d", (unsigned)taskCnt, targetPid);
-    }
-    #undef MF_PS_FAIL
-    return found;
-}
+// [M5.207] MFGetTaskPortViaProcessorSet 已删除：它走 processor_set_tasks
+// 取 target task port，而端口不再参与任何读取路径。
 #ifndef HOST_NODENAME
 #define HOST_NODENAME 0
 #endif
@@ -465,17 +375,8 @@ static BOOL gMFKernelPoisoned = NO;
 
 #pragma mark - 枚举路由探测
 
-/// 试探某个 processor_set 能不能真的拿出 task 列表
-static kern_return_t MFTestProcessorSet(processor_set_t pset) {
-    if (pset == MACH_PORT_NULL) return KERN_INVALID_ARGUMENT;
-    mach_port_array_t tasks = NULL;
-    natural_t cnt = 0;
-    kern_return_t kr = processor_set_tasks(pset, &tasks, &cnt);
-    if (kr == KERN_SUCCESS && tasks != NULL && cnt > 0) {
-        vm_deallocate(mach_task_self(), (vm_address_t)tasks, cnt * sizeof(mach_port_t));
-    }
-    return kr;
-}
+// [M5.207] MFTestProcessorSet 已删除：它只为探测 processor_set_tasks 是否可用，
+// 而进程枚举已经改成纯 sysctl。
 
 /*
  * ★ 审查修正（报告 S6）：
@@ -490,67 +391,22 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
  *   配合 sysctl(KERN_PROC_ALL) 拿 pid 列表，是当前最可能走通的一条。
  */
 - (MFEnumRoute)detectRoute {
-    if (self.cachedRoute != MFEnumRouteNone) return self.cachedRoute;
-
-    // 路 C：task_for_pid（靠 entitlement，最优先）
-    if ([self taskForPidAvailable]) {
-        self.cachedRoute = MFEnumRouteTaskForPid;
-        NSLog(@"[MF][Kernel] 路由探测 → 路 C task_for_pid 可用");
-        return MFEnumRouteTaskForPid;
-    }
-
-    // 路 A：host_priv
-    if (self.hostPrivPort != MACH_PORT_NULL) {
-        processor_set_name_array_t sets = NULL;
-        natural_t setCnt = 0;
-        if (host_processor_sets(mach_host_self(), &sets, &setCnt) == KERN_SUCCESS && sets) {
-            processor_set_t pset = MACH_PORT_NULL;
-            kern_return_t kr = host_processor_set_priv(self.hostPrivPort, sets[0], &pset);
-            vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
-            if (kr == KERN_SUCCESS) {
-                kr = MFTestProcessorSet(pset);
-                mach_port_deallocate(mach_task_self(), pset);
-                if (kr == KERN_SUCCESS) {
-                    self.cachedRoute = MFEnumRoutePrivileged;
-                    NSLog(@"[MF][Kernel] 路由探测 → 路 A host_priv 可用");
-                    return MFEnumRoutePrivileged;
-                }
-            }
-            NSLog(@"[MF][Kernel] 路 A 试探失败 kr=0x%x", kr);
-        }
-    }
-
-    // 路 B：processor_set_default（免特权）—— 必须真的测 processor_set_tasks
-    processor_set_t pset = MACH_PORT_NULL;
-    if (processor_set_default(mach_host_self(), &pset) == KERN_SUCCESS) {
-        kern_return_t kr = MFTestProcessorSet(pset);
-        mach_port_deallocate(mach_task_self(), pset);
-        if (kr == KERN_SUCCESS) {
-            self.cachedRoute = MFEnumRouteDefault;
-            NSLog(@"[MF][Kernel] 路由探测 → 路 B 免特权可用");
-            return MFEnumRouteDefault;
-        }
-        NSLog(@"[MF][Kernel] 路 B processor_set_tasks 失败 kr=0x%x —— 这条路其实不通", kr);
-    }
-
-    NSLog(@"[MF][Kernel] 三条枚举路全不通");
+    /*
+     * [M5.207] 三条「取 task port」的路（task_for_pid / host_priv / processor_set_default）
+     * 全部退出进程枚举：列表改成纯 sysctl(KERN_PROC_ALL)，只读 pid / 路径 / 名字，
+     * 不碰系统 task 表，也不为任何进程预取端口。
+     *
+     * 恒返回 MFEnumRouteNone 是刻意的 —— 它的含义从「三条路都不通」变成
+     * 「枚举不再需要任何一条」。调用方看到 None 时应理解为「无需端口」，
+     * 不是「权限不足」。
+     */
     return MFEnumRouteNone;
 }
 
-/// 路 C 可用性：能不能对一个真实 pid 拿到 task port
-- (BOOL)taskForPidAvailable {
-    mach_port_t t = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), getpid(), &t);
-    if (kr == KERN_SUCCESS && t != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self(), t);
-        return YES;
-    }
-    NSLog(@"[MF][Kernel] task_for_pid(self) kr=0x%x（task_for_pid-allow 未生效？）", kr);
-    return NO;
-}
+/// [M5.207] 路 C 可用性探测已删除：它会对自身调 task_for_pid，正是要消掉的动作。
 
-/// 路 C：sysctl 拿 pid 列表（★ 不再逐个取 task port，见 acquireTaskPortForPid）
-- (NSArray<MFProcessInfo *> *)enumerateViaTaskForPid:(NSString **)err {
+/// 进程枚举：sysctl 拿 pid 列表（纯只读，不取任何 task port）
+- (NSArray<MFProcessInfo *> *)enumerateViaSysctl:(NSString **)err {
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     size_t len = 0;
     if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) {
@@ -595,105 +451,24 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
 }
 
 + (uint32_t)acquireTaskPortForPid:(int)pid error:(NSString **)err {
-    if (pid <= 0) {
-        if (err) *err = @"pid 非法";
-        return MACH_PORT_NULL;
-    }
-
-    // ── ① 首选 task_for_pid（有 entitlement 时最快、权限最全）──
-    mach_port_t task = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr == KERN_SUCCESS && task != MACH_PORT_NULL) {
-        NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x（task_for_pid）", pid, task);
-        return task;
-    }
-    NSLog(@"[MF][Kernel] task_for_pid(%d) kr=0x%x → 改试 processor_set_tasks", pid, kr);
-
     /*
-     * ── ①.5 [M5.87] 内核 patch 后再试一次 ──
+     * [M5.207] 停用。
      *
-     * 为什么加这一步：
-     *   task_for_pid 被拒的根因是**目标进程**的 proc->p_csflags 带 CS_HARD，
-     *   taskgated 见到就拒（kr=0x5）。我们的 entitlement 本身没问题。
-     *   而 processor_set_tasks 那条路在真机上是 kr=0x4（也走不通）。
+     * 这个函数原本干三件事：task_for_pid →（必要时）改目标 proc 的 csflags
+     * 与自身 task 的 t_flags → processor_set_tasks 回退。三者都是「碰目标进程
+     * 或系统 task 表」的动作，而读取链现在完全走 KFD 页表：
      *
-     *   所以：既然 KFD 已经给了内核读写，就直接把目标 proc 的那几个硬标志位清掉，
-     *   然后重新 task_for_pid —— 此时 taskgated 没有理由再拒。
+     *     pid → proc → pmap 根表 → 目标页表，逐页翻译后物理读
      *
-     * 只有 KFD 已开（kbase != 0）才走这一步；否则会白跑一遍扫描。
-     * patch 失败不影响后续的 processor_set 回退，只是白花一点时间。
+     * 也就是说，目标 task port 已经不在任何一条读取路径上。留着这条获取链只会
+     * 让「游戏进程里存在一个被外部持有的 task port」这件事继续成立。
+     *
+     * 保留签名只为让调用点继续编译：一律返回 MACH_PORT_NULL，并明确说明原因，
+     * 免得调用方误以为「端口失败 = 读取没准备好」而反复重试。
      */
-    /*
-     * ★★★ [M5.90] 事故后的紧急处置：此段**只诊断，不写内核** ★★★
-     *
-     * 2026-10-24 真机事故：在 iPad14,4 / iPadOS 16.1 上，内核启动成功后
-     * 点「一键开始」，触发内核 panic、整机重启。
-     *
-     * 根因：M5.87/M5.89 在这里用 apply=1 直接往 task/proc 结构里盲写。
-     * 那两个结构的 0x100..0x800 区间混着引用计数、itk_space 指针、链表等
-     * 关键字段，往错误偏移写一个位就会把内核打崩。
-     *
-     * 现在的做法：
-     *   · 两个 patch 函数一律传 apply=0 / scan_only=1 → 只读、只报告候选
-     *   · 候选值会完整打到日志里，用来离线确定 t_flags / p_csflags 的真实偏移
-     *   · 等偏移用可靠来源（XNU 源码 / 已知偏移表）确认后，再硬编码精确偏移
-     *     一次性定点写入，不再做任何"扫描式盲写"
-     *
-     * 在此之前，task port 这一环是拿不到的，读取链会停在 gateOpen=NO ——
-     * 这是已知状态，不是新的故障。
-     */
-    if ([MFKernel shared].kbase != 0) {
-        char rep[2048] = {0};
-
-        /*
-         * 第一步（最安全）：用 kernel_task vs 自己的 task 对比，算出 t_flags 偏移。
-         * 纯只读，不写内核一个字节 —— 这条一定能跑，且结果可直接用于下一版定点写入。
-         */
-        int loc = mf_locate_tf_platform_offset(rep, sizeof(rep));
-        NSLog(@"[MF][Kernel][定位] t_flags 候选=%d\n%s", loc, rep);
-
-        /* 闸②：TF_PLATFORM —— 只读扫描，列出候选偏移和原值 */
-        memset(rep, 0, sizeof(rep));
-        int tfp = mf_try_tf_platform(pid, 0, rep, sizeof(rep));
-        NSLog(@"[MF][Kernel][诊断] TF_PLATFORM 候选 pid=%d → rc=%d\n%s", pid, tfp, rep);
-
-        /* 闸①：目标 proc 的 cs_flags —— 同样只读 */
-        memset(rep, 0, sizeof(rep));
-        int prc = mf_prepare_task_for_pid(pid, 0, rep, sizeof(rep));
-        NSLog(@"[MF][Kernel][诊断] proc csflags 候选 pid=%d → rc=%d\n%s", pid, prc, rep);
-
-        NSLog(@"[MF][Kernel] 注意：M5.90 起 patch 段只诊断不写入 —— "
-              @"为避免再次内核 panic，等偏移确定后再定点修改");
-    }
-
-    // ── ② 回退：processor_set_tasks（不走 taskgated 的代码签名检查）──
-    NSString *psError = nil;
-    uint32_t fallback = MFGetTaskPortViaProcessorSet(pid, &psError);
-    if (fallback != MACH_PORT_NULL) {
-        NSLog(@"[MF][Kernel] 按需取得 pid=%d 的 task port=0x%x（processor_set_tasks）", pid, fallback);
-        return fallback;
-    }
-
-    // ── ③ 两条都不通，给出能区分原因的诊断 ──
+    (void)pid;
     if (err) {
-        NSString *hint;
-        switch (kr) {
-            case KERN_FAILURE:
-                hint = @"kr=0x5 KERN_FAILURE —— 目标进程带反调试/CS_HARD 签名保护（ACE 反作弊），"
-                       @"taskgated 拒绝，与我们的 entitlement 无关";
-                break;
-            case KERN_PROTECTION_FAILURE:
-                hint = @"kr=0x2 KERN_PROTECTION_FAILURE —— 权限不足，检查 task_for_pid-allow 是否生效";
-                break;
-            case KERN_INVALID_ARGUMENT:
-                hint = @"kr=0x4 KERN_INVALID_ARGUMENT —— pid 不存在或无此 task";
-                break;
-            default:
-                hint = [NSString stringWithFormat:@"kr=0x%x", kr];
-                break;
-        }
-        *err = [NSString stringWithFormat:@"task_for_pid(%d)：%@；processor_set 回退也失败：%@",
-                pid, hint, psError ?: @"未知"];
+        *err = @"task_for_pid 已在 M5.207 停用：读取只走 KFD 页表，不需要目标 task port";
     }
     return MACH_PORT_NULL;
 }
@@ -706,35 +481,30 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
         [r appendFormat:@"身份：%@\n", [self identityText]];
         [r appendFormat:@"kfd 是否已开：%@\n\n", mf_is_open() ? @"是" : @"否"];
 
-        // 内核端口
+        /*
+         * [M5.207] 权限自检不再碰 processor_set / host_processor_sets。
+         *
+         * 那三个调用原来是为了回答"哪条路能枚举 task"，而枚举已经改成
+         * sysctl(KERN_PROC_ALL) —— 不需要任何 processor_set，也不需要
+         * task_get_special_port 之外的任何特权端口。留在这里只会让"自检"
+         * 顺手去碰系统 task 表，与"读取链上没有受限 API"的目标相矛盾。
+         *
+         * 现在只报两件真正相关的事：本进程有没有内核端口（越狱态标志），
+         * 以及 sysctl 枚举能不能列出进程。
+         */
         mach_port_t kp = MACH_PORT_NULL;
         kern_return_t kr = task_get_special_port(mach_task_self(), TASK_KERNEL_PORT, &kp);
         [r appendFormat:@"task_get_special_port(TASK_KERNEL_PORT)：\n  kr=0x%x port=0x%x %@\n\n",
          kr, kp, (kr == KERN_SUCCESS && kp) ? @"✓ 有 tfp0" : @"× 无（非越狱/权限不足）"];
+        if (kp) mach_port_deallocate(mach_task_self(), kp);
 
-        // 路 B
-        processor_set_t ps = MACH_PORT_NULL;
-        kern_return_t kr2 = processor_set_default(mach_host_self(), &ps);
-        [r appendFormat:@"路 B  processor_set_default：\n  kr=0x%x %@\n\n",
-         kr2, (kr2 == KERN_SUCCESS && ps) ? @"✓ 可用（免特权）" : @"× 不可用"];
-        if (ps) mach_port_deallocate(mach_task_self(), ps);
-
-        // 路 A（要 host_priv）
-        mach_port_t host = mach_host_self();
-        processor_set_name_array_t sets = NULL;
-        natural_t setCnt = 0;
-        kern_return_t kr3 = host_processor_sets(host, &sets, &setCnt);
-        [r appendFormat:@"路 A  host_processor_sets：\n  kr=0x%x 集合数=%u %@\n\n",
-         kr3, setCnt, kr3 == KERN_SUCCESS ? @"✓" : @"×"];
-        if (sets) vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
+        [r appendString:@"进程枚举：sysctl(KERN_PROC_ALL)（不需要 task port / processor_set）\n\n"];
 
         // 实际试枚举一次
         NSString *err = nil;
         NSArray<MFProcessInfo *> *procs = [self enumerateProcessesWithRoute:MFEnumRouteNone error:&err];
         if (procs.count) {
-            [r appendFormat:@"枚举结果：✓ 拿到 %lu 个进程（走 %@）\n",
-             (unsigned long)procs.count,
-             self.cachedRoute == MFEnumRoutePrivileged ? @"路 A" : @"路 B"];
+            [r appendFormat:@"枚举结果：✓ 拿到 %lu 个进程\n", (unsigned long)procs.count];
             for (MFProcessInfo *p in [procs subarrayWithRange:NSMakeRange(0, MIN(5, procs.count))]) {
                 [r appendFormat:@"  %d  %@\n", p.pid, p.name];
             }
@@ -752,117 +522,19 @@ static kern_return_t MFTestProcessorSet(processor_set_t pset) {
 
 - (NSArray<MFProcessInfo *> *)enumerateProcessesWithRoute:(MFEnumRoute)route
                                                     error:(NSString **)err {
-    if (route == MFEnumRouteNone) {
-        route = [self detectRoute];
-    }
-
-    // ── 路 C：task_for_pid（不碰 processor_set，靠 entitlement）──
-    if (route == MFEnumRouteTaskForPid) {
-        NSArray<MFProcessInfo *> *list = [self enumerateViaTaskForPid:err];
-        if (list.count == 0) {
-            if (err && *err == nil) *err = @"路 C 未拿到任何 task port";
-            return @[];
-        }
-        return list;
-    }
-
-    processor_set_t pset = MACH_PORT_NULL;
-    kern_return_t kr;
-
-    if (route == MFEnumRoutePrivileged) {
-        // 路 A：host_processor_sets → host_processor_set_priv → processor_set_tasks
-        mach_port_t host = mach_host_self();
-        processor_set_name_array_t sets = NULL;
-        natural_t setCnt = 0;
-        kr = host_processor_sets(host, &sets, &setCnt);
-        if (kr != KERN_SUCCESS || !sets || setCnt == 0) {
-            if (err) *err = [NSString stringWithFormat:@"host_processor_sets kr=0x%x", kr];
-            return @[];
-        }
-        mach_port_t hostPriv = self.hostPrivPort;
-        if (hostPriv == MACH_PORT_NULL) {
-            // 再试一次直接要
-            host_get_special_port(mach_host_self(), HOST_NODENAME, HOST_PRIV_PORT, &hostPriv);
-            self.hostPrivPort = hostPriv;
-        }
-        if (hostPriv == MACH_PORT_NULL) {
-            vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
-            if (err) *err = @"路 A 拿不到 host_priv（权限门槛）";
-            return @[];
-        }
-        kr = host_processor_set_priv(hostPriv, sets[0], &pset);
-        vm_deallocate(mach_task_self(), (vm_address_t)sets, setCnt * sizeof(mach_port_t));
-        if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
-            if (err) *err = [NSString stringWithFormat:@"host_processor_set_priv kr=0x%x", kr];
-            return @[];
-        }
-    } else {
-        // 路 B：processor_set_default（免特权）
-        kr = processor_set_default(mach_host_self(), &pset);
-        if (kr != KERN_SUCCESS || pset == MACH_PORT_NULL) {
-            if (err) *err = [NSString stringWithFormat:@"processor_set_default kr=0x%x", kr];
-            return @[];
-        }
-    }
-
-    // processor_set_tasks（两条路共用）
-    mach_port_array_t tasks = NULL;
-    natural_t taskCnt = 0;
-    kr = processor_set_tasks(pset, &tasks, &taskCnt);
-    mach_port_deallocate(mach_task_self(), pset);
-
-    if (kr != KERN_SUCCESS || !tasks) {
-        if (err) *err = [NSString stringWithFormat:@"processor_set_tasks kr=0x%x", kr];
-        return @[];
-    }
-
-    NSMutableArray<MFProcessInfo *> *out = [NSMutableArray arrayWithCapacity:taskCnt];
-    char path[0x400];
-    for (natural_t i = 0; i < taskCnt; i++) {
-        memset(path, 0, sizeof(path));
-
-        /*
-         * ★ 审查修正（报告 S4）：proc_pidpath 的第一个参数要的是 **pid**，
-         *   不是 task port。第一版直接把 tasks[i]（task port）传进去，
-         *   等于拿一个 Mach 端口号当 pid 用 —— 永远匹配不上真实进程。
-         *   先 pid_for_task 换成 pid，再 proc_pidpath。
-         */
-        int pid = 0;
-        if (pid_for_task(tasks[i], &pid) != KERN_SUCCESS || pid <= 0) {
-            mach_port_deallocate(mach_task_self(), tasks[i]);
-            continue;
-        }
-
-        // 对标原实现：proc_pidpath + strrchr('/') + strncmp
-        if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
-            mach_port_deallocate(mach_task_self(), tasks[i]);
-            continue;
-        }
-        char *base = strrchr(path, '/');
-        base = base ? base + 1 : path;
-        if (base[0] == '\0') {
-            mach_port_deallocate(mach_task_self(), tasks[i]);
-            continue;
-        }
-
-        MFProcessInfo *pi = [[MFProcessInfo alloc] init];
-        pi.pid = pid;
-        pi.name = [NSString stringWithUTF8String:base] ?: @"?";
-        pi.path = [NSString stringWithUTF8String:path] ?: @"?";
-        /*
-         * ★ 审查修正（P1-2）：processor_set_tasks 一次给了 taskCnt 个端口右，
-         *   以前全部攥在列表里从不释放 —— 每次刷新泄漏 N 个右，
-         *   而且持有别的进程的 task 端口会让那个 task 结构无法回收。
-         *   现在只留 pid/名字，端口立刻归还；要读时再 acquireTaskPortForPid:。
-         */
-        pi.taskPort = MACH_PORT_NULL;
-        mach_port_deallocate(mach_task_self(), tasks[i]);
-        [out addObject:pi];
-    }
-    vm_deallocate(mach_task_self(), (vm_address_t)tasks, taskCnt * sizeof(mach_port_t));
-
-    NSLog(@"[MF][Kernel] 枚举到 %lu 个进程（路 %@）", (unsigned long)out.count,
-          route == MFEnumRoutePrivileged ? @"A" : @"B");
+    /*
+     * [M5.207] 只留 sysctl 一条路。
+     *
+     * 原来的路 C（task_for_pid）、路 A（host_priv + processor_set_tasks）、
+     * 路 B（processor_set_default + processor_set_tasks）都要求或返回 task port，
+     * 而端口已经从读取链上整体退场。进程列表只需要 pid / 路径 / 名字 ——
+     * sysctl(KERN_PROC_ALL) 全给，且不碰任何 task 表。
+     *
+     * route 参数保留只为兼容调用点：传什么都走同一条路。
+     */
+    (void)route;
+    NSMutableArray<MFProcessInfo *> *out =
+        [[self enumerateViaSysctl:err] mutableCopy] ?: [NSMutableArray array];
     [out sortUsingComparator:^NSComparisonResult(MFProcessInfo *a, MFProcessInfo *b) {
         return a.pid < b.pid ? NSOrderedAscending : (a.pid > b.pid ? NSOrderedDescending : NSOrderedSame);
     }];

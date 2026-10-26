@@ -22,9 +22,11 @@ static NSString *const kMFReaderBasesKey = @"mf.game.reader.absoluteBases.v1";
 
 /// A PID/path alone cannot distinguish a restarted copy of the same game.
 /// Refuse persistence when its start time cannot be established as well.
-static NSDictionary *MFReaderProcessIdentity(mach_port_t task) {
-    int pid = 0;
-    if (task == MACH_PORT_NULL || pid_for_task(task, &pid) != KERN_SUCCESS || pid <= 0) return nil;
+///
+/// [M5.207] 改为按 **pid** 取身份，不再要求 task port：端口已经从读取链上退场，
+/// 而 pid + 可执行路径 + 启动时间三者合起来才能确认"同一个进程实例"。
+static NSDictionary *MFReaderProcessIdentityForPid(int pid) {
+    if (pid <= 0) return nil;
 
     char path[4096] = {0};
     if (proc_pidpath(pid, path, sizeof(path)) <= 0) return nil;
@@ -39,10 +41,11 @@ static NSDictionary *MFReaderProcessIdentity(mach_port_t task) {
         info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0 ||
         info.kp_proc.p_starttime.tv_usec < 0 || info.kp_proc.p_starttime.tv_usec >= 1000000) return nil;
 
-    // If the task died during the path/sysctl queries, do not publish an
-    // identity possibly obtained from a newly reused PID.
-    int confirmedPID = 0;
-    if (pid_for_task(task, &confirmedPID) != KERN_SUCCESS || confirmedPID != pid) return nil;
+    // Re-read the pid after the path/sysctl queries: if it vanished in between,
+    // the pid may already have been reused, so no identity is published.
+    char confirmPath[4096] = {0};
+    if (proc_pidpath(pid, confirmPath, sizeof(confirmPath)) <= 0) return nil;
+    if (strcmp(confirmPath, path) != 0) return nil;
     return @{@"pid": @(pid), @"path": executable,
              @"startTimeSec": @((int64_t)info.kp_proc.p_starttime.tv_sec),
              @"startTimeUSec": @((int64_t)info.kp_proc.p_starttime.tv_usec)};
@@ -100,7 +103,14 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 }
 
 - (BOOL)ready {
-    return self.targetTaskPort != MACH_PORT_NULL && [MFReadBackend shared].gateOpen;
+    /*
+     * [M5.207] 就绪判据改成只看 KFD 门。
+     *
+     * 原来是 targetTaskPort != NULL && gateOpen，而端口已经恒为 0 ——
+     * 继续用那个判据会让 ready 永远为 NO，绘制层直接判死。
+     * 现在的真实条件只有一个：pmap 根表已就位（attachKFDPid 成功）。
+     */
+    return [MFReadBackend shared].gateOpen;
 }
 
 #pragma mark - 当前进程实例的基址快照
@@ -118,7 +128,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         [defaults synchronize];
         id value = [defaults objectForKey:kMFReaderBasesKey];
-        NSDictionary *identity = MFReaderProcessIdentity(self.targetTaskPort);
+        NSDictionary *identity = MFReaderProcessIdentityForPid([MFReadBackend shared].kfdPid);
         if (!identity) {
             [defaults removeObjectForKey:kMFReaderBasesKey];
             _baseCalibrationStatus = @"未校准（目标 PID、路径或启动时间无法确认）";
@@ -151,7 +161,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 - (void)saveBasesToDefaults {
     @synchronized (self) {
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-        NSDictionary *identity = MFReaderProcessIdentity(self.targetTaskPort);
+        NSDictionary *identity = MFReaderProcessIdentityForPid([MFReadBackend shared].kfdPid);
         if (!identity) {
             [self clearBasesWithStatus:@"未校准（缺少进程实例身份，已丢弃绝对地址）"];
             [defaults removeObjectForKey:kMFReaderBasesKey];

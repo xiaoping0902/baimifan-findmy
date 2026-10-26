@@ -1518,345 +1518,45 @@ out:
     return rc;
 }
 
-/*
- * 在目标 proc 里找 p_csflags 并清掉 CS_HARD / CS_RESTRICT / CS_REQUIRE_LV。
- *
- * scan_only != 0 时只报告、不写（默认走这条）。
- *
- * 为什么可以按"值里带 CS_HARD 位"来定位：目标进程是 App Store 装的游戏，
- * 它的 codesign flags 一定带 CS_HARD；而同结构里恰好带这个位的字段很少。
- * 命中多个候选时**逐个清除**并回报清了哪几个（每个都只清位，不整体写 0）。
- */
-int mf_clear_proc_csflags(uint64_t proc, int scan_only, char *report, size_t report_len)
-{
-    if (g_kfd == NULL || proc == 0) {
-        if (report && report_len) {
-            snprintf(report, report_len, "参数非法（kfd=%p proc=0x%llx）", (void *)g_kfd,
-                     (unsigned long long)proc);
-        }
-        return -1;
-    }
+// [M5.207] mf_clear_proc_csflags 已移除：它只为 task_for_pid 清目标 csflags。
 
-    /*
-     * ★ [M5.90] 盲写保护
-     *
-     * 和 mf_try_tf_platform 同样的教训：proc 结构 0x100..0x800 里有引用计数、
-     * 指针、链表等关键字段，误清位一样能让内核崩。
-     * 所以写入前必须通过两条额外校验：
-     *   ① 值必须落在 cs_flags 的合理量级（0x100 以上、0x01000000 以下）
-     *   ② 写完立刻读回校验，不一致就回滚
-     * 并且默认 scan_only（只报告），要写必须显式传 0。
-     */
-    char line[2048];
-    size_t used = 0;
-    int hits = 0;
-    int patched = 0;
-    int skipped = 0;
-    line[0] = '\0';
-
-    for (uint32_t off = MF_CS_SCAN_START; off < MF_CS_SCAN_END; off += 4) {
-        uint32_t v = 0;
-        if (mf_kread32(proc + off, &v) != 0) {
-            continue;
-        }
-        if ((v & (MF_CS_HARD | MF_CS_RESTRICT | MF_CS_REQUIRE_LV)) == 0) {
-            continue;                     /* 没有我们要清的位，跳过 */
-        }
-        /* 不像 cs_flags 的一律不碰：太小是计数，太大是指针/混合字段 */
-        if (v < 0x100 || v > 0x01000000u) {
-            skipped++;
-            continue;
-        }
-
-        hits++;
-        uint32_t nv = v & ~(MF_CS_HARD | MF_CS_RESTRICT | MF_CS_REQUIRE_LV);
-
-        if (used < sizeof(line) - 160) {
-            used += snprintf(line + used, sizeof(line) - used,
-                             "  候选 +0x%X: 0x%08X → 0x%08X%s\n",
-                             off, v, nv, scan_only ? "（未写）" : "");
-        }
-
-        if (!scan_only) {
-            if (mf_kwrite32(proc + off, nv) == 0) {
-                uint32_t back = 0;
-                if (mf_kread32(proc + off, &back) == 0 && back == nv) {
-                    patched++;
-                } else {
-                    mf_kwrite32(proc + off, v);    /* 读回不一致，回滚 */
-                }
-            }
-        }
-    }
-
-    if (report && report_len) {
-        snprintf(report, report_len,
-                 "csflags 扫描 0x%X..0x%X：%d 个候选、%d 个已写、%d 个跳过%s\n%s",
-                 MF_CS_SCAN_START, MF_CS_SCAN_END - 4, hits, patched, skipped,
-                 scan_only ? "（dry-run，未修改内核）" : "", line);
-    }
-    return (scan_only || patched > 0) ? 0 : -2;
-}
-
-/* ================================================================ */
-/* 5b) TF_PLATFORM：把自己提升成「内核级 task」                        */
-/* ================================================================ */
-/*
- * ── 为什么改这个而不是改目标进程 ──
- *
- * task_for_pid 有两道独立的闸（HITB 2018, Jonathan Levin
- * 《Lend Me Your kernel_task Port》）：
- *
- *   闸 ①  taskgated：看**目标** proc 的 cs_flags 是否带 CS_HARD
- *   闸 ②  task_conversion_eval：看**调用者** task 是不是内核级
- *
- * 原文：
- *     iOS 11 adds task_conversion_eval in order to restrict task port access.
- *     Tasks are allowed to resolve their own task ports, and the kernel is
- *     allowed to resolve anyone's task port.
- *     ... flips TF_PLATFORM in t_flags (0x3a8)
- *
- * 也就是说：只清目标的 CS_HARD（5 段那个做法）**过不了闸 ②**。
- * 真正需要的是给**自己**的 task 置 TF_PLATFORM，让
- * task_conversion_eval 把自己当成内核级调用者。
- *
- * ── 好处 ──
- *   · 只改自己的 task，不碰别人的数据结构
- *   · 只置一个位（0x400），不整体改写，最坏是没效果
- *   · 每次尝试后立刻验证 task_for_pid，失败就恢复原值，副作用可控
- *
- * ── t_flags 偏移问题 ──
- *   论文给的 0x3a8 是 iOS 11 的值，iOS 16 会变。
- *   所以这里在 task 结构里扫一段范围，逐个"置位 → 试 task_for_pid → 失败则回滚"。
- *   task_for_pid 是安全调用（失败只是返回错误码），所以这个试错是可行的。
- */
-
-#define MF_TF_PLATFORM 0x00000400u
-
-/* libkfd 不保证引入 mach 的 task_for_pid 原型，显式声明 */
-extern kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
-
-int mf_try_tf_platform(int pid, int apply, char *report, size_t report_len)
-{
-    if (g_kfd == NULL) {
-        if (report && report_len) snprintf(report, report_len, "KFD 未打开");
-        return -1;
-    }
-    uint64_t task = mf_get_current_task();
-    if (task == 0) {
-        if (report && report_len) {
-            snprintf(report, report_len, "拿不到 current_task（KFD 未跑完 info 阶段？）");
-        }
-        return -2;
-    }
-
-    /*
-     * dry-run：只报候选，不写。
-     * 判据：值在合理 flags 范围内（非 0、小于 0x10000）、且当前不含 TF_PLATFORM。
-     */
-    if (!apply) {
-        char line[1536];
-        size_t used = 0;
-        int cands = 0;
-        line[0] = '\0';
-        for (uint32_t off = 0x100; off < 0x800; off += 4) {
-            uint32_t v = 0;
-            if (mf_kread32(task + off, &v) != 0) continue;
-            if (v == 0 || v > 0x10000) continue;
-            cands++;
-            if (used < sizeof(line) - 64) {
-                used += snprintf(line + used, sizeof(line) - used,
-                                 "  +0x%X = 0x%08X%s\n", off, v,
-                                 (v & MF_TF_PLATFORM) ? "（已含 TF_PLATFORM）" : "");
-            }
-        }
-        if (report && report_len) {
-            snprintf(report, report_len,
-                     "TF_PLATFORM dry-run：task=0x%llx，%d 个候选（未写）\n%s",
-                     (unsigned long long)task, cands, line);
-        }
-        return 0;
-    }
-
-    /* 真正尝试：逐候选置位 → 试 task_for_pid → 失败回滚 */
-    /*
-     * ★★★ [M5.90] 紧急收窄 ★★★
-     *
-     * 2026-10-24 真机事故：在 iPad14,4 / iPadOS 16.1 上，点「一键开始」
-     * 触发内核 panic、整机重启。原因是本段原来的做法——
-     * 在 task 结构的 0x100..0x800 里**逐个偏移盲写** val|0x400——
-     * 太危险：那个区间混着引用计数、itk_space 指针、状态位等关键字段，
-     * 只要往其中一个写一个位，内核立刻崩。
-     *
-     * 现在的策略改成：**只读诊断，绝不盲写**。
-     *   · 把候选偏移和原值全列出来，交给人/下一版硬编码偏移去写
-     *   · 只对「值落在极窄的 flags 特征区间」的候选做尝试性写入，
-     *     且写完立即读回校验，不匹配立刻回滚
-     *
-     * 判据收紧到：
-     *   0x10 <= v <= 0x8000            → flags 量级（引用计数通常更小，指针更大）
-     *   (v & 0x400) == 0               → 还没置过 TF_PLATFORM
-     *   (v & 0xFFFF0000) == 0          → 高位干净，不像指针/计数混合字段
-     */
-    char line[1792];
-    size_t used = 0;
-    line[0] = '\0';
-    int tried = 0;
-    int skipped = 0;
-
-    for (uint32_t off = 0x100; off < 0x800; off += 4) {
-        uint32_t v = 0;
-        if (mf_kread32(task + off, &v) != 0) continue;
-
-        /* 收紧后的判据：不像 flags 的一律不碰 */
-        if (v < 0x10 || v > 0x8000 || (v & 0xFFFF0000u) != 0) {
-            skipped++;
-            continue;
-        }
-        if (v & MF_TF_PLATFORM) continue;           /* 已经置过了，跳过 */
-
-        if (mf_kwrite32(task + off, v | MF_TF_PLATFORM) != 0) continue;
-
-        /* 写完立刻读回校验，写不进去就说明这地址不能碰 */
-        uint32_t verify = 0;
-        if (mf_kread32(task + off, &verify) != 0 || verify != (v | MF_TF_PLATFORM)) {
-            mf_kwrite32(task + off, v);
-            skipped++;
-            continue;
-        }
-
-        tried++;
-
-        mach_port_t tp = MACH_PORT_NULL;
-        kern_return_t kr = task_for_pid(mach_task_self(), pid, &tp);
-
-        if (kr == KERN_SUCCESS && tp != MACH_PORT_NULL) {
-            if (report && report_len) {
-                snprintf(report, report_len,
-                         "✓ TF_PLATFORM 命中偏移 +0x%X（0x%08X → 0x%08X），"
-                         "task_for_pid(%d) 成功 port=0x%x\n%s",
-                         off, v, v | MF_TF_PLATFORM, pid, tp, line);
-            }
-            mach_port_deallocate(mach_task_self(), tp);
-            return (int)off;      /* 正数 = 成功的偏移 */
-        }
-
-        /* 这个偏移不对，立刻回滚，别把 task 结构改乱 */
-        mf_kwrite32(task + off, v);
-
-        if (used < sizeof(line) - 80) {
-            used += snprintf(line + used, sizeof(line) - used,
-                             "  +0x%X 试过 kr=0x%x（已回滚）\n", off, kr);
-        }
-    }
-
-    if (report && report_len) {
-        snprintf(report, report_len,
-                 "✗ TF_PLATFORM 未命中（试了 %d 个、跳过 %d 个不像 flags 的字段）\n%s",
-                 tried, skipped, line);
-    }
-    return -3;
-}
-
-/* ================================================================ */
-/* 5c) 用「kernel_task vs 自己」对比，安全定位 t_flags 偏移            */
-/* ================================================================ */
-/*
- * ── 为什么需要这个 ──
- *
- * 2026-10-24 事故：靠「扫描 + 盲写」去试 t_flags，把内核打崩、整机重启。
- * 盲写这条路不能走。但 t_flags 的偏移又必须知道。
- *
- * ── 这里用的判据（全部只读，不写一个字节）──
- *
- *   XNU 里 kernel_task 是平台 task，它的 t_flags 一定带 TF_PLATFORM(0x400)；
- *   我们自己的 task 是普通用户态 task，该位不带。
- *
- *   所以拿 kernel_task 和 current_task 逐偏移对比：
- *     ① kernel_task[off] 的 0x400 位置位
- *     ② current_task[off] 的 0x400 位不置位
- *     ③ 两者除 0x400 之外的位**高度相似**（同一个字段的不同 task 实例）
- *   三条同时满足才算候选；第 ③ 条用 popcount 把差异位数限制在 3 位内。
- *
- *   这个方法的额外好处：它同时给出了「置位后应该变成什么值」——
- *   kernel_task 在该偏移的完整值就是目标形态。
- *
- * 纯只读，绝不会 panic。
- */
-int mf_locate_tf_platform_offset(char *report, size_t report_len)
-{
-    if (g_kfd == NULL) {
-        if (report && report_len) snprintf(report, report_len, "KFD 未打开");
-        return -1;
-    }
-    uint64_t ktask = mf_get_kernel_task();
-    uint64_t utask = mf_get_current_task();
-    if (ktask == 0 || utask == 0) {
-        if (report && report_len) {
-            snprintf(report, report_len,
-                     "拿不到 task 地址（kernel_task=0x%llx current_task=0x%llx）",
-                     (unsigned long long)ktask, (unsigned long long)utask);
-        }
-        return -2;
-    }
-
-    char line[2048];
-    size_t used = 0;
-    int cands = 0;
-    line[0] = '\0';
-
-    for (uint32_t off = 0x80; off < 0x1000; off += 4) {
-        uint32_t kv = 0, uv = 0;
-        if (mf_kread32(ktask + off, &kv) != 0) continue;
-        if (mf_kread32(utask + off, &uv) != 0) continue;
-
-        /* ① 内核带 TF_PLATFORM  ② 我们不带 */
-        if ((kv & MF_TF_PLATFORM) == 0) continue;
-        if (uv & MF_TF_PLATFORM) continue;
-
-        /* ③ 除 0x400 外差异极小 → 是同一字段 */
-        uint32_t diff = (kv ^ uv) & ~MF_TF_PLATFORM;
-        int bits = __builtin_popcount(diff);
-        if (bits > 3) continue;
-
-        cands++;
-        if (used < sizeof(line) - 110) {
-            used += snprintf(line + used, sizeof(line) - used,
-                             "  +0x%03X  kernel=0x%08X  self=0x%08X  差异位=%d\n",
-                             off, kv, uv, bits);
-        }
-    }
-
-    if (report && report_len) {
-        snprintf(report, report_len,
-                 "t_flags 定位（只读对比，未写内核）：kernel_task=0x%llx self=0x%llx，%d 个候选\n%s",
-                 (unsigned long long)ktask, (unsigned long long)utask, cands, line);
-    }
-    return cands;
-}
+// [M5.207] 5b) TF_PLATFORM 段整体移除。
+//
+// 这一段原本是给 task_for_pid 服务的：先清目标进程的 csflags（5 段），
+// 再给自己的 task 置 TF_PLATFORM，让 task_conversion_eval 放行。
+// 读取改走 KFD 页表之后，读取链上不再有 task_for_pid，两个写入口同时失去意义，
+// 于是连同它们的扫描/试错逻辑一起删除 —— 内核侧现在没有任何写入点。
+// 保留这段注释是为了让后来者知道：这里曾经有过代码，为什么被删，别再装回去。
 
 /*
- * 一步到位：找到 pid 的 proc → 清 csflags。
- * 返回 0 表示"可以再试 task_for_pid 了"。
+ * [M5.207] mf_prepare_task_for_pid 已移除。
+ *
+ * 它存在的唯一目的是「先把目标进程的 csflags 清掉，再试 task_for_pid」。
+ * 读取改成纯 KFD 页表之后，这条链上就没有 task_for_pid 了，函数随之删除：
+ * 保留下来的话，下一个接手的人很容易顺手把它接回绑定流程，
+ * 等于把已经消掉的目标进程改动又装回去。
  */
-int mf_prepare_task_for_pid(int pid, int apply, char *report, size_t report_len)
-{
-    char buf1[512] = {0};
-    char buf2[1024] = {0};
 
-    uint64_t proc = mf_find_proc_by_pid(pid, buf1, sizeof(buf1));
-    if (proc == 0) {
-        if (report && report_len) {
-            snprintf(report, report_len, "%s", buf1);
-        }
-        return -1;
-    }
+/* ================================================================ */
+/* 5e) 内核写入审计（清痕自证）                                       */
+/* ================================================================ */
+/*
+ * 「清痕」最省事的做法是改完再回滚，但那本身就要求先改一次。
+ * 这里改成：统计整场会话里到底往内核写了多少次。
+ *
+ * 期望值是 0 —— 读取走页表，目标进程与自身 task 都不需要写。
+ * 被动状态文件会带上这两个计数，现场可以直接核对"这一轮有没有写过内核"，
+ * 而不是靠代码注释声称自己很干净。
+ */
+static volatile uint64_t g_kernel_write_count = 0;
+static volatile uint64_t g_kernel_write_bytes = 0;
 
-    int rc = mf_clear_proc_csflags(proc, !apply, buf2, sizeof(buf2));
-    if (report && report_len) {
-        snprintf(report, report_len, "%s\n%s", buf1, buf2);
-    }
-    return rc;
+uint64_t mf_kernel_write_count(void) { return g_kernel_write_count; }
+uint64_t mf_kernel_write_bytes(void) { return g_kernel_write_bytes; }
+
+void mf_kernel_write_audit_reset(void) {
+    g_kernel_write_count = 0;
+    g_kernel_write_bytes = 0;
 }
 
 /* ================================================================ */
@@ -1991,6 +1691,7 @@ int mf_kwrite(void *uaddr, uint64_t kaddr, uint64_t size)
     mf_lock_kernel();
     int rc = mf_kwrite_locked(uaddr, kaddr, size);
     mf_unlock_kernel();
+    if (rc == 0) { g_kernel_write_count++; g_kernel_write_bytes += size; }
     return rc;
 }
 
@@ -2015,6 +1716,7 @@ int mf_kwrite32(uint64_t kaddr, uint32_t value)
     mf_lock_kernel();
     int rc = mf_kwrite32_locked(kaddr, value);
     mf_unlock_kernel();
+    if (rc == 0) { g_kernel_write_count++; g_kernel_write_bytes += 4; }
     return rc;
 }
 
@@ -2023,6 +1725,7 @@ int mf_kwrite64(uint64_t kaddr, uint64_t value)
     mf_lock_kernel();
     int rc = mf_kwrite64_locked(kaddr, value);
     mf_unlock_kernel();
+    if (rc == 0) { g_kernel_write_count++; g_kernel_write_bytes += 8; }
     return rc;
 }
 

@@ -5,52 +5,36 @@
 #import "../Kernel/MFKernelBridge.h"
 #import "../Kernel/MFPageTable.h"
 #import <mach/mach.h>
-#import <mach/vm_map.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#include <sys/sysctl.h>
+#include <sys/proc.h>
 #include <string.h>
 
-// mach_vm_remap / mach_vm_deallocate 都是 iOS 的 SPI —— 公开 SDK 头里没有声明。
-// 原实现同样是用 dlsym 拿 mach_vm_remap 的。
-typedef kern_return_t (*mf_mach_vm_remap_fn)(
-    vm_map_t target_task,
-    mach_vm_address_t *target_address,
-    mach_vm_size_t size,
-    mach_vm_offset_t mask,
-    int flags,
-    vm_map_t src_task,
-    mach_vm_address_t src_address,
-    boolean_t copy,
-    vm_prot_t *cur_protection,
-    vm_prot_t *max_protection,
-    vm_inherit_t inheritance);
+// [M5.207] mach_vm_remap / mach_vm_deallocate 已随端口路一起移除：
+// 读取只走 KFD 页表，不再需要把目标页映射进本进程。
 
-typedef kern_return_t (*mf_mach_vm_deallocate_fn)(
-    vm_map_t target,
-    mach_vm_address_t address,
-    mach_vm_size_t size);
-
-static mf_mach_vm_remap_fn      g_remap    = NULL;
-static mf_mach_vm_deallocate_fn g_dealloc  = NULL;
-static uint64_t g_pagesize = 0;
-
-/// 解除映射：优先用 SPI 版 mach_vm_deallocate（支持 >4GB 地址），
-/// 拿不到就退回公开的 vm_deallocate。
+/// 进程实例身份：pid | 可执行路径 | 启动秒 | 启动微秒。
 ///
-/// ★ 审查修正（报告 G1）：第一版无条件回退到 vm_deallocate，
-///   而 vm_address_t 是 32 位的 —— 映射地址 ≥ 4GB 时会被静默截断，
-///   解除映射作用到错误地址上，本页就【永远泄漏】。
-///   现在：地址放不进 32 位时明确失败，不再悄悄截断。
-static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, mach_vm_size_t size) {
-    if (g_dealloc) return g_dealloc(task, addr, size);
+/// 只用 pid 不能区分"同一 pid 被系统复用"，而 task port 已经从会话标识里
+/// 退场，所以这里显式带上路径与启动时间，和 HUD 侧的 MFTargetIdentity 同构。
+extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+static NSString *MFReadSessionIdentityForPid(int pid) {
+    if (pid <= 0) return nil;
+    char path[4096] = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return nil;
+    path[sizeof(path) - 1] = '\0';
+    NSString *executable = [NSString stringWithUTF8String:path];
+    if (executable.length == 0) return nil;
 
-    if (addr > 0xFFFFFFFFULL || size > 0xFFFFFFFFULL) {
-        NSLog(@"[MF][Read] ⚠️ mach_vm_deallocate 不可用且地址/长度超出 32 位"
-              @"（addr=0x%llx size=0x%llx）—— 这一页会泄漏",
-              (unsigned long long)addr, (unsigned long long)size);
-        return KERN_INVALID_ADDRESS;
-    }
-    return vm_deallocate(task, (vm_address_t)addr, (vm_size_t)size);
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    struct kinfo_proc info = {0};
+    size_t length = sizeof(info);
+    if (sysctl(mib, 4, &info, &length, NULL, 0) != 0 || length != sizeof(info) ||
+        info.kp_proc.p_pid != pid || info.kp_proc.p_starttime.tv_sec <= 0) return nil;
+    return [NSString stringWithFormat:@"%d|%@|%lld|%d", pid, executable,
+            (long long)info.kp_proc.p_starttime.tv_sec,
+            (int)info.kp_proc.p_starttime.tv_usec];
 }
 
 @implementation MFReadBackend {
@@ -67,16 +51,9 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
 
 - (instancetype)init {
     if ((self = [super init])) {
-        // 对齐原实现初始化：dlsym("mach_vm_remap") + getpagesize()
-        g_remap = (mf_mach_vm_remap_fn)dlsym(RTLD_DEFAULT, "mach_vm_remap");
-        if (!g_remap) g_remap = (mf_mach_vm_remap_fn)dlsym(RTLD_DEFAULT, "_mach_vm_remap");
-        g_dealloc = (mf_mach_vm_deallocate_fn)dlsym(RTLD_DEFAULT, "mach_vm_deallocate");
-        if (!g_dealloc) g_dealloc = (mf_mach_vm_deallocate_fn)dlsym(RTLD_DEFAULT, "_mach_vm_deallocate");
-        g_pagesize = (uint64_t)getpagesize();
-        if (!g_pagesize) g_pagesize = 0x4000;
         _modeFlag = NO;
-        NSLog(@"[MF][Read] 后端就绪 remap=%p dealloc=%p(回退 vm_deallocate) pagesize=0x%llx",
-              (void *)g_remap, (void *)g_dealloc, g_pagesize);
+        _targetTaskPort = MACH_PORT_NULL;
+        NSLog(@"[MF][Read] 后端就绪：仅 KFD 页表直读（端口路已在 M5.207 移除）");
     }
     return self;
 }
@@ -84,21 +61,21 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
 #pragma mark - 门条件
 
 - (BOOL)gateOpen {
-    // 对齐原 sub_10099A034：模式标记 == 1 且 端口 != 0
-    // [M5.117] 但走 KFD 页表直读时不需要 task port —— 有根表就够
-    if (self.kfdRoot != 0 && self.modeFlag) {
-        return YES;
-    }
-    return self.modeFlag && self.targetTaskPort != MACH_PORT_NULL;
+    // [M5.207] 端口路移除后，门只看"KFD 根表是否就位"。
+    // 原实现在这里是 modeFlag && 端口 != 0 —— 那个端口对 App Store 正版
+    // 游戏永远拿不到，本来就只是历史包袱。
+    return self.modeFlag && self.kfdRoot != 0;
 }
 
 /*
  * [M5.117] 把读取后端切到 KFD 页表直读。
  *
- * 原来的实现走 mach_vm_remap + 目标 task port，而 task_for_pid 对 App Store
- * 正版（自带反作弊）必然 kr=0x5 —— 这条路在我们目标上是死的。
- * 现在改成：pid → pmap 根表（mf_pid_chain），之后每个 readRemote 都用
- * mfpt_read 走目标自己的页表，完全不碰 task port。
+ * [M5.207] 这已经是**唯一**的读取路径：原来的 mach_vm_remap + 目标 task port
+ * 分支被整体删除。理由见头文件：端口路要求先 task_for_pid，而那条路既拿不到
+ * （正版游戏 CS_HARD 拒绝），又会在目标进程上留下被持有的端口和改过的 csflags。
+ *
+ * 现在：pid → pmap 根表（mf_pid_chain），之后每个 readRemote 都用 mfpt_read
+ * 走目标自己的页表，完全不碰 task port。
  *
  * 返回 YES 表示根表已就位；此后的 readU64/readInt32/followChain 等封装
  * 全部自动走 KFD，上层 UE4 读取代码一行都不用改。
@@ -111,26 +88,49 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
         NSLog(@"[MF][Read] attachKFDPid(%d) 失败 rc=%d %s", pid, rc, why);
         self.kfdRoot = 0;
         self.kfdPid = 0;
+        self.modeFlag = NO;
+        _sessionIdentity = nil;
         return NO;
     }
     self.kfdPid = pid;
     self.kfdRoot = root;
     self.modeFlag = YES;
+    _sessionIdentity = MFReadSessionIdentityForPid(pid);
     mfpt_cache_reset();
-    NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx", pid, (unsigned long long)root);
+    NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx session=%@",
+          pid, (unsigned long long)root, _sessionIdentity ?: @"(身份未确认)");
     return YES;
 }
 
 - (void)detachKFD {
     self.kfdRoot = 0;
     self.kfdPid = 0;
+    self.modeFlag = NO;
+    _sessionIdentity = nil;
     mfpt_cache_reset();
 }
 
+- (uint64_t)sessionToken {
+    if (self.kfdRoot == 0) return 0;
+    // FNV-1a over the identity string, mixed with the pmap root:
+    // 同一 pid 重启后 identity 变（启动时间不同），令牌随之改变。
+    uint64_t h = 1469598103934665603ULL;
+    NSString *s = _sessionIdentity;
+    for (NSUInteger i = 0; i < s.length; i++) {
+        h ^= (uint64_t)[s characterAtIndex:i];
+        h *= 1099511628211ULL;
+    }
+    h ^= self.kfdRoot;
+    return h ? h : 1;   // 0 预留给"未绑定"
+}
+
 - (void)setTargetTaskPort:(uint32_t)port {
-    _targetTaskPort = port;
-    self.modeFlag = (port != MACH_PORT_NULL);
-    NSLog(@"[MF][Read] 目标端口 = 0x%x，门 %@", port, self.gateOpen ? @"已就绪" : @"未就绪");
+    // [M5.207] 端口槽位只保留给旧调用点写值：不参与门判、不参与读取。
+    // 读取门现在由 attachKFDPid 打开，这里只记录并告警，避免"设了端口却以为门开了"。
+    _targetTaskPort = MACH_PORT_NULL;
+    if (port != MACH_PORT_NULL) {
+        NSLog(@"[MF][Read] 忽略 task port 0x%x：端口路已移除，读取只在 KFD 路径上成立", port);
+    }
 }
 
 #pragma mark - 底层读取
@@ -139,66 +139,21 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
     if (!out || size == 0) return NO;
 
     /*
-     * [M5.117] KFD 页表直读优先。
-     * 目标进程的 task port 拿不到（PPL 封死），这条路是唯一可用的；
-     * 有根表时完全不碰 mach_vm_remap。
+     * [M5.207] 只剩 KFD 页表直读这一条腿。
+     * 没有 pmap 根表 = 没绑定目标，直接失败；不再回退到 mach_vm_remap，
+     * 因为那条路要 task port，而端口路已经整体移除。
      */
-    if (self.kfdRoot != 0) {
-        uint64_t translated = 0;
-        if (mfpt_translate(self.kfdRoot, remote, &translated) == 0) {
-            _readCount++;
-            return mfpt_read(self.kfdRoot, remote, out, size) == 0;
-        }
+    if (self.kfdRoot == 0) {
         _failCount++;
         return NO;
     }
-
-    // 门判不过 → 不进入 remap 分支（原实现同样行为）
-    if (!self.gateOpen) {
-        _failCount++;
-        return NO;
+    uint64_t translated = 0;
+    if (mfpt_translate(self.kfdRoot, remote, &translated) == 0) {
+        _readCount++;
+        return mfpt_read(self.kfdRoot, remote, out, size) == 0;
     }
-    if (!g_remap) {
-        _failCount++;
-        return NO;
-    }
-
-    // 页对齐
-    uint64_t aligned = remote & ~(g_pagesize - 1);
-    uint64_t offset  = remote - aligned;
-
-    // 请求长度跨页也要能读：算出要映射几页
-    uint64_t span   = (offset + size + g_pagesize - 1) & ~(g_pagesize - 1);
-    if (span == 0) span = g_pagesize;
-
-    mach_vm_address_t local = 0;
-    vm_prot_t cur = VM_PROT_READ, max = VM_PROT_READ;
-
-    kern_return_t kr = g_remap(mach_task_self(), &local, span, 0,
-                               VM_FLAGS_ANYWHERE,
-                               self.targetTaskPort, aligned,
-                               /* copy = */ TRUE,
-                               &cur, &max, VM_INHERIT_NONE);
-    if (kr != KERN_SUCCESS) {
-        _failCount++;
-        return NO;
-    }
-
-    /*
-     * ★ 审查修正（报告 G3）：原版在 memcpy 前检查过映射地址非 0，
-     *   第一版漏掉了。极端情况下（例如目标页是零页）remap 可能返回
-     *   成功但 local == 0 —— 那 memcpy 就会从 0 地址读，直接崩。
-     */
-    if (local == 0) {
-        _failCount++;
-        return NO;
-    }
-
-    memcpy(out, (void *)(local + offset), size);
-    mf_dealloc(mach_task_self(), local, span);
-
-    _readCount++;
-    return YES;
+    _failCount++;
+    return NO;
 }
 
 - (size_t)readRemotePartial:(uint64_t)remote into:(void *)out size:(size_t)size {
@@ -288,9 +243,10 @@ static inline kern_return_t mf_dealloc(vm_map_t task, mach_vm_address_t addr, ma
 - (NSString *)statsText {
     uint64_t total = _readCount + _failCount;
     double rate = total ? (_readCount * 100.0 / total) : 0.0;
-    return [NSString stringWithFormat:@"读取 %llu 次 · 失败 %llu 次 · 成功率 %.1f%%\n门：%@ · 端口 0x%x · 页 0x%llx",
+    return [NSString stringWithFormat:@"读取 %llu 次 · 失败 %llu 次 · 成功率 %.1f%%\n门：%@ · KFD root %#llx · 会话 %@",
             _readCount, _failCount, rate,
-            self.gateOpen ? @"开" : @"关", self.targetTaskPort, g_pagesize];
+            self.gateOpen ? @"开" : @"关", (unsigned long long)self.kfdRoot,
+            self.sessionIdentity ?: @"(未绑定)"];
 }
 
 - (void)resetStats {

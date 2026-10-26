@@ -71,33 +71,36 @@ static NSString *MFTargetIdentity(pid_t pid, NSString *expectedName, NSString **
 
 static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
     return {
+        /*
+         * acquire —— [M5.207] 端口路已移除。
+         *
+         * 状态机的第一阶段本来要拿目标 task port。现在读取由 KFD 页表直读承担
+         * （attachKFDPid 时一次性解析 pmap 根表），端口不再出现在任何读取路径上。
+         * 这里如实返回失败与原因，而不是伪造一个 0 端口让状态机以为"拿到了"。
+         *
+         * KFD 就绪后 refreshTargetBinding 会提前返回，走不到这里；
+         * 这条分支只在 KFD 还没打开时出现，用来把"为什么没数据"解释清楚。
+         */
         [](const MFHUD::Target &target) {
-            NSString *error = nil;
-            uint32_t port = [MFKernel acquireTaskPortForPid:target.pid error:&error];
-            return MFHUD::PortResult{port, error.UTF8String ?: ""};
+            (void)target;
+            return MFHUD::PortResult{0,
+                "task_for_pid 已在 M5.207 停用：读取由 KFD 页表接管（端口路不再参与）"};
         },
         [](uint32_t port, const MFHUD::Target &target) -> std::string {
-            int portPID = 0;
-            NSString *error = nil;
-            NSString *identity = MFTargetIdentity(target.pid, [MFOffsets shared].current.processName, &error);
-            NSString *expectedIdentity = [NSString stringWithUTF8String:target.identity.c_str()];
-            if (pid_for_task(port, &portPID) != KERN_SUCCESS || portPID != target.pid)
-                return "Acquired task port does not identify the selected PID";
-            if (![identity isEqual:expectedIdentity]) return error.UTF8String ?: "Target instance changed while acquiring its port";
-            return "";
+            (void)port; (void)target;
+            return "端口校验不再适用：读取链上没有 task port";
         },
         [](uint32_t port, const MFHUD::Target &target) {
+            (void)port;
             NSString *error = nil;
-            MFModuleInfo *module = [MFModuleLocator mainModuleForPid:target.pid borrowedTask:port error:&error];
+            MFModuleInfo *module = [MFModuleLocator mainModuleForPidViaKFD:target.pid error:&error];
             NSString *identity = MFTargetIdentity(target.pid, [MFOffsets shared].current.processName, NULL);
             if (![identity isEqual:[NSString stringWithUTF8String:target.identity.c_str()]])
                 return MFHUD::ModuleResult{0, "", "Target instance changed during module lookup"};
             return MFHUD::ModuleResult{module.base, module.name.UTF8String ?: "", error.UTF8String ?: ""};
         },
         [](uint32_t port) {
-            MFGameReader *reader = [MFGameReader shared];
-            reader.targetTaskPort = port;
-            [reader loadBasesFromDefaults];
+            (void)port;
         },
         [](uint64_t base) { [MFUEReader shared].libBase = base; },
         [] {
@@ -110,7 +113,7 @@ static MFHUD::BindingHooks MFMakeTargetBindingHooks(void) {
                 [NSUserDefaults.standardUserDefaults removeObjectForKey:key];
         },
         [](uint32_t port) {
-            if (port != MACH_PORT_NULL && port != mach_task_self()) mach_port_deallocate(mach_task_self(), port);
+            (void)port;
         },
     };
 }
@@ -1278,18 +1281,40 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
         @"kernelState": @(kernel.state), @"kernelBase": @(kernel.kbase),
         @"startup": [self.startupReport copy] ?: @{},
         @"binding": @{
-            @"stage": [NSString stringWithUTF8String:binding.stage.c_str()],
-            @"error": [NSString stringWithUTF8String:binding.error.c_str()],
-            @"targetPID": @(binding.target.pid),
-            @"identity": [NSString stringWithUTF8String:binding.target.identity.c_str()],
+            /*
+             * [M5.207] 端口路移除后，绑定状态由这两处共同表达：
+             *   · KFD 就绪时：stage 写成 "ready-kfd"，kfdRoot/sessionIdentity 来自读取后端；
+             *   · KFD 未就绪时：沿用状态机的 stage（通常是 "task-port"），
+             *     其 error 会明确写出"task_for_pid 已停用"，而不是一个含糊的失败。
+             * taskPort 字段保留但恒为 0 —— 旧判据（端口 > 0）已不再代表就绪，
+             * 消费方必须改看 kfdRoot / sessionToken。
+             */
+            @"stage": self.kernelViaKFD && backend.gateOpen
+                ? @"ready-kfd" : [NSString stringWithUTF8String:binding.stage.c_str()],
+            @"error": self.kernelViaKFD && backend.gateOpen
+                ? @"" : [NSString stringWithUTF8String:binding.error.c_str()],
+            @"targetPID": @(binding.target.pid > 0 ? binding.target.pid : backend.kfdPid),
+            @"identity": self.kernelViaKFD && backend.gateOpen
+                ? (backend.sessionIdentity ?: @"")
+                : [NSString stringWithUTF8String:binding.target.identity.c_str()],
             @"taskPort": @(binding.port), @"libBase": @(binding.base),
+            @"kfdRoot": @(backend.kfdRoot), @"kfdPid": @(backend.kfdPid),
+            @"sessionToken": @(backend.sessionToken),
             @"module": [NSString stringWithUTF8String:binding.module.c_str()],
             @"portAttempts": @(binding.portAttempts), @"moduleAttempts": @(binding.moduleAttempts),
             @"lastAttemptUptime": @(binding.lastAttemptUptime),
         },
         @"reader": @{ @"targetTaskPort": @(reader.targetTaskPort), @"ready": @(reader.ready),
             @"gateOpen": @(backend.gateOpen), @"modeFlag": @(backend.modeFlag),
-            @"libBase": @([MFUEReader shared].libBase) },
+            @"libBase": @([MFUEReader shared].libBase),
+            @"kfdRoot": @(backend.kfdRoot), @"kfdPid": @(backend.kfdPid) },
+        /*
+         * [M5.207] 清痕自证：整场会话对内核的写入次数/字节数。
+         * 读取只走页表，正确配置下这两个值恒为 0。现场拿到非 0 就说明
+         * 有路径在写内核，必须查清楚是谁。
+         */
+        @"kernelWrites": @{ @"count": @(mf_kernel_write_count()),
+            @"bytes": @(mf_kernel_write_bytes()) },
         @"feed": @{ @"running": @(feed.running), @"packetCount": @(packets),
             @"errorCount": @(feed.errorCount), @"fresh": @(feed.fresh),
             @"lastPacketAge": packets && isfinite(age) ? @(age) : NSNull.null,

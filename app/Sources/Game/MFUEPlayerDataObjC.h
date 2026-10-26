@@ -19,13 +19,13 @@ static inline NSString *MFReadUEHeroName(MFReadBackend *reader, uint64_t heroID,
     if (!heroID) return MFResolveUEHeroName(expertID, nil);
     static NSMutableDictionary<NSNumber *, NSString *> *names;
     static uint64_t cachedBase = 0;
-    static uint32_t cachedTask = 0;
+    static uint64_t cachedTask = 0;
     static CFAbsoluteTime retryAt = 0;
     const uint64_t base = [MFUEReader shared].libBase;
     @synchronized (MFUEReader.class) {
-        if (!names || cachedBase != base || cachedTask != reader.targetTaskPort) {
+        if (!names || cachedBase != base || cachedTask != [MFReadBackend shared].sessionToken) {
             names = [NSMutableDictionary dictionary];
-            cachedBase = base; cachedTask = reader.targetTaskPort; retryAt = 0;
+            cachedBase = base; cachedTask = [MFReadBackend shared].sessionToken; retryAt = 0;
         }
         if (names[@(heroID)]) return names[@(heroID)];
         const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -85,10 +85,10 @@ static inline NSString *MFReadUENPCTemplateName(MFReadBackend *reader, const MFU
     if (!base) return nil;
     static NSMutableDictionary<NSString *, NSDictionary *> *cache;
     static uint64_t cachedBase = 0;
-    static uint32_t cachedTask = 0;
+    static uint64_t cachedTask = 0;
     @synchronized (MFUEReader.class) {
-        if (!cache || cachedBase != base || cachedTask != reader.targetTaskPort) {
-            cache = [NSMutableDictionary dictionary]; cachedBase = base; cachedTask = reader.targetTaskPort;
+        if (!cache || cachedBase != base || cachedTask != [MFReadBackend shared].sessionToken) {
+            cache = [NSMutableDictionary dictionary]; cachedBase = base; cachedTask = [MFReadBackend shared].sessionToken;
         }
         NSString *key = [NSString stringWithFormat:@"%llx:%u:%u", (unsigned long long)npc.templateTable,
                          npc.npcIndex, npc.npcNumber];
@@ -121,11 +121,11 @@ static inline void MFFillUENPCAttributes(MFReadBackend *reader, uint64_t actor, 
     if (!isBot) return;
     static NSMutableDictionary<NSNumber *, NSDictionary *> *cache;
     static uint64_t cachedBase = 0;
-    static uint32_t cachedTask = 0;
+    static uint64_t cachedTask = 0;
     const uint64_t base = [MFUEReader shared].libBase;
     @synchronized (MFUEReader.class) {
-        if (!cache || cachedBase != base || cachedTask != reader.targetTaskPort) {
-            cache = [NSMutableDictionary dictionary]; cachedBase = base; cachedTask = reader.targetTaskPort;
+        if (!cache || cachedBase != base || cachedTask != [MFReadBackend shared].sessionToken) {
+            cache = [NSMutableDictionary dictionary]; cachedBase = base; cachedTask = [MFReadBackend shared].sessionToken;
         }
         const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         NSDictionary *cached = cache[@(actor)];
@@ -172,10 +172,10 @@ static inline BOOL MFIsUEBot(MFReadBackend *reader,uint64_t actor,uint32_t aiOff
 
 static inline void MFApplyUEHeading(MFEntity *entity, MFReadBackend *reader, uint32_t rootOffset) {
     static NSMutableDictionary<NSNumber *, NSDictionary *> *cache;
-    static uint32_t cachedTask = 0;
+    static uint64_t cachedTask = 0;
     @synchronized (MFUEReader.class) {
-        if (!cache || cachedTask != reader.targetTaskPort) {
-            cache = [NSMutableDictionary dictionary]; cachedTask = reader.targetTaskPort;
+        if (!cache || cachedTask != [MFReadBackend shared].sessionToken) {
+            cache = [NSMutableDictionary dictionary]; cachedTask = [MFReadBackend shared].sessionToken;
         }
         const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         NSNumber *key = @(entity.address);

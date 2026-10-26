@@ -11,6 +11,9 @@
 #import <unistd.h>
 #import <string.h>
 #import <stdlib.h>
+#import "MFKernelBridge.h"    /* mf_pid_chain：pid → pmap 根表 */
+#import "MFPageTable.h"       /* mfpt_read / mfpt_lowest_mapped_page */
+#import "../Read/MFReadBackend.h"
 
 /*
  * ⚠️ 不要 #import <mach/mach_vm.h> ——
@@ -160,17 +163,92 @@ static NSString *gLastReport = nil;
 }
 
 + (mach_port_t)taskPortForPid:(pid_t)pid {
-    if (pid <= 0) return MACH_PORT_NULL;
-
     /*
-     * 和 MFKernel 的路 C 一致 —— 靠 task_for_pid-allow entitlement。
-     * 注意：端口名只在【创建它的 IPC space】有效。
-     *       HUD 子进程要自己再取一份（不能复用父进程的端口号）。
+     * [M5.207] 停用。
+     *
+     * 这里原本是 task_for_pid(mach_task_self(), pid, &task)。它现在是纯负担：
+     * 模块基址已经能靠 KFD 页表直读取到（+mainModuleForPidViaKFD:error:），
+     * 而每调一次 task_for_pid，目标进程上就多一个被外部持有的 task port，
+     * 还要先改目标进程的 csflags 才可能成功。
+     *
+     * 保留签名只为让旧调用点继续编译：一律返回 MACH_PORT_NULL。
      */
-    mach_port_t task = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) return MACH_PORT_NULL;
-    return task;
+    (void)pid;
+    return MACH_PORT_NULL;
+}
+
+#pragma mark - 主模块基址（KFD 页表直读）
+
++ (MFModuleInfo *)mainModuleForPidViaKFD:(pid_t)pid error:(NSString **)error {
+    NSMutableString *rep = [NSMutableString stringWithFormat:@"=== 模块定位（KFD 页表） ===\npid=%d\n", pid];
+    gLastReport = rep;
+
+    if (pid <= 0) {
+        if (error) *error = @"pid 无效";
+        return nil;
+    }
+
+    // ① pmap 根表：已绑定的后端优先，避免重复解析同一进程
+    uint64_t root = 0;
+    MFReadBackend *backend = [MFReadBackend shared];
+    if (backend.kfdPid == pid && backend.kfdRoot != 0) {
+        root = backend.kfdRoot;
+        [rep appendString:@"✓ 复用已绑定的 KFD 根表\n"];
+    } else {
+        char why[192] = {0};
+        int rc = mf_pid_chain(pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why));
+        if (rc != 0 || root == 0) {
+            [rep appendFormat:@"✗ mf_pid_chain 失败 rc=%d %s\n", rc, why];
+            if (error) *error = [NSString stringWithFormat:@"拿不到该进程的 pmap 根表：%s", why];
+            return nil;
+        }
+        [rep appendString:@"✓ 已解析 pmap 根表（未绑定到读取后端）\n"];
+    }
+    [rep appendFormat:@"  root = %#llx\n", (unsigned long long)root];
+
+    // ② 主程序是进程里最低的映像：从 4GB 起找第一张映射页
+    uint64_t base = 0;
+    if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
+        [rep appendString:@"✗ 找不到最低映射页\n"];
+        if (error) *error = @"页表里找不到最低映射页（目标可能尚未加载主程序）";
+        return nil;
+    }
+
+    // ③ 校验 Mach-O 头：magic / cputype / filetype 三道都要过
+    struct {
+        uint32_t magic, cputype, cpusubtype, filetype;
+    } mh = {0};
+    if (mfpt_read(root, base, &mh, sizeof(mh)) != 0) {
+        [rep appendFormat:@"✗ 读 %#llx 的 Mach-O 头失败\n", (unsigned long long)base];
+        if (error) *error = @"读主模块头失败";
+        return nil;
+    }
+    [rep appendFormat:@"  候选基址 %#llx: magic=%#x cputype=%#x filetype=%u\n",
+        (unsigned long long)base, mh.magic, mh.cputype, mh.filetype];
+
+    const uint32_t kMHMagic64 = 0xfeedfacf;
+    const uint32_t kCPUTypeARM64 = 0x0100000c;
+    const uint32_t kMHExecute = 2;
+    const uint32_t kMHFileset = 0xc;
+    if (mh.magic != kMHMagic64 || mh.cputype != kCPUTypeARM64 ||
+        (mh.filetype != kMHExecute && mh.filetype != kMHFileset)) {
+        [rep appendString:@"✗ 该页不是 arm64 Mach-O 主映像，拒绝当作模块基址\n"];
+        if (error) *error = @"最低映射页不是 arm64 Mach-O 主映像";
+        return nil;
+    }
+
+    MFModuleInfo *m = [[MFModuleInfo alloc] init];
+    m.base = base;
+    m.path = @"(KFD 未解析路径)";
+    m.name = mh.filetype == kMHFileset ? @"(fileset 主映像)" : @"(主可执行映像)";
+    m.size = 0;
+    m.isMain = YES;
+
+    [rep appendFormat:@"\n=== 判定结果 ===\n基址：%#llx\n依据：最低映射页 + Mach-O 头校验\n",
+        (unsigned long long)base];
+    gLastReport = rep;
+    NSLog(@"[MF][Module] KFD 主模块 base=0x%llx", (unsigned long long)base);
+    return m;
 }
 
 #pragma mark - 模块遍历（路 A：TASK_DYLD_INFO）

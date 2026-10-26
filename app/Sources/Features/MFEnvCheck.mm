@@ -178,24 +178,30 @@ static BOOL MFCanList(NSString *p) {
             [d appendString:@"  SecTaskCreateFromSelf 失败\n"];
         }
 
-        mach_port_t probe = MACH_PORT_NULL;
-        kern_return_t pkr = task_for_pid(mach_task_self(), 1, &probe);
-        BOOL probeOK = (pkr == KERN_SUCCESS && probe != MACH_PORT_NULL);
-        if (probeOK) mach_port_deallocate(mach_task_self(), probe);
-        [d appendFormat:@"  实测 task_for_pid(launchd=1) → kr=0x%x %@\n",
-         pkr, probeOK ? @"✓ 可用" : @"✗ 不可用"];
+        /*
+         * [M5.207] 不再实测 task_for_pid。
+         *
+         * 这一项原先用来回答"能不能读别的进程"，而读取现在完全由 KFD 页表承担，
+         * 目标 task port 已经从读取链上退场。真正该看的是：
+         *   ① 签名里带没带 platform-application / task_for_pid-allow（ent 静态检查）
+         *   ② KFD 通道有没有打开（有根表才能翻译目标页表）
+         * 所以这里只报 entitlement，加上 KFD 状态，不再对 launchd 发那个调用。
+         */
+        [d appendString:@"  （端口路已移除：读取改为 KFD 页表直读，实测 task_for_pid 已删除）\n"];
+        BOOL kfdOpenNow = [MFKernel shared].isOpen;
 
         [out addObject:MK(@"代码签名 / 权限",
-                          [NSString stringWithFormat:@"cs=0x%X allow=%@ tfp(1)=0x%x",
-                           csFlags, tfpAllow ? @"✓" : @"✗", pkr],
-                          probeOK ? MFEnvStatusPass : MFEnvStatusFail,
+                          [NSString stringWithFormat:@"cs=0x%X allow=%@ kfd=%@",
+                           csFlags, tfpAllow ? @"✓" : @"✗", kfdOpenNow ? @"✓" : @"✗"],
+                          (csFlags != 0 && tfpAllow && kfdOpenNow) ? MFEnvStatusPass : MFEnvStatusInfo,
                           [NSString stringWithFormat:
                            @"这一项决定「能不能读别的进程」。\n%@"
-                           @"依据：XNU 的 task_for_pid 会看调用进程的 CS_PLATFORM_BINARY / "
-                           @"CS_DEBUGGED，以及 task_for_pid-allow entitlement。\n"
-                           @"· cs 没有 CS_PLATFORM_BINARY、SecTask 也读不到 task_for_pid-allow\n"
-                           @"  → 这份签名没被内核认可，task_for_pid 必然失败\n"
-                           @"· SecTask 能读到、实测仍失败 → 目标进程自身有保护", d])];
+                           @"依据：读取链是 pid → pmap 根表 → 目标页表 → 物理读，"
+                           @"全程不取目标 task port，因此不需要 task_for_pid 成功。\n"
+                           @"· allow 缺失 → 本进程拿不到高权限签名，KFD 可能起不来\n"
+                           @"· kfd ✗ → 还没做过内核引导，此时任何读取都不会成立\n"
+                           @"（历史做法里『清 csflags 再 task_for_pid』已整体移除："
+                           @"它会改目标进程的内核结构，而收益为零）", d])];
     }
 
     // ── ④ fd 上限（KFD 的硬门槛）──
@@ -254,10 +260,10 @@ static BOOL MFCanList(NSString *p) {
     MFEnumRoute route = [k availableRoute];
     NSString *routeText;
     switch (route) {
-        case MFEnumRouteTaskForPid: routeText = @"路 C task_for_pid";     break;
-        case MFEnumRoutePrivileged: routeText = @"路 A host_priv";        break;
-        case MFEnumRouteDefault:    routeText = @"路 B processor_set";    break;
-        default:                    routeText = @"未探测/均不可用";        break;
+        case MFEnumRouteTaskForPid: routeText = @"已停用（task_for_pid 路移除）";  break;
+        case MFEnumRoutePrivileged: routeText = @"已停用（host_priv 路移除）";     break;
+        case MFEnumRouteDefault:    routeText = @"已停用（processor_set 路移除）"; break;
+        default:                    routeText = @"sysctl（进程枚举不需要 task port）"; break;
     }
     [out addObject:MK(@"内核链",
                       kopen ? [NSString stringWithFormat:@"已启动 · kbase=0x%llx",

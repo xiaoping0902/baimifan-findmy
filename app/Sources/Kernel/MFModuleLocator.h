@@ -55,9 +55,20 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 拿目标进程的 task port。失败返回 MACH_PORT_NULL。
 /// 调用方负责 mach_port_deallocate。
+///
+/// [M5.207] 已停用：恒返回 MACH_PORT_NULL。端口路整体退场（见 MFReadBackend.h），
+/// 模块基址改由 +mainModuleForPidViaKFD:error: 用页表直读取。
 + (mach_port_t)taskPortForPid:(pid_t)pid;
 
 #pragma mark - 模块
+
+/// [M5.207] 主模块基址的 KFD 路径：不取任何 task port。
+///
+/// 做法：pid → pmap 根表 → 找最低映射页 → 校验 Mach-O 头（magic / cputype / filetype）。
+/// 游戏主程序是那个进程里最低的 MH_EXECUTE 映像，这一步足够把它认出来，
+/// 而且整个过程只有页表读，不碰目标进程的 task 结构。
++ (nullable MFModuleInfo *)mainModuleForPidViaKFD:(pid_t)pid
+                                            error:(NSString *_Nullable *_Nullable)error;
 
 /// 列出目标进程的全部已加载模块（按基址升序）。
 /// 失败时 items 为 nil，error 有内容。

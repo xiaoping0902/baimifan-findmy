@@ -18,27 +18,46 @@
 //    · 每要一个字段就映射一页、只抠那几个字节、立刻解除映射（不 dump 大块）
 //    · 读失败返回 0，不崩不抛 —— 这是它能长时间稳定挂着的原因
 //
+//  ★ [M5.207] 端口路已整体移除。原实现的 mach_vm_remap + target task port
+//    在这里只是为了读内存，而我们已经有 KFD 页表直读（mfpt_*）。保留端口路
+//    的唯一代价是：必须先在目标进程上 task_for_pid（并为此改 csflags），
+//    等于在游戏进程里留下被持有的 task port 与被改过的签名标志。
+//    现在读取只走 KFD：pid → pmap 根表 → 目标页表，不碰任何 mach 端口。
+//    targetTaskPort 仅作为旧接口占位保留，恒为 MACH_PORT_NULL，不参与门判。
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 门条件（对齐原实现 sub_10099A034）：
-///   模式标记 == 1 且 端口 != 0 才算"权限已就绪"
+/// 门条件：模式标记 == 1 且 KFD pmap 根表已就位
 @interface MFReadBackend : NSObject
 
 + (instancetype)shared;
 
 #pragma mark 门条件
 
-/// 目标进程 task port（≡ 原 dword_100FF7470）
+/// 旧实现的端口槽位。**不再使用**：恒为 MACH_PORT_NULL。
+/// 保留只为让旧调用点（快照 JSON / 诊断文本）不必改结构。
 @property (nonatomic, assign) uint32_t targetTaskPort;
 
 /// 模式标记（≡ 原 qword_100FF7468）
 @property (nonatomic, assign) BOOL modeFlag;
 
-/// 门判：modeFlag && 端口有效
+/// 门判：modeFlag && KFD 根表有效（端口路已移除）
 @property (nonatomic, readonly) BOOL gateOpen;
+
+/// 当前读取会话的身份串："pid|可执行路径|启动秒|启动微秒"，未绑定为 nil。
+///
+/// 为什么需要它：会话缓存（名字表 / 物品表 / 容器内容）原来拿 task port 当
+/// 会话标识，而端口已经取消。同一 PID 被系统复用时，仅凭 pid 无法区分实例，
+/// 所以这里同时带上可执行路径与进程启动时间。
+@property (nonatomic, copy, readonly, nullable) NSString *sessionIdentity;
+
+/// 会话令牌：由 sessionIdentity 与 pmap 根表混合出的 64 位值，0 表示未绑定。
+///
+/// 缓存只需要"是不是同一场会话"这一个判断，比字符串更省。历史上这里用的是
+/// task port；端口退场后改用它，语义不变（同一进程实例 = 同一令牌）。
+@property (nonatomic, readonly) uint64_t sessionToken;
 
 /// 统计
 @property (nonatomic, readonly) uint64_t readCount;

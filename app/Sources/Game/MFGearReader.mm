@@ -181,7 +181,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     NSMutableDictionary<NSNumber *, NSNumber *>   *_itemsCacheAt;
     /// 物品表加载失败后的重试节流（每次重试要几次远程读，不能每帧做）
     CFTimeInterval _tableRetryAt;
-    uint32_t _cachedTask;
+    uint64_t _cachedTask;
     uint64_t _cachedBase;
     BOOL _hasSession;
 }
@@ -203,7 +203,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
 }
 
 - (void)synchronizeSession {
-    const uint32_t task = [MFReadBackend shared].targetTaskPort;
+    const uint64_t task = [MFReadBackend shared].sessionToken;
     const uint64_t base = [MFUEReader shared].libBase;
     if (_hasSession && _cachedTask == task && _cachedBase == base) return;
     _hasSession = YES;

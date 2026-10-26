@@ -155,10 +155,11 @@ static BOOL MFWriteText(NSString *name, NSString *text) {
         @"kbase":    @([k isOpen] ? k.kbase : 0),
         @"lastErr":  k.lastError ?: @"",
         @"route":    @((NSInteger)route),
-        @"routeName": route == MFEnumRouteTaskForPid ? @"C: task_for_pid"
-                    : route == MFEnumRoutePrivileged  ? @"A: host_priv"
-                    : route == MFEnumRouteDefault     ? @"B: processor_set_default"
-                                                      : @"无可用枚举路",
+        // [M5.207] 进程枚举只剩 sysctl 一条路，三/路 A/B 的端口路已停用。
+        @"routeName": route == MFEnumRouteTaskForPid ? @"已停用: task_for_pid 路移除"
+                    : route == MFEnumRoutePrivileged  ? @"已停用: host_priv 路移除"
+                    : route == MFEnumRouteDefault     ? @"已停用: processor_set 路移除"
+                                                      : @"sysctl（枚举不需要 task port）",
     };
 
     // ── 读取链 ──

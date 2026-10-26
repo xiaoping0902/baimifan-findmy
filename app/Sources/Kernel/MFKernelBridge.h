@@ -302,56 +302,25 @@ uint64_t mf_get_current_task(void);   /* 本进程 struct task *            */
 uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len);
 
 /*
- * 清掉目标 proc 的代码签名硬标志位。
- * scan_only != 0 → 只扫描并把候选报出来，不写内核（建议第一步用这个）。
- * 返回 0 表示扫描成功；负值表示 KFD 没开或参数非法。
+ * [M5.207] 以下三个入口已删除，不要加回来：
+ *   · mf_clear_proc_csflags        —— 只为 task_for_pid 清目标进程 csflags
+ *   · mf_try_tf_platform           —— 只为 task_for_pid 置自身 TF_PLATFORM
+ *   · mf_locate_tf_platform_offset —— 随 TF_PLATFORM 路一起退场
+ *
+ * 读取链现在是 pid → pmap 根表 → 目标页表 → 物理读，全链没有 task_for_pid，
+ * 因此这三个写内核的入口同时失去意义。内核侧现在没有任何写入点。
  */
-int mf_clear_proc_csflags(uint64_t proc, int scan_only,
-                          char *report, size_t report_len);
 
 /*
- * 一步到位：找 proc → 清 csflags。
- * apply = 0 → 诊断模式（推荐第一次用）；apply = 1 → 真正写内核。
- * 返回 0 表示"现在可以重新试 task_for_pid 了"。
+ * 内核写入审计。
+ *
+ * 整场会话里 mf_kwrite / mf_kwrite32 / mf_kwrite64 成功写入的次数与字节数。
+ * 读取走页表，正确配置下这个计数应恒为 0；被动状态文件会带上它，
+ * 现场可以直接核对这一轮到底有没有写过内核，不用相信注释。
  */
-int mf_prepare_task_for_pid(int pid, int apply,
-                            char *report, size_t report_len);
-
-/*
- * ★ 首选方案：把自己提升成「内核级 task」（TF_PLATFORM）
- *
- * task_for_pid 有两道闸：
- *   ① taskgated —— 看目标 proc 的 CS_HARD
- *   ② task_conversion_eval —— 看**调用者** task 是否内核级
- * 只清目标的 CS_HARD 过不了第 ② 道。本函数给自己 task 的 t_flags 置
- * TF_PLATFORM(0x400)，让 task_conversion_eval 把自己当内核级调用者。
- *
- * t_flags 偏移是版本相关的（论文给 iOS 11 是 0x3a8），所以做成
- * 「逐候选置位 → 试 task_for_pid → 失败立刻回滚」的试错扫描。
- * 只置一个位、不整体改写，最坏情况是没效果。
- *
- * apply = 0 → 只列出候选偏移（不写内核）
- * apply = 1 → 真正尝试
- *
- * 返回值：成功返回命中的偏移（正数，如 0x3a8）；
- *         -1 KFD 未开；-2 拿不到 current_task；-3 全部候选都失败。
- */
-int mf_try_tf_platform(int pid, int apply,
-                       char *report, size_t report_len);
-
-/*
- * ★ 安全定位 t_flags 偏移（纯只读，绝不写内核）
- *
- * 判据：kernel_task 的 t_flags 一定带 TF_PLATFORM(0x400)，我们自己的 task 不带。
- * 逐偏移对比两者的 32 位值，取「内核有 0x400 / 自身没有 / 其余位差异≤3」的字段。
- *
- * 这是 2026-10-24 内核 panic 事故后改用的方法：不用盲写试错，
- * 靠一个必然成立的内核事实把偏移算出来。
- *
- * 返回候选个数（≥0）；-1 KFD 未开；-2 拿不到 task 地址。
- * report 里会逐行列出候选偏移及两边的原值。
- */
-int mf_locate_tf_platform_offset(char *report, size_t report_len);
+uint64_t mf_kernel_write_count(void);
+uint64_t mf_kernel_write_bytes(void);
+void mf_kernel_write_audit_reset(void);
 
 /* ------------------------------------------------------------------ */
 /* 诊断                                                                */

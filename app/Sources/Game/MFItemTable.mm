@@ -115,7 +115,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
     MFItemMapLayout _mapLayout;
     uint64_t _gameItem;
     uint64_t _rowStructExpected;
-    uint32_t _cachedTask;
+    uint64_t _cachedTask;
     uint64_t _cachedBase;
     BOOL _hasSession;
 }
@@ -136,7 +136,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 }
 
 - (void)synchronizeSession {
-    const uint32_t task = [MFReadBackend shared].targetTaskPort;
+    const uint64_t task = [MFReadBackend shared].sessionToken;
     const uint64_t base = [MFUEReader shared].libBase;
     if (_hasSession && _cachedTask == task && _cachedBase == base) return;
     _hasSession = YES;
