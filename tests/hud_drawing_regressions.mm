@@ -279,12 +279,14 @@ static void TestSyntheticDrawing(void) {
     // Actual production draw lists must keep lower-rate categories visible
     // while the real-player line follows every 120Hz frame.
     MFEntity *real=Entity(1000,-100,NO,NO), *bot=Entity(1000,100,NO,NO); bot.isBot=YES;
-    sEntities=@[real,bot]; settings.showTracer=YES;
+    sEntities=@[real,bot]; settings.showTracer=YES; settings.showBot=YES;
     auto packed=[&](MFColorSlot slot){CGFloat r,g,b,a;[[settings colorForSlot:slot]getRed:&r green:&g blue:&b alpha:&a];
         return IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),(int)(a*255));};
     const ImU32 redLine=packed(MFColorSlotSkeleton), greenLine=packed(MFColorSlotBotSkeleton);
     data=Frame(drawing,overlay,1.f/120);
     const float firstBot=ColoredWidth(data,greenLine), firstReal=ColoredWidth(data,redLine);
+    CHECK(firstBot>20 && firstReal>20,
+          "cadence fixture must begin with visible bot and real-player lines");
     MFPoint2D movedReal=real.screen,movedBot=bot.screen;
     movedReal.x-=30;movedBot.x+=30;real.screen=movedReal;bot.screen=movedBot;
     data=Frame(drawing,overlay,1.f/120);
