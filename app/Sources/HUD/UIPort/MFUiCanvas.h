@@ -166,9 +166,10 @@ struct Canvas {
         return changed;
     }
     bool color(float x,float y,float w,const char* label,ImVec4& value,const char* id) {
-        text(x,y+10,12,tc.textMuted,label);
+        text(x,y+10,14,tc.text,label);
         ImGui::PushID(id);
-        if(hit(x+w-30,y+5,30,25,"##swatch"))ImGui::OpenPopup("##color");
+        // The full labeled row owns the same unique ID as its color state.
+        if(hit(x,y,w,36,id))ImGui::OpenPopup("##color");
         rect(x+w-26,y+8,22,22,ImGui::ColorConvertFloat4ToU32(value),6);
         bool changed=false;
         ImGui::SetNextWindowSize(ImVec2(280*s,0));
@@ -187,6 +188,22 @@ struct Canvas {
             /* 新版 ImGui 删掉了 ImFont::FontSize；统一用 14px 与当前字号的比例 */
             ImGui::SetWindowFontScale(ImMax(0.6f, 14.0f * s / ImMax(1.0f, ImGui::GetFontSize())));
             ImGui::TextUnformatted(label);
+            const ImVec4 presets[]={ImVec4(1,.08f,.08f,1),ImVec4(.10f,1,.20f,1),
+                ImVec4(.12f,.48f,1,1),ImVec4(1,.85f,.08f,1),ImVec4(1,1,1,1)};
+            const char* names[]={"红","绿","蓝","黄","白"};
+            for(int i=0;i<IM_ARRAYSIZE(presets);++i){
+                if(i)ImGui::SameLine();
+                ImGui::PushID(i);
+                ImVec4 preview=presets[i];
+                if(ImGui::ColorButton(names[i],preview,ImGuiColorEditFlags_NoTooltip,ImVec2(30*s,26*s))){
+                    value=presets[i];changed=true;
+                }
+#ifdef HEIHUANG_UI_TEST_ITEM
+                HEIHUANG_UI_TEST_ITEM("color_preset",ImGui::GetItemRectMin(),ImGui::GetItemRectSize());
+#endif
+                ImGui::PopID();
+            }
+            ImGui::Separator();
             ImGui::PushItemWidth(252*s);
             /* [M5.178] 原版直接对 &value.x 取址；ObjC++ 下对成员取址要走局部数组 */
             {

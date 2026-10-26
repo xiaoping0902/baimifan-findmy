@@ -4,7 +4,7 @@
 //  移植自 小玉源码 jni/src/radar.h（ComputeRadarLayout / ProjectRadarOffset /
 //  RenderRadarBase 三段的数学与配色），只保留玩家雷达部分。
 //
-#import "MFRadar.h"
+#include "MFRadar.h"
 #include <math.h>
 #include <float.h>     /* FLT_MAX —— CalcTextSizeA */
 #include <stdio.h>
@@ -20,7 +20,7 @@ typedef struct { ImVec2 center; float radius; } MFRALayout;
 /// 短边自适应布局（对齐 ComputeRadarLayout）
 static MFRALayout MFRALayoutFor(ImVec2 screen, const MFRadarConfig *cfg) {
     MFRALayout L = { ImVec2(0, 0), 0 };
-    if (!cfg || screen.x <= 0 || screen.y <= 0) return L;
+    if (!cfg || !isfinite(screen.x) || !isfinite(screen.y) || screen.x <= 0 || screen.y <= 0) return L;
 
     float xr = isfinite(cfg->xRatio) ? cfg->xRatio : 0.125f;
     float yr = isfinite(cfg->yRatio) ? cfg->yRatio : (400.0f / 1080.0f);
@@ -34,18 +34,18 @@ static MFRALayout MFRALayoutFor(ImVec2 screen, const MFRadarConfig *cfg) {
 }
 
 /// 世界坐标差 → 雷达内偏移（对齐 ProjectRadarOffset，单位换算成 cm）
-static BOOL MFRAProject(const MFRadarConfig *cfg, float tx, float ty,
+static bool MFRAProject(const MFRadarConfig *cfg, float tx, float ty,
                         float radius, float markerR, ImVec2 *out) {
-    if (!cfg || !out) return NO;
+    if (!cfg || !out) return false;
     float dx = tx - cfg->selfX;
     float dy = ty - cfg->selfY;
-    if (!isfinite(dx) || !isfinite(dy)) return NO;
+    if (!isfinite(dx) || !isfinite(dy)) return false;
 
     float rangeCm = cfg->rangeM * 100.0f;
-    if (!(rangeCm > 0.0f) || !(radius > 0.0f)) return NO;
+    if (!(rangeCm > 0.0f) || !(radius > 0.0f)) return false;
 
-    float dist = sqrtf(dx * dx + dy * dy);
-    if (!isfinite(dist) || dist > rangeCm) return NO;
+    float dist = hypotf(dx, dy);
+    if (!isfinite(dist) || dist > rangeCm) return false;
 
     float rad = cfg->yawDeg * (kMFRA_PI / 180.0f);
     float s = sinf(rad), c = cosf(rad);
@@ -67,7 +67,7 @@ static BOOL MFRAProject(const MFRadarConfig *cfg, float tx, float ty,
         out->x *= limit / pd;
         out->y *= limit / pd;
     }
-    return YES;
+    return true;
 }
 
 static void MFRAText(ImDrawList *dl, float size, ImVec2 pos, ImU32 col, const char *s) {
@@ -85,7 +85,9 @@ static ImVec2 MFRATextSize(float size, const char *s) {
 void MFRadarRender(ImDrawList *dl, ImVec2 screen,
                    const MFRadarConfig *cfg,
                    const MFRadarBlip *blips, int count) {
-    if (!dl || !cfg) return;
+    if (!dl || !cfg || !isfinite(cfg->yawDeg) || fabsf(cfg->yawDeg) > 720.0f ||
+        !isfinite(cfg->selfX) || !isfinite(cfg->selfY) ||
+        !isfinite(cfg->rangeM) || cfg->rangeM <= 0.0f) return;
 
     MFRALayout L = MFRALayoutFor(screen, cfg);
     if (L.radius <= 0.0f) return;
@@ -93,35 +95,29 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
     const float radius = L.radius;
     const ImVec2 center = L.center;
     const float scale = MFRAClamp(radius / 150.0f, 0.65f, 1.6f);
-    const ImU32 accent = IM_COL32(190, 220, 245, 225);
-    const ImU32 grid   = IM_COL32(200, 220, 235, 65);
+    const ImU32 accent = IM_COL32(205, 225, 240, 210);
+    const ImU32 grid   = IM_COL32(200, 220, 235, 35);
 
     /* ── 底盘 ── */
-    dl->AddCircleFilled(center, radius, IM_COL32(12, 18, 24, 145), 100);
-    dl->AddCircle(center, radius * 0.25f, grid, 100);
-    dl->AddCircle(center, radius * 0.50f, IM_COL32(255, 170, 60, 95), 100);
-    dl->AddCircle(center, radius, accent, 100, 1.4f * scale);
+    dl->AddCircleFilled(center, radius, IM_COL32(9, 15, 22, 155), 80);
+    dl->AddCircle(center, radius * 0.50f, grid, 64);
+    dl->AddCircle(center, radius, accent, 80, 1.2f * scale);
     dl->AddLine(ImVec2(center.x - radius, center.y), ImVec2(center.x + radius, center.y), grid);
     dl->AddLine(ImVec2(center.x, center.y - radius), ImVec2(center.x, center.y + radius), grid);
-    {
-        const float diag = kMFRA_PI * 0.25f;
-        float dx = radius * cosf(diag), dy = radius * sinf(diag);
-        dl->AddLine(ImVec2(center.x + dx, center.y + dy), ImVec2(center.x - dx, center.y - dy), grid);
-        dl->AddLine(ImVec2(center.x + dx, center.y - dy), ImVec2(center.x - dx, center.y + dy), grid);
-    }
-
-    /* ── 朝向三角 ── */
+    /* ── 自己：小型导航箭头，凹口与目标圆点容易区分 ── */
     {
         float yaw = isfinite(cfg->yawDeg) ? (cfg->yawDeg * (kMFRA_PI / 180.0f)) : 0.0f;
         ImVec2 fwd = cfg->northUp ? ImVec2(cosf(yaw), -sinf(yaw)) : ImVec2(0, -1);
         ImVec2 rgt = ImVec2(-fwd.y, fwd.x);
-        dl->AddTriangleFilled(
-            ImVec2(center.x + fwd.x * 9 * scale, center.y + fwd.y * 9 * scale),
-            ImVec2(center.x - fwd.x * 4 * scale + rgt.x * 4 * scale,
-                   center.y - fwd.y * 4 * scale + rgt.y * 4 * scale),
-            ImVec2(center.x - fwd.x * 4 * scale - rgt.x * 4 * scale,
-                   center.y - fwd.y * 4 * scale - rgt.y * 4 * scale),
-            accent);
+        ImVec2 tip(center.x + fwd.x * 7 * scale, center.y + fwd.y * 7 * scale);
+        ImVec2 left(center.x - fwd.x * 3.5f * scale + rgt.x * 4 * scale,
+                    center.y - fwd.y * 3.5f * scale + rgt.y * 4 * scale);
+        ImVec2 right(center.x - fwd.x * 3.5f * scale - rgt.x * 4 * scale,
+                     center.y - fwd.y * 3.5f * scale - rgt.y * 4 * scale);
+        ImVec2 notch(center.x - fwd.x * 0.8f * scale, center.y - fwd.y * 0.8f * scale);
+        dl->AddCircleFilled(center, 8.5f * scale, IM_COL32(9, 15, 22, 210), 24);
+        dl->AddTriangleFilled(tip, left, notch, IM_COL32(240, 248, 255, 255));
+        dl->AddTriangleFilled(tip, notch, right, IM_COL32(240, 248, 255, 255));
     }
 
     /* ── 方位字母（N/E/S/W）── */
@@ -166,10 +162,13 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
 
     for (int i = 0; i < count; i++) {
         const MFRadarBlip *b = &blips[i];
-        float markerR = (b->isBot ? 2.5f : 3.5f) * scale;
+        float markerR = (b->isBot ? 2.8f : 3.5f) * scale;
+        const bool hasHeading = isfinite(b->yawDeg) && fabsf(b->yawDeg) <= 720.0f;
+        // Reserve the full facing marker, including its anti-aliased edge.
+        const float footprintR = markerR + (hasHeading ? 7.0f * scale : 1.2f * scale);
 
         ImVec2 off;
-        if (!MFRAProject(cfg, b->x, b->y, radius, markerR, &off)) continue;
+        if (!MFRAProject(cfg, b->x, b->y, radius, footprintR, &off)) continue;
 
         ImVec2 p(center.x + off.x, center.y + off.y);
 
@@ -178,12 +177,12 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
         dl->AddCircleFilled(p, markerR, b->color, 16);
 
         /*
-         * ★ [M5.178] 朝向：雷达上画一根短指针，指向"他在看的方向"。
+         * 已验证的控制/复制身体朝向才画短楔形；未知朝向仍保留目标圆点。
          *
-         * 世界前向量 = (cos θ, sin θ)，θ = ControlRotation.Yaw。
+         * 世界前向量 = (cos θ, sin θ)，θ = 目标世界 Yaw。
          * 和光点用同一套旋转（ProjectRadarOffset），所以"前方朝上/北朝上"两种模式都对。
          */
-        if (isfinite(b->yawDeg)) {
+        if (hasHeading) {
             const float th = b->yawDeg * (kMFRA_PI / 180.0f);
             const float wx = cosf(th), wy = sinf(th);
             float rx, ry;
@@ -196,11 +195,13 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
                 rx =  (wy * cc - wx * cs);
                 ry = -(wx * cc + wy * cs);
             }
-            const float len = (markerR + 9.0f * scale);
+            const float len = markerR + 6.0f * scale;
             const ImVec2 tip(p.x + rx * len, p.y + ry * len);
-            dl->AddLine(p, tip, b->color, 1.5f * scale);
-            /* 箭头尖：在 tip 处点一个小点，远看也能分辨朝向 */
-            dl->AddCircleFilled(tip, 1.6f * scale, b->color, 12);
+            const float root = markerR + 1.0f * scale;
+            const float halfWidth = 2.2f * scale;
+            const ImVec2 left(p.x + rx * root - ry * halfWidth, p.y + ry * root + rx * halfWidth);
+            const ImVec2 right(p.x + rx * root + ry * halfWidth, p.y + ry * root - rx * halfWidth);
+            dl->AddTriangleFilled(tip, left, right, b->color);
         }
 
         if (b->distM > 0.0f && b->distM < 900.0f) {

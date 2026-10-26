@@ -1,4 +1,5 @@
 #import "MFUEReader.h"
+#include "MFUEPlayerDataObjC.h"
 #import "MFSettings.h"                 /* [M5.150] 队友开关 */
 
 /* [M5.155] 供 MFGameReader（真正用于绘制的实体循环）使用的本地玩家信息 */
@@ -380,10 +381,9 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
                 if (boneNumChk < 20) continue;
             }
 
-            /* [M5.153] 死人：actor+0xDC8 首字节非 0（分析报告剔除表 §4） */
+            /* 已死亡才剔除；SDK ImpendingDeath（可救援倒地）仍保留。 */
             {
-                uint8_t dead = 0;
-                if ([rb readRemote:actor + kMFUE_Actor_DeadFlag into:&dead size:1] && dead != 0) {
+                if (MFIsUEFullyDead(rb, actor)) {
                     continue;
                 }
             }
@@ -452,7 +452,8 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
 
                 if (havePS) {
                     uint64_t uinVal = 0;
-                    if ([rb readU64:ps + 0x490 out:&uinVal]) e.uin = uinVal;
+                    if ([rb readU64:ps + kMFUE_PlayerState_UIN out:&uinVal]) e.uin = uinVal;
+                    e.name = MFReadUEPlayerName(rb, ps);
                 }
 
                 /* [M5.147] 手持武器：+0x4D8 空则用 +0x588（真机实测自己走的就是 0x588） */
@@ -477,61 +478,14 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
                         }
                     }
                 }
-                if (myTeam != 0 && teamVal == myTeam && havePS &&
-                    ![MFSettings shared].showTeammates) {
-                    continue;      /* 队友：默认不画，菜单里可开（人机不受影响） */
+                if (myTeam != 0 && teamVal == myTeam) {
+                    continue;      /* 同队目标不进入绘制实体列表。 */
                 }
             }
 
-            /*
-             * ★ [M5.144] 头/甲/包等级：装备槽 → 物品 ID → 十进制解码。
-             *
-             * 链路（《物资与头甲等级机制》对同版本游戏的反编译）：
-             *     actor + 0x24E0 → 装备组件
-             *            + 0x1D8 → 槽位数组（10 槽 × 0x30 字节，槽内 +0 是 uint64 物品 ID）
-             * ID 十进制编码：第 2~4 位 = 类型码（101 头 / 105 甲 / 108 包），第 8 位 = 等级。
-             */
-            {
-                uint64_t equipComp = 0;
-                if ([rb readU64:actor + kMFUE_Pawn_EquipmentComponent out:&equipComp] &&
-                    MFUEIsValidPtr(equipComp)) {
-                    uint64_t slots = 0;
-                    if ([rb readU64:equipComp + kMFUE_Equip_SlotsArray out:&slots] &&
-                        MFUEIsValidPtr(slots)) {
-                        /*
-                         * [M5.149] 宽松读：480 字节很容易跨到未映射页，
-                         * 严格读一旦失败整段作废 —— 这就是头甲一直显示 "头- 甲- 包-" 的原因。
-                         */
-                        uint8_t rawSlots[kMFUE_Equip_SlotCount * kMFUE_Equip_SlotStride];
-                        size_t gotSlots = [rb readRemotePartial:slots
-                                                           into:rawSlots
-                                                           size:sizeof(rawSlots)];
-                        if (gotSlots >= kMFUE_Equip_SlotStride) {
-                            for (uint32_t s = 0; s < kMFUE_Equip_SlotCount; s++) {
-                                uint64_t itemId = 0;
-                                memcpy(&itemId, rawSlots + s * kMFUE_Equip_SlotStride,
-                                       sizeof(itemId));
-                                if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
-                                if (e.equipRawID == 0) e.equipRawID = itemId;
-
-                                char dec[24] = {0};
-                                int len = snprintf(dec, sizeof(dec), "%llu",
-                                                   (unsigned long long)itemId);
-                                if (len < 8) continue;
-                                int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 + (dec[3] - '0');
-                                int level = dec[7] - '0';
-                                if (level < 1 || level > 6) continue;
-                                switch (typeCode) {
-                                    case 101: e.helmetLevel = level;   e.equipKnown = YES; break;
-                                    case 105: e.armorLevel = level;    e.armorKnown = YES; e.equipKnown = YES; break;
-                                    case 108: e.backpackLevel = level; e.equipKnown = YES; break;
-                                    default: break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            NSMutableDictionary *equipmentAttributes = [NSMutableDictionary dictionary];
+            MFFillUEEquipmentAttributes(rb, actor, equipmentAttributes);
+            MFApplyUEEquipmentAttributes(e, equipmentAttributes);
 
             [out addObject:e];
         }

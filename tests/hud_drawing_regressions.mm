@@ -4,19 +4,83 @@
 #import "MFDrawingLayer.h"
 #import "MFGameReader.h"
 #import "MFUEReader.h"
+#import "../app/Sources/Game/MFUEOffsets.h"
 #import "MFSettings.h"
 #import "../app/Sources/Read/MFExternalFeed.h"
 #import "../app/Sources/Read/MFReadBackend.h"
 #import "../app/Sources/Render/MFOverlayView.h"
 #include "../app/Sources/Render/imgui/imgui.h"
+#include "../app/Sources/Render/imgui/imgui_internal.h"
 #include "HUDRegressionOutput.h"
 #include <cmath>
+#include <cstring>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
 @interface MFDrawingLayer (RegressionEntryPoint)
 - (void)overlayBuildUI:(MFImGuiContext *)context overlay:(MFOverlayView *)overlay;
+- (void)refreshPersonPosition:(id)actor reader:(MFReadBackend *)reader
+                      profile:(MFUEProfile *)profile now:(CFTimeInterval)now;
 @end
+
+// A narrow byte source for the actual heading read path. It accepts only the
+// SDK root/controller/rotation addresses and fails on unexpected access.
+@interface HeadingReadFixture : MFReadBackend
+@property (nonatomic, assign) BOOL hasController, hasRotation;
+@property (nonatomic, assign) float pitch, yaw, roll;
+@end
+@implementation HeadingReadFixture
+- (BOOL)readRemote:(uint64_t)address into:(void *)out size:(size_t)size {
+    if (address == 0x110000000ULL + 0x168 && size == 8) {
+        const uint64_t root = 0x120000000ULL; memcpy(out, &root, size); return YES;
+    }
+    if (address == 0x120000000ULL + 0x240 && size == 12) {
+        const float position[3] = {1000, 20, 0}; memcpy(out, position, size); return YES;
+    }
+    if (address == 0x110000000ULL + kMFUE_Pawn_Controller && size == 8) {
+        const uint64_t controller = _hasController ? 0x130000000ULL : 0; memcpy(out, &controller, size); return YES;
+    }
+    if (address == 0x130000000ULL + kMFUE_Controller_ControlRotation && size == 12) {
+        if (!_hasRotation) return NO;
+        const float rotation[3] = {_pitch, _yaw, _roll}; memcpy(out, rotation, size); return YES;
+    }
+    if (address == 0x110000000ULL + 0x90 && size == 6) {
+        const uint8_t replicationFlags[6] = {}; memcpy(out, replicationFlags, size); return YES;
+    }
+    CHECK(NO, "heading fixture must never read outside its SDK field map");
+    return NO;
+}
+@end
+
+static void TestHeadingReadFailures(void) {
+    id actor = [NSClassFromString(@"MFUECachedActor") new];
+    CHECK(actor != nil, "the production actor cache must be available");
+    [actor setValue:@(0x110000000ULL) forKey:@"address"];
+    [actor setValue:@(NAN) forKey:@"yawDeg"];
+    [actor setValue:@(10.0) forKey:@"seenAt"];
+    HeadingReadFixture *reader = [HeadingReadFixture new];
+    reader.hasController = reader.hasRotation = YES; reader.yaw = 450;
+    MFUEProfile *profile = [MFUEProfile new];
+    profile.actor_rootComponent = 0x168; profile.scenecomponent_worldLocation = 0x240;
+    MFDrawingLayer *drawing = [MFDrawingLayer new];
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.0];
+    CHECK(fabsf([[actor valueForKey:@"yawDeg"] floatValue] - 90) < 0.001f,
+          "heading refresh must run even when actor discovery already refreshed position this frame");
+    reader.hasRotation = NO;
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.1];
+    CHECK(std::isnan([[actor valueForKey:@"yawDeg"] floatValue]),
+          "a failed ControlRotation read must clear the previous heading");
+    reader.hasRotation = YES; reader.hasController = NO;
+    [actor setValue:@(90) forKey:@"yawDeg"];
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.2];
+    CHECK(std::isnan([[actor valueForKey:@"yawDeg"] floatValue]),
+          "a missing controller must clear the previous heading");
+    reader.hasController = YES; reader.pitch = NAN;
+    [actor setValue:@(90) forKey:@"yawDeg"];
+    [drawing refreshPersonPosition:actor reader:reader profile:profile now:10.3];
+    CHECK(std::isnan([[actor valueForKey:@"yawDeg"] floatValue]),
+          "a partially invalid rotation must never produce a heading");
+}
 
 // Exercise the real renderer with synthetic entities at its frame-acquisition
 // boundary. Production uses local sources; this suite must neither enable an
@@ -51,7 +115,6 @@ static MFEntity *Entity(float x, float y, BOOL loot, BOOL box) {
     entity.distanceMeters = hypotf(x, y) / 100.0f;
     entity.bearingDeg = atan2f(y, x) * 180.0f / (float)M_PI;
     entity.isBehind = x < 0;
-    entity.yawDeg = NAN;
     entity.isLoot = loot; entity.isBox = box;
     entity.name = box ? @"Fixture Box" : @"Fixture Item";
     entity.level = 4; entity.value = 20000;
@@ -63,10 +126,10 @@ static MFEntity *Entity(float x, float y, BOOL loot, BOOL box) {
     return entity;
 }
 
-static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay) {
+static ImDrawData *Frame(MFDrawingLayer *drawing, MFOverlayView *overlay, float delta = 1.0f/60.0f) {
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2(640, 720);
-    io.DeltaTime = 1.0f / 60.0f;
+    io.DeltaTime = delta;
     ImGui::NewFrame();
     [drawing overlayBuildUI:nil overlay:overlay];
     ImGui::Render();
@@ -212,9 +275,52 @@ static void TestSyntheticDrawing(void) {
     settings.showHealth = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
           "hiding all information must leave no unwanted entity rectangle");
+
+    // Actual production draw lists must keep lower-rate categories visible
+    // while the real-player line follows every 120Hz frame.
+    MFEntity *real=Entity(1000,-100,NO,NO), *bot=Entity(1000,100,NO,NO); bot.isBot=YES;
+    sEntities=@[real,bot]; settings.showTracer=YES;
+    auto packed=[&](MFColorSlot slot){CGFloat r,g,b,a;[[settings colorForSlot:slot]getRed:&r green:&g blue:&b alpha:&a];
+        return IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),(int)(a*255));};
+    const ImU32 redLine=packed(MFColorSlotSkeleton), greenLine=packed(MFColorSlotBotSkeleton);
+    data=Frame(drawing,overlay,1.f/120);
+    const float firstBot=ColoredWidth(data,greenLine), firstReal=ColoredWidth(data,redLine);
+    real.screen.x-=30; bot.screen.x+=30;
+    data=Frame(drawing,overlay,1.f/120);
+    CHECK(fabsf(ColoredWidth(data,greenLine)-firstBot)<.01f &&
+          fabsf(ColoredWidth(data,redLine)-firstReal)>20,
+          "120Hz real-player geometry must move while cached bot geometry remains visible");
+    data=Frame(drawing,overlay,1.f/120);
+    CHECK(fabsf(ColoredWidth(data,greenLine)-firstBot)>20,
+          "bot geometry must update on the next 60Hz tick");
+    settings.showBot=NO;
+    CHECK(ColoredWidth(Frame(drawing,overlay,1.f/120),greenLine)==0,
+          "bot visibility changes must invalidate cached geometry immediately");
+    settings.showBot=YES; settings.showTracer=NO; sEntities=@[patient];
     settings.showRadar = YES;
     CHECK(Frame(drawing, overlay)->TotalVtxCount > 8,
           "the independent radar switch must enable its actual geometry");
+    // The radar consumes every enemy, including a target behind the camera,
+    // while team/bot filters remain independent of projection visibility.
+    settings.showBot = YES;
+    sEntities = @[];
+    const int radarBase = Frame(drawing, overlay)->TotalVtxCount;
+    MFEntity *radarTarget = Entity(-1000, 0, NO, NO);
+    sEntities = @[radarTarget];
+    const int radarEnemy = Frame(drawing, overlay)->TotalVtxCount;
+    CHECK(radarEnemy > radarBase + 8, "behind-camera opponents must remain visible on the radar");
+    const uint32_t originalTeam = gMFUELocalTeam;
+    gMFUELocalTeam = 7; radarTarget.teamId = 7;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == radarBase,
+          "known teammates must never create radar geometry");
+    radarTarget.teamId = 8; radarTarget.isBot = YES; settings.showBot = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == radarBase,
+          "the bot filter must remove radar points and their facing markers");
+    settings.showBot = YES; radarTarget.isBot = NO; radarTarget.yawDeg = 90;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount > radarEnemy,
+          "a validated enemy heading must add actual radar direction geometry");
+    gMFUELocalTeam = originalTeam;
+    sEntities = @[patient];
     CHECK([settings save], "the radar preference must save successfully");
     CHECK([[MFSettings alloc] init].showRadar,
           "an enabled radar preference must survive reloading settings");
@@ -230,8 +336,8 @@ static void TestSyntheticDrawing(void) {
     patient.armorLevel = 5; patient.armorHP = 105; patient.armorMaxHP = 120; patient.backpackLevel = 6;
     patient.weaponRawID = 18010000001ULL;
     CGFloat red = 1, green = 1, blue = 1, alpha = 1;
-    [[settings colorForSlot:MFColorSlotPersonInfo] getRed:&red green:&green blue:&blue alpha:&alpha];
-    const ImU32 tracerColor = IM_COL32((int)(red * 255), (int)(green * 255), (int)(blue * 255), (int)(alpha * 0.55f * 255));
+    [[settings colorForSlot:MFColorSlotSkeleton] getRed:&red green:&green blue:&blue alpha:&alpha];
+    const ImU32 tracerColor = IM_COL32((int)(red * 255), (int)(green * 255), (int)(blue * 255), (int)(alpha * 255));
     MFCamera camera = {0}; camera.fov = 90;
     const float headWorld[] = {1000, 0, 88};
     MFScreen projection = [MFProjection screenWithSize:CGSizeMake(640, 720) fov:90];
@@ -240,6 +346,10 @@ static void TestSyntheticDrawing(void) {
     const float gearCenter = head.y - 6 - 3 * lineHeight + settings.fontInfo * 0.5f;
     CHECK(fabsf(ColoredBottom(Frame(drawing, overlay), tracerColor) - gearCenter) <= 2,
           "tracer must end at the center of the gear row above the head, not at the hip");
+    data=Frame(drawing,overlay);
+    CHECK(ColoredVertices(data,packed(MFColorSlotLoot4))>0 && ColoredVertices(data,packed(MFColorSlotLoot5))>0 &&
+          ColoredVertices(data,packed(MFColorSlotLoot6))>0,
+          "head, armor and bag must each use their own quality color in the same gear row");
     settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = NO;
 
     sEntities = @[Entity(1000, 0, NO, NO), Entity(-1000, 0, NO, NO)];
@@ -250,6 +360,34 @@ static void TestSyntheticDrawing(void) {
     const int withBackEnemy = Frame(drawing, overlay)->TotalVtxCount;
     CHECK(withBackEnemy > withoutBackEnemy + 8,
           "enabling back-enemy must render a marker for the behind-camera person");
+    settings.showTracer = NO;
+    MFEntity *back = Entity(-1000, 0, NO, NO);
+    sEntities = @[back];
+    const int oneBack = Frame(drawing, overlay)->TotalVtxCount;
+    const uint32_t originalBackTeam = gMFUELocalTeam;
+    gMFUELocalTeam = 7; back.teamId = 7;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "known teammates must never trigger a behind-enemy indicator");
+    back.teamId = 8; back.isBot = YES; settings.showBot = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "hiding bots must suppress their behind-enemy indicator");
+    settings.showBot = YES; back.isBot = NO;
+    back.bearingDeg = NAN;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "an unknown bearing must never produce invalid offscreen vertices");
+    back.bearingDeg = 180; back.distanceMeters = settings.backEnemyDistance + 1;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "the offscreen distance limit must remove distant threats");
+    back.distanceMeters = 10;
+    MFEntity *adjacentBack = Entity(-1200, 10, NO, NO);
+    sEntities = @[back, adjacentBack];
+    const int clusteredBack = Frame(drawing, overlay)->TotalVtxCount;
+    CHECK(clusteredBack > oneBack && clusteredBack < oneBack * 2,
+          "nearby bearings must share a marker and show their count without duplicating distance labels");
+    sEntities = @[];
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "the offscreen guide must disappear immediately with no threats");
+    gMFUELocalTeam = originalBackTeam;
 
     settings.backEnemyEnabled = NO;
     sEntities = @[Entity(1000, 0, NO, NO)];
@@ -270,6 +408,16 @@ static void TestSyntheticDrawing(void) {
           "the loot-name switch must reduce detailed labels to simple markers");
 
     settings.showLoot = settings.showBox = settings.showTracer = NO;
+    sEntities=@[];
+    MFEntity *qualityItem=Entity(1000,80,YES,NO); sLoot=@[qualityItem];
+    settings.showLoot=YES;
+    const ImU32 qualityColors[]={0,IM_COL32(255,255,255,255),IM_COL32(40,255,85,255),
+        packed(MFColorSlotLoot3),packed(MFColorSlotLoot4),packed(MFColorSlotLoot5),packed(MFColorSlotLoot6)};
+    for(int level=1;level<=6;level++){
+        qualityItem.level=level;Frame(drawing,overlay);data=Frame(drawing,overlay);
+        CHECK(ColoredVertices(data,qualityColors[level])>0,"each loot quality must draw its distinct six-level color");
+    }
+    settings.showLoot=NO;
     settings.showLootStats = NO;
     const int statsHidden = Frame(drawing, overlay)->TotalVtxCount;
     settings.showLootStats = YES;
@@ -279,6 +427,16 @@ static void TestSyntheticDrawing(void) {
     settings.showLootStats = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == statsHidden,
           "the statistics switch must remove the entire statistics window");
+    settings.showLootStats=YES;
+    settings.lootStatsXRatio=0; settings.lootStatsYRatio=0;
+    Frame(drawing,overlay);
+    ImGuiWindow *stats=ImGui::FindWindowByName("物资统计");
+    CHECK(stats && stats->Pos.x==0 && stats->Pos.y==0,"statistics anchor must reach the top-left");
+    settings.lootStatsXRatio=1; settings.lootStatsYRatio=1;
+    Frame(drawing,overlay);
+    CHECK(stats->Pos.x+stats->Size.x<=640.1f && stats->Pos.y+stats->Size.y<=720.1f && stats->Pos.x>100,
+          "statistics position must move and remain inside the screen");
+    settings.showLootStats=NO;
 
     const NSUInteger acquiredBeforeDisable = sAcquisitions;
     settings.drawEnabled = NO;
@@ -302,6 +460,7 @@ static void TestSyntheticDrawing(void) {
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            TestHeadingReadFailures();
             TestSyntheticDrawing();
             puts("PASS: production drawing consumes synthetic frames (no game data)");
             exit(0);

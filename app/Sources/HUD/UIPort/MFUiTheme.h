@@ -169,7 +169,7 @@ struct UIState
     // 索引: 0信号枪1 1信号弹1 2-11物资0 12密钥1 13宝箱1 14人物盒1 15自救器1
     //       16经典黑箱1(固定) 17军事宝箱1 18保险箱1 19超级物资箱1 20海盗福利箱1 21密室钥匙1(固定)
     AimSettings aim;
-    float bgAlpha = 0.96f;
+    float bgAlpha = 1.0f;
     int   theme = 0;                 // 0 white, 1 mist blue, 2 lavender, 3 blush
     float accentHue = 0.587f;
     int   fpsSel = 90;
@@ -248,8 +248,8 @@ struct UIState
     float mortarGravityMps2 = kMortarGravityMps2;
     float mortarHipMaxRangeM = kMortarHipMaximumM;
 
-    ImVec4 humanSkeletonColor = ImVec4(1.0f, 0.16f, 0.16f, 1.0f);
-    ImVec4 botSkeletonColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+    ImVec4 humanSkeletonColor = ImVec4(1.0f, 0.08f, 0.08f, 1.0f);
+    ImVec4 botSkeletonColor = ImVec4(0.10f, 1.0f, 0.20f, 1.0f);
     ImVec4 coverColor = ImVec4(1.0f, 0.30f, 0.30f, 1.0f);
     ImVec4 energyDrinkColor = ImVec4(0.24f, 0.67f, 1.0f, 1.0f);
     ImVec4 painkillerColor = ImVec4(1.0f, 0.57f, 0.19f, 1.0f);
@@ -284,6 +284,8 @@ struct UIState
     bool  boxesEnabled = false;
     bool  lootNamesEnabled = true;
     bool  lootStatsEnabled = false;
+    float lootStatsXRatio = .01f;
+    float lootStatsYRatio = .18f;
     float minLootLevel = 0;
     float minLootValue = 0;
     float lootDistance = 120;
@@ -466,9 +468,9 @@ static ThemeColors GetTheme(int theme, float alpha, float accentHue)
     c.panel = IM_COL32(rgb[0],rgb[1],rgb[2],a);
     c.canvas = c.panel;
     c.sidebar = c.panel;
-    c.surface = IM_COL32(255,255,255,a);
+    c.surface = IM_COL32(255,255,255,255);
     c.surfaceHover = MixColor(c.canvas,c.surface,.45f);
-    c.track = IM_COL32(237,242,250,a);
+    c.track = IM_COL32(231,237,245,255);
     c.border = IM_COL32(60,60,67,20);
     c.divider = IM_COL32(60,60,67,25);
     c.text = IM_COL32(28,28,30,255);
@@ -499,6 +501,7 @@ static void BuildUIChineseRanges(ImGuiIO& io, ImVector<ImWchar>& out)
 #include "MFUiFontChars.h"
     builder.AddText(kGeneratedFontChars);
     builder.AddText("灵动岛固定在屏幕顶部中央");
+    builder.AddText("统计窗口位置水平垂直恢复默认位置真人骨骼人机骨骼红绿蓝黄白不透明度");
     // 固定界面文字在启动时建立；玩家昵称的字形由主循环按需加入，避免整套汉字图集占满显存。
     builder.AddText(
         "黑皇主页绘制瞄准物资设置退出主页运行状态在线刷新项目筛选应用背景图"
@@ -572,6 +575,10 @@ static ImVec2 TextSize(ImFont* font, float size, const char* text)
 
 static void DrawText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text)
 {
+    const ImVec2 pixels = ImGui::GetIO().DisplayFramebufferScale;
+    const float sx = ImMax(1.0f,pixels.x), sy = ImMax(1.0f,pixels.y);
+    pos.x = std::round(pos.x*sx)/sx;
+    pos.y = std::round(pos.y*sy)/sy;
     dl->AddText(font, size, pos, color, text);
 }
 

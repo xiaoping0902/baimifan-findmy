@@ -13,6 +13,10 @@
 #import "../Game/MFSettings.h"
 
 /* ★ 这一行把小玉的整套 UI 编进来（只有这一个 TU 编译它，避免重复符号） */
+#ifdef MF_UI_TEST_HOOKS
+extern "C" void MFRecordMenuTestItem(const char *, ImVec2, ImVec2);
+#define HEIHUANG_UI_TEST_ITEM(name, origin, size) MFRecordMenuTestItem(name, origin, size)
+#endif
 #include "UIPort/MFUiCanvas.h"
 
 static UIState gUI;
@@ -41,7 +45,7 @@ static void MFPanelStoreToSettings(void) {
     s.masterEnabled = gUI.feat[DrawingHuman];
     s.drawEnabled   = gUI.feat[DrawingHuman];
     s.showBot        = gUI.feat[DrawingBot];
-    s.showTeammates  = gUI.showTeammates;
+    s.showTeammates  = NO;
     s.showSkeleton   = gUI.feat[DrawingSkeleton];
     s.showTracer     = gUI.feat[DrawingRay];
     s.showHealth     = gUI.feat[DrawingHealth];
@@ -56,6 +60,8 @@ static void MFPanelStoreToSettings(void) {
     s.showBox        = gUI.boxesEnabled;
     s.showLootName   = gUI.lootNamesEnabled;
     s.showLootStats  = gUI.lootStatsEnabled;
+    s.lootStatsXRatio = gUI.lootStatsXRatio;
+    s.lootStatsYRatio = gUI.lootStatsYRatio;
     s.minLootLevel   = (NSInteger)lroundf(gUI.minLootLevel);
     s.minLootValue   = (NSInteger)lroundf(gUI.minLootValue);
     s.lootDrawDistance = gUI.lootDistance;
@@ -73,6 +79,11 @@ static void MFPanelStoreToSettings(void) {
                                 blue:gUI.humanSkeletonColor.z
                                alpha:gUI.humanSkeletonColor.w]
            forSlot:MFColorSlotSkeleton];
+    [s setColor:[UIColor colorWithRed:gUI.botSkeletonColor.x
+                               green:gUI.botSkeletonColor.y
+                                blue:gUI.botSkeletonColor.z
+                               alpha:gUI.botSkeletonColor.w]
+           forSlot:MFColorSlotBotSkeleton];
     s.captureProtectionEnabled = gUI.excludeFromRecording;
     // Apply settings immediately, but persist only after the gesture settles.
     // This timer also fires when the panel has been minimized and rendering is
@@ -96,7 +107,7 @@ static void MFPanelLoadFromSettings(void) {
     MFSettings *s = [MFSettings shared];
     gUI.feat[DrawingHuman]      = s.masterEnabled && s.drawEnabled;
     gUI.feat[DrawingBot]        = s.showBot;
-    gUI.showTeammates           = s.showTeammates;
+    gUI.showTeammates           = false;
     gUI.feat[DrawingSkeleton]   = s.showSkeleton;
     gUI.feat[DrawingRay]        = s.showTracer;
     gUI.feat[DrawingHealth]     = s.showHealth;
@@ -111,6 +122,8 @@ static void MFPanelLoadFromSettings(void) {
     gUI.boxesEnabled           = s.showBox;
     gUI.lootNamesEnabled       = s.showLootName;
     gUI.lootStatsEnabled       = s.showLootStats;
+    gUI.lootStatsXRatio        = s.lootStatsXRatio;
+    gUI.lootStatsYRatio        = s.lootStatsYRatio;
     gUI.minLootLevel           = (float)s.minLootLevel;
     gUI.minLootValue           = (float)s.minLootValue;
     gUI.lootDistance           = s.lootDrawDistance;
@@ -124,6 +137,8 @@ static void MFPanelLoadFromSettings(void) {
     CGFloat r=1,g=1,b=1,a=1;
     [[s colorForSlot:MFColorSlotSkeleton] getRed:&r green:&g blue:&b alpha:&a];
     gUI.humanSkeletonColor      = ImVec4((float)r,(float)g,(float)b,(float)a);
+    [[s colorForSlot:MFColorSlotBotSkeleton] getRed:&r green:&g blue:&b alpha:&a];
+    gUI.botSkeletonColor        = ImVec4((float)r,(float)g,(float)b,(float)a);
     gUI.excludeFromRecording    = s.captureProtectionEnabled;
     NSDictionary *appearance = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kMFPanelAppearanceKey];
     if ([appearance[@"scale"] isKindOfClass:[NSNumber class]]) {
@@ -134,7 +149,9 @@ static void MFPanelLoadFromSettings(void) {
         gUI.theme = ImClamp([appearance[@"theme"] intValue],0,3);
     if ([appearance[@"alpha"] isKindOfClass:[NSNumber class]]) {
         const float alpha = [appearance[@"alpha"] floatValue];
-        if (std::isfinite(alpha)) gUI.bgAlpha = ImClamp(alpha,.85f,1.0f);
+        // V1 shipped .96 as the default; migrate that default to a solid panel.
+        if (std::isfinite(alpha)) gUI.bgAlpha = std::fabs(alpha-.96f)<.0001f ?
+            1.0f : ImClamp(alpha,.85f,1.0f);
     }
     if ([appearance[@"accent"] isKindOfClass:[NSNumber class]]) {
         const float accent = [appearance[@"accent"] floatValue];

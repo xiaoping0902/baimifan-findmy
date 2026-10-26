@@ -138,6 +138,7 @@ def main():
                                 ROOT / "app/Sources/Read/MFExternalFeed.mm",
                                 ROOT / "tests/mfpt_page_table_stubs.c"]
             run("xcrun", "--sdk", "iphonesimulator", "clang++", "-x", "objective-c++", "-fobjc-arc", "-std=c++17",
+                *(["-DMF_UI_TEST_HOOKS=1"] if args.suite == "menu" else []),
                 "-target", f"{architecture}-apple-ios16.0-simulator", "-isysroot", sdk,
                 "-I" + str(ROOT / "app/Sources/HUD"),
                 "-I" + str(ROOT / "app/Sources/Game"),

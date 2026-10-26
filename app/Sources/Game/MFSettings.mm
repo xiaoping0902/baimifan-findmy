@@ -2,12 +2,15 @@
 //  MFSettings.mm — 配置模型（实现）
 //
 #import "MFSettings.h"
+#include <cmath>
 
 static NSString *const kSettingsFile = @"mf_settings.plist";
 
 @implementation MFSettings {
     NSMutableDictionary<NSNumber *, UIColor *> *_colors;
 }
+@synthesize lootStatsXRatio = _lootStatsXRatio;
+@synthesize lootStatsYRatio = _lootStatsYRatio;
 
 + (instancetype)shared {
     static MFSettings *s;
@@ -46,6 +49,8 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _showBox = NO;
     _showLootName = YES;
     _showLootStats = NO;
+    self.lootStatsXRatio = 0.01f;
+    self.lootStatsYRatio = 0.18f;
 
     _minLootLevel = 0;       // 0 = 停用等级过滤
     _minLootValue = 0;       // 0 = 停用价值过滤
@@ -78,14 +83,24 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _colors = [NSMutableDictionary dictionary];
     [self setColorInternal:[UIColor whiteColor]                       slot:MFColorSlotPersonInfo];
     [self setColorInternal:[UIColor colorWithRed:0.75 green:0.75 blue:0.75 alpha:1] slot:MFColorSlotLootLow];
-    [self setColorInternal:[UIColor colorWithRed:0.35 green:0.78 blue:0.98 alpha:1] slot:MFColorSlotLoot3];
-    [self setColorInternal:[UIColor colorWithRed:0.61 green:0.35 blue:0.71 alpha:1] slot:MFColorSlotLoot4];
-    [self setColorInternal:[UIColor colorWithRed:0.98 green:0.82 blue:0.30 alpha:1] slot:MFColorSlotLoot5];
-    [self setColorInternal:[UIColor colorWithRed:0.98 green:0.35 blue:0.30 alpha:1] slot:MFColorSlotLoot6];
+    [self setColorInternal:[UIColor colorWithRed:0.10 green:0.55 blue:1.00 alpha:1] slot:MFColorSlotLoot3];
+    [self setColorInternal:[UIColor colorWithRed:0.76 green:0.28 blue:1.00 alpha:1] slot:MFColorSlotLoot4];
+    [self setColorInternal:[UIColor colorWithRed:1.00 green:0.76 blue:0.05 alpha:1] slot:MFColorSlotLoot5];
+    [self setColorInternal:[UIColor colorWithRed:1.00 green:0.12 blue:0.12 alpha:1] slot:MFColorSlotLoot6];
     [self setColorInternal:[UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1] slot:MFColorSlotTeam];
     [self setColorInternal:[UIColor colorWithRed:0.55 green:0.85 blue:1.00 alpha:1] slot:MFColorSlotArmor];
-    [self setColorInternal:[UIColor colorWithRed:1.00 green:0.45 blue:0.45 alpha:1] slot:MFColorSlotSkeleton];
+    [self setColorInternal:[UIColor colorWithRed:1.00 green:0.08 blue:0.08 alpha:1] slot:MFColorSlotSkeleton];
     [self setColorInternal:[UIColor colorWithRed:1.00 green:0.27 blue:0.23 alpha:1] slot:MFColorSlotBackEnemy];
+    [self setColorInternal:[UIColor colorWithRed:0.10 green:1.00 blue:0.20 alpha:1] slot:MFColorSlotBotSkeleton];
+}
+
+// Clamp at the model boundary so direct edits and persisted values obey the
+// same screen-anchor contract. Invalid values return to their own default.
+- (void)setLootStatsXRatio:(float)value {
+    _lootStatsXRatio = std::isfinite(value) ? fmaxf(0, fminf(1, value)) : 0.01f;
+}
+- (void)setLootStatsYRatio:(float)value {
+    _lootStatsYRatio = std::isfinite(value) ? fmaxf(0, fminf(1, value)) : 0.18f;
 }
 
 - (void)setColorInternal:(UIColor *)c slot:(MFColorSlot)s {
@@ -132,6 +147,8 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         @[@"minLootLevel", @(_minLootLevel)], @[@"minLootValue", @(_minLootValue)],
         @[@"boxDrawDistance", @(_boxDrawDistance)],
         @[@"lootDrawDistance", @(_lootDrawDistance)],
+        @[@"lootStatsXRatio", @(_lootStatsXRatio)],
+        @[@"lootStatsYRatio", @(_lootStatsYRatio)],
         @[@"skeletonDistance", @(_skeletonDistance)],
         @[@"backEnemyRadius", @(_backEnemyRadius)],
         @[@"backEnemyDistance", @(_backEnemyDistance)],
@@ -167,6 +184,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
 
     LOAD_BOOL(masterEnabled); LOAD_BOOL(drawEnabled);
     LOAD_BOOL(showBot); LOAD_BOOL(showTeammates); LOAD_BOOL(showName); LOAD_BOOL(showArmor);
+    _showTeammates = NO; // Teammates are excluded even in older saved configurations.
     LOAD_BOOL(showSkeleton); LOAD_BOOL(showTracer); LOAD_BOOL(showTeam);
     LOAD_BOOL(showHeld); LOAD_BOOL(showDistance); LOAD_BOOL(showHealth);
     LOAD_BOOL(showRadar);
@@ -177,6 +195,8 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
 
     LOAD_NUM(minLootLevel); LOAD_NUM(minLootValue);
     LOAD_NUM(boxDrawDistance); LOAD_NUM(lootDrawDistance); LOAD_NUM(skeletonDistance);
+    if (d[@"lootStatsXRatio"]) self.lootStatsXRatio = [d[@"lootStatsXRatio"] floatValue];
+    if (d[@"lootStatsYRatio"]) self.lootStatsYRatio = [d[@"lootStatsYRatio"] floatValue];
     LOAD_NUM(backEnemyRadius); LOAD_NUM(backEnemyStyle);
     LOAD_NUM(backEnemyDistance);
     LOAD_NUM(fontPerson); LOAD_NUM(fontBox); LOAD_NUM(fontInfo); LOAD_NUM(fontArmor);
@@ -190,6 +210,12 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         for (NSString *key in cols) {
             NSArray *rgba = cols[key];
             if (rgba.count == 4) {
+                // Replace the shipped pale-red default, retaining custom hues.
+                if (key.integerValue == MFColorSlotSkeleton &&
+                    fabs([rgba[0] doubleValue]-1.0)<0.0001 &&
+                    fabs([rgba[1] doubleValue]-.45)<0.0001 &&
+                    fabs([rgba[2] doubleValue]-.45)<0.0001 &&
+                    fabs([rgba[3] doubleValue]-1.0)<0.0001) continue;
                 _colors[@(key.integerValue)] =
                     [UIColor colorWithRed:[rgba[0] doubleValue]
                                     green:[rgba[1] doubleValue]

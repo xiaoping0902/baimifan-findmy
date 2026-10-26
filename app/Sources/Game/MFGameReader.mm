@@ -6,6 +6,7 @@
 #import "MFSettings.h"
 #import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
 #include "MFUEHealth.h"
+#include "MFUEPlayerDataObjC.h"
 #import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
 #import "../Read/MFReadBackend.h"
 #import <mach/mach.h>
@@ -63,6 +64,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     if ((self = [super init])) {
         _health = -1;
         _maxHealth = 0;
+        _yawDeg = NAN;
     }
     return self;
 }
@@ -296,9 +298,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     /* 同一个 Mesh 就是自己 */
                     if (isChar && gMFUELocalMesh != 0 && mesh == gMFUELocalMesh) isChar = NO;
 
-                    uint8_t deadFlag = 0;
-                    if (isChar &&
-                        [rb readRemote:item + 0xDC8 into:&deadFlag size:1] && deadFlag != 0) {
+                    if (isChar && MFIsUEFullyDead(rb, item)) {
                         isChar = NO;
                     }
 
@@ -320,9 +320,8 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                     if (isChar && [rb readU64:item + 0x10C0 out:&tc] && tc) {
                         [rb readRemote:tc + 0x108 into:&teamVal size:4];
                     }
-                    /* 队友（同队且带 PlayerState）不画 */
-                    if (isChar && gMFUELocalTeam != 0 && teamVal == gMFUELocalTeam && havePS &&
-                        ![MFSettings shared].showTeammates) {
+                    /* 同队目标不进入绘制实体列表。 */
+                    if (isChar && gMFUELocalTeam != 0 && teamVal == gMFUELocalTeam) {
                         isChar = NO;
                     }
 
@@ -332,7 +331,9 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
                     if (isChar) {
                         uint64_t uinVal = 0;
-                        if (havePS && [rb readU64:ps + 0x320 out:&uinVal]) a[@"uin"] = @(uinVal);
+                        if (havePS && [rb readU64:ps + kMFUE_PlayerState_UIN out:&uinVal]) a[@"uin"] = @(uinVal);
+                        NSString *name = havePS ? MFReadUEPlayerName(rb, ps) : nil;
+                        if (name.length) a[@"name"] = name;
 
                         /* 手持 */
                         uint64_t combat = 0;
@@ -349,28 +350,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                             }
                         }
 
-                        /* 头/甲/包：装备组件 2KB 扫描 */
-                        uint64_t ec = 0;
-                        if ([rb readU64:item + 0x24E0 out:&ec] && ec) {
-                            uint8_t eqBuf[0x800];
-                            size_t got = [rb readRemotePartial:ec into:eqBuf size:sizeof(eqBuf)];
-                            for (size_t o2 = 0; o2 + 8 <= got; o2 += 8) {
-                                uint64_t itemId = 0;
-                                memcpy(&itemId, eqBuf + o2, 8);
-                                if (itemId < 10000001ULL || itemId > 0x4A87F317FULL) continue;
-                                char dec[24] = {0};
-                                int len = snprintf(dec, sizeof(dec), "%llu",
-                                                   (unsigned long long)itemId);
-                                if (len < 8) continue;
-                                int typeCode = (dec[1] - '0') * 100 + (dec[2] - '0') * 10 +
-                                               (dec[3] - '0');
-                                int lv = dec[7] - '0';
-                                if (lv < 1 || lv > 6) continue;
-                                if (typeCode == 101 && !a[@"h"]) a[@"h"] = @(lv);
-                                if (typeCode == 105 && !a[@"a"]) a[@"a"] = @(lv);
-                                if (typeCode == 108 && !a[@"b"]) a[@"b"] = @(lv);
-                            }
-                        }
+                        MFFillUEEquipmentAttributes(rb, item, a);
                     }
 
                     a[@"t"] = @(CFAbsoluteTimeGetCurrent());
@@ -409,13 +389,8 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 if (e.weaponRawID) {
                     e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
                 }
-                e.helmetLevel = [attr[@"h"] intValue];
-                e.armorLevel = [attr[@"a"] intValue];
-                e.backpackLevel = [attr[@"b"] intValue];
-                if (e.helmetLevel || e.armorLevel || e.backpackLevel) {
-                    e.equipKnown = YES;
-                    e.armorKnown = YES;
-                }
+                e.name = attr[@"name"];
+                MFApplyUEEquipmentAttributes(e, attr);
             }
 
 
@@ -464,12 +439,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 /// 读人物属性。所有偏移为 0 时直接返回 —— 保持「未校准不画错」的约束。
 - (void)readHumanFields:(MFEntity *)e reader:(MFReadBackend *)rb
                 profile:(MFGameProfile *)p {
-    e.isBot      = NO;
-    e.teamId     = 0;
-    e.weaponId   = 0;
-    e.armorLevel = 0;
-    e.armorKnown = NO;
-
+    // A zero legacy offset leaves the already decoded SDK value intact.
     if (!p) return;
 
     if (p.entityIsBotOffset) {

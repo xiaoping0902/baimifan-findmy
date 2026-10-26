@@ -317,10 +317,10 @@ static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
 /*
  * [M5.173] 玩家资料与本机血量 —— 真机 Frida 已逐条验证（交接报告 §4.2 / §4.3）
  *
- *    UIN       PlayerState+0x320  uint64
+ *    UIN       ABasePlayerState+0x490  uint64（SDK GPGameplay_classes.hpp）
  *    名字 Data PlayerState+0x470  指针
- *    名字 Num  PlayerState+0x478  int32（UTF-16 码元数）
- *        ★ 本作是【指针在前】，UE4 标准是 Num 在前 —— 照着标准读永远是 null
+ *    名字 Num  PlayerState+0x478  int32（含末尾 NUL 的 UTF-16 码元数）
+ *    FString/TArray 按 SDK 为 Data/Num/Max；显示时必须排除末尾 NUL。
  *
  *    血量组件 actor+0x10B8 → 组件；+0x258 是 HealthMAX，不能作为当前血量。
  *    当前值：组件+0x280 → HealthSet；Health+0x0C = +0x3C，MaxHealth+0x0C = +0x54。
@@ -328,7 +328,7 @@ static const uint32_t kMFUE_PlayerState_Remove  = 0x04C0;
  *
  * 之前这些只写在不被调用的两条链里，现役路径一个都没读 → 头甲/血量/队伍全空。
  */
-static const uint32_t kMFUE_PlayerState_UIN      = 0x0320;
+static const uint32_t kMFUE_PlayerState_UIN      = 0x0490;
 static const uint32_t kMFUE_PlayerState_NameData = 0x0470;
 static const uint32_t kMFUE_PlayerState_NameNum  = 0x0478;
 
@@ -377,7 +377,7 @@ static const uint32_t kMFUE_Equip_SlotCount         = 10;
  *   actor + 0x24E0 = UCharacterEquipComponent*（SDK 里的名字是 CharacterEquipComponentCache）
  *
  *     +0x01D8  TArray<FEquipmentInfo> EquipmentInfoArray   每条 0x30，ItemID 在 +0x00
- *     +0x01E8  TArray<FArmorInfo>     EquipedArmorInfoArray 每条 0x40：
+ *     +0x01E8  TArray<FArmorInfo>     EquipedArmorInfoArray 每条 0x88：
  *                +0x00  EEEquipmentType（u8）  1=Helmet 5=BreastPlate 8=Bag
  *                +0x08  ItemID（u64）
  *                +0x18  ArmorHP（float）  +0x1C MaxArmorHP
@@ -398,7 +398,7 @@ static const uint32_t kMFUE_Equip_InfoStride     = 0x30;
 static const uint32_t kMFUE_Equip_InfoItemIDOff  = 0x00;
 static const uint32_t kMFUE_Equip_ArmorArray     = 0x01E8;
 static const uint32_t kMFUE_Equip_ArmorArrayNum  = 0x01F0;
-static const uint32_t kMFUE_Equip_ArmorStride    = 0x40;
+static const uint32_t kMFUE_Equip_ArmorStride    = 0x88;
 static const uint32_t kMFUE_Equip_ArmorTypeOff   = 0x00;
 static const uint32_t kMFUE_Equip_ArmorItemIDOff = 0x08;
 

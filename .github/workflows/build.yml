@@ -36,6 +36,7 @@ jobs:
           ( python3 -m unittest discover -s tests -p 'test_ipa_entitlements.py' -v
             python3 -m unittest discover -s tests -p 'test_hud_font.py' -v
             python3 tests/run_hud_health_regressions.py
+            python3 tests/run_hud_player_data_regressions.py
             python3 tests/run_uipanel_regressions.py
             python3 scripts/preflight.py ) 2>&1 | tee app/build.log
 

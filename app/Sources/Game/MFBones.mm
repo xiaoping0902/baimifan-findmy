@@ -7,6 +7,7 @@
 //
 #import "MFBones.h"
 #import "MFUEOffsets.h"
+#include "MFBoneGeometry.h"
 #import "../Read/MFReadBackend.h"
 #include <math.h>
 #include <string.h>   /* memcpy */
@@ -113,7 +114,6 @@ BOOL MFBoneReadWorld(uint64_t actor, float out[kMFBoneCount][3]) {
         return NO;
     }
 
-    float minZ = 1.0e9f, maxZ = -1.0e9f;
     for (int i = 0; i < kMFBoneCount; i++) {
         const uint8_t *p = buf + (size_t)(kIndices[i] - lo) * kBoneStride + kTransformTrans;
         float local[3];
@@ -127,13 +127,10 @@ BOOL MFBoneReadWorld(uint64_t actor, float out[kMFBoneCount][3]) {
         out[i][0] = rot[0] + c2wT[0];
         out[i][1] = rot[1] + c2wT[1];
         out[i][2] = rot[2] + c2wT[2];
-        if (out[i][2] < minZ) minZ = out[i][2];
-        if (out[i][2] > maxZ) maxZ = out[i][2];
     }
 
-    const float height = maxZ - minZ;
-    if (!(height > 100.0f && height < 260.0f)) {
-        gMFBoneErr = [NSString stringWithFormat:@"身高异常 %.0fcm", height];
+    if (!MFBoneGeometryValid(out, kMFBoneCount, kLinks, 17)) {
+        gMFBoneErr = @"骨骼空间范围或连线异常";
         return NO;
     }
     gMFBoneErr = nil;

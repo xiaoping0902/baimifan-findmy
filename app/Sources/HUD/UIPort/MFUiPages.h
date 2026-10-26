@@ -17,17 +17,16 @@ static float Home(Canvas& c) {
 static float Drawing(Canvas& c) {
     static const char* names[]={"人机","骨骼","射线","血量","人物名字","队伍与ID","武器名字","背敌提示","距离","头甲包"};
     static const int indices[]={DrawingBot,DrawingSkeleton,DrawingRay,DrawingHealth,DrawingName,DrawingTeam,DrawingWeapon,DrawingOffscreen,DrawingDistance,DrawingEquipment};
-    c.card(0,0,c.width,476,"人物信息");
+    c.card(0,0,c.width,440,"人物信息");
     for(int i=0;i<IM_ARRAYSIZE(indices);++i){
         char id[32];snprintf(id,sizeof(id),"drawing_%d",indices[i]);
         c.toggle(14,34+i*36,c.width-28,names[i],c.st.feat[indices[i]],id);
     }
-    c.toggle(14,394,c.width-28,"显示队友",c.st.showTeammates,"show_teammates");
-    c.toggle(14,430,c.width-28,"雷达",c.st.radarEnabled,"radar_enabled");
-    c.card(0,488,c.width,130,"显示范围");
-    c.slider(14,524,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
-    c.slider(14,566,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
-    return 618;
+    c.toggle(14,394,c.width-28,"雷达",c.st.radarEnabled,"radar_enabled");
+    c.card(0,452,c.width,130,"显示范围");
+    c.slider(14,488,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
+    c.slider(14,530,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
+    return 582;
 }
 static float Loot(Canvas& c) {
     c.card(0,0,c.width,190,"物资显示");
@@ -41,7 +40,13 @@ static float Loot(Canvas& c) {
     c.slider(14,322,c.width-28,"物资距离",c.st.lootDistance,20,500,"%.0fm",1,"loot_distance",10);
     c.slider(14,364,c.width-28,"盒子距离",c.st.boxDistance,20,500,"%.0fm",1,"box_distance",10);
     c.text(14,406,12,c.tc.textMuted,"等级和价值设为 0 时显示全部");
-    return 430;
+    c.card(0,442,c.width,178,"统计窗口位置");
+    c.slider(14,478,c.width-28,"水平位置",c.st.lootStatsXRatio,0,1,"%.0f%%",100,"loot_stats_x",.01f);
+    c.slider(14,520,c.width-28,"垂直位置",c.st.lootStatsYRatio,0,1,"%.0f%%",100,"loot_stats_y",.01f);
+    if(c.button(14,570,c.width-28,"恢复默认位置","loot_stats_reset")){
+        c.st.lootStatsXRatio=.01f;c.st.lootStatsYRatio=.18f;c.st.configDirty=true;
+    }
+    return 620;
 }
 static float Personality(Canvas& c) {
     c.card(0,0,c.width,394,"界面与字号");
@@ -49,7 +54,7 @@ static float Personality(Canvas& c) {
     if(c.segment(14,36,c.width-28,"主题",themes,4,c.st.theme,"theme")){
         const float hues[]={.587f,.587f,.72f,.96f};c.st.accentHue=hues[c.st.theme];
     }
-    c.slider(14,80,c.width-28,"背景透明",c.st.bgAlpha,.85f,1,"%.0f%%",100,"background_alpha");
+    c.slider(14,80,c.width-28,"不透明度",c.st.bgAlpha,.85f,1,"%.0f%%",100,"background_alpha");
     c.slider(14,122,c.width-28,"面板大小",c.st.uiScale,kPanelScaleMinimum,kPanelScaleMaximum,"%.0f%%",100*kPanelDefaultWidthRatio,"panel_size",.01f/kPanelDefaultWidthRatio);
     c.slider(14,164,c.width-28,"人物字号",c.st.espFontScale,.85f,1.5f,"%.0f%%",100,"esp_font_scale");
     c.slider(14,206,c.width-28,"物资字号",c.st.lootFontScale,.85f,1.5f,"%.0f%%",100,"loot_font_scale");
@@ -58,9 +63,10 @@ static float Personality(Canvas& c) {
     int style=ImClamp(c.st.healthBarStyle,0,2);
     if(c.segment(14,294,c.width-28,"血条样式",styles,3,style,"health_style"))c.st.healthBarStyle=style;
     c.text(14,346,12,c.tc.textMuted,"灵动岛位于屏幕顶部中央");
-    c.card(0,406,c.width,86,"绘制颜色");
-    c.color(14,442,c.width-28,"骨骼",c.st.humanSkeletonColor,"skeleton_color");
-    return 492;
+    c.card(0,406,c.width,126,"绘制颜色");
+    c.color(14,442,c.width-28,"真人骨骼",c.st.humanSkeletonColor,"human_skeleton_color");
+    c.color(14,482,c.width-28,"人机骨骼",c.st.botSkeletonColor,"bot_skeleton_color");
+    return 532;
 }
 static float DrawPage(Canvas& c,int tab) {
     switch(tab){

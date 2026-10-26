@@ -1,4 +1,5 @@
 #include "../app/Sources/Game/MFUEHealth.h"
+#include "../app/Sources/Game/MFBoneGeometry.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,11 @@
 #define CHECK(c, msg) do { if (!(c)) { std::fprintf(stderr, "FAIL: %s\n", msg); std::exit(1); } } while (0)
 
 int main() {
+    const int links[] = {0,1,1,2,2,3};
+    float prone[4][3] = {{0,0,30},{50,0,35},{90,0,35},{160,0,30}};
+    CHECK(MFBoneGeometryValid(prone,4,links,3), "prone and downed skeletons must pass despite small vertical height");
+    prone[3][0] = 2000;
+    CHECK(!MFBoneGeometryValid(prone,4,links,3), "corrupt or stretched skeletons must remain rejected");
     const uint64_t actor = 0x100001000, component = 0x100002000, set = 0x100003000;
     std::map<uint64_t, std::vector<unsigned char>> memory;
     auto put = [&](uint64_t address, auto value) {

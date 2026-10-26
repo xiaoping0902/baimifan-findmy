@@ -9,10 +9,23 @@
 #include "../app/Sources/Render/imgui/imgui_internal.h"
 #include "HUDRegressionOutput.h"
 #include <cmath>
+#include <string>
+#include <vector>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 
+struct MenuTestHit { std::string name; ImVec2 origin, size; };
+static std::vector<MenuTestHit> sMenuHits;
+extern "C" void MFRecordMenuTestItem(const char *name, ImVec2 origin, ImVec2 size) {
+    sMenuHits.push_back({name,origin,size});
+}
+static MenuTestHit MenuItem(const char *name, size_t ordinal=0) {
+    for (const auto& hit:sMenuHits) if(hit.name==name && ordinal--==0)return hit;
+    fprintf(stderr,"FAIL: visible native menu item missing: %s\n",name);exit(1);
+}
+
 static void Frame(MFMenuUI *menu, MFOverlayView *overlay) {
+    sMenuHits.clear();
     ImGui::GetIO().DisplaySize = ImVec2(overlay.bounds.size.width, overlay.bounds.size.height);
     ImGui::GetIO().DeltaTime = 1.0f / 60;
     ImGui::NewFrame();
@@ -36,6 +49,101 @@ static CGFloat PanelScale(MFOverlayView *overlay) {
 static CGPoint NavPoint(MFOverlayView *overlay, int tab) {
     const CGFloat scale = PanelScale(overlay);
     return CGPointMake(42 * scale, (96.5 + tab * 49) * scale);
+}
+static void ClickItem(MFMenuUI *menu, MFOverlayView *overlay,const char *name,size_t ordinal=0) {
+    const MenuTestHit hit=MenuItem(name,ordinal);
+    ClickMenu(menu,overlay,CGPointMake(hit.origin.x+hit.size.x*.5f,hit.origin.y+hit.size.y*.5f));
+}
+static void ScrollMenuToBottom(MFMenuUI *menu, MFOverlayView *overlay) {
+    const CGFloat scale=PanelScale(overlay);
+    ImGui::GetIO().AddMousePosEvent(220*scale,360*scale);
+    ImGui::GetIO().AddMouseWheelEvent(0,-10);
+    for(int i=0;i<90;++i)Frame(menu,overlay);
+}
+static BOOL ColorMatches(UIColor *color,CGFloat r,CGFloat g,CGFloat b,CGFloat a=1) {
+    CGFloat cr=0,cg=0,cb=0,ca=0;
+    return [color getRed:&cr green:&cg blue:&cb alpha:&ca] &&
+        fabs(cr-r)<.001&&fabs(cg-g)<.001&&fabs(cb-b)<.001&&fabs(ca-a)<.001;
+}
+static void TestSettingsColorAndAnchorPersistence(void) {
+    CHECK(MFColorSlotSkeleton==8&&MFColorSlotBackEnemy==9&&MFColorSlotBotSkeleton==10,
+          "appending bot skeleton color must keep all existing persisted color slot numbers");
+    MFSettings *settings=MFSettings.shared;
+    [settings resetToDefaults];
+    CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],1,.08,.08)&&
+          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.10,1,.20),
+          "fresh native settings must use vivid red humans and vivid green bots");
+    settings.lootStatsXRatio=-2;settings.lootStatsYRatio=4;
+    CHECK(settings.lootStatsXRatio==0&&settings.lootStatsYRatio==1,
+          "statistics screen anchors must clamp at their model setters");
+    settings.lootStatsXRatio=NAN;settings.lootStatsYRatio=INFINITY;
+    CHECK(fabs(settings.lootStatsXRatio-.01f)<.001&&fabs(settings.lootStatsYRatio-.18f)<.001,
+          "non-finite statistics anchors must recover to their own defaults");
+    settings.lootStatsXRatio=.43;settings.lootStatsYRatio=.72;
+    [settings setColor:[UIColor colorWithRed:.36 green:.24 blue:.72 alpha:1] forSlot:MFColorSlotSkeleton];
+    [settings setColor:[UIColor colorWithRed:.64 green:.52 blue:.23 alpha:1] forSlot:MFColorSlotBotSkeleton];
+    CHECK([settings save],"native color/anchor settings fixture must save");
+    MFSettings *loaded=[[MFSettings alloc] init];
+    CHECK(fabs(loaded.lootStatsXRatio-.43f)<.001&&fabs(loaded.lootStatsYRatio-.72f)<.001&&
+          ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&
+          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
+          "native colors and statistics position must survive a full disk roundtrip");
+    NSString *path=[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject
+        stringByAppendingPathComponent:@"mf_settings.plist"];
+    NSMutableDictionary *legacy=[[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
+    [legacy removeObjectForKey:@"lootStatsXRatio"];[legacy removeObjectForKey:@"lootStatsYRatio"];
+    legacy[@"showTeammates"]=@YES;
+    NSMutableDictionary *colors=[legacy[@"colors"] mutableCopy];
+    [colors removeObjectForKey:@"10"];legacy[@"colors"]=colors;
+    CHECK([legacy writeToFile:path atomically:YES],"legacy settings fixture must save");
+    loaded=[[MFSettings alloc] init];
+    CHECK(fabs(loaded.lootStatsXRatio-.01f)<.001&&fabs(loaded.lootStatsYRatio-.18f)<.001&&
+          ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.10,1,.20)&&
+          ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&!loaded.showTeammates,
+          "legacy settings must retain human colors, default new anchors/bot color, and exclude teammates");
+    CHECK([settings save],"restore the seeded production menu preferences");
+}
+static void WaitForMenuPreferences(BOOL (^ready)(MFSettings *),NSDate *deadline,void (^completion)(void)) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,50*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+        if(ready([[MFSettings alloc] init])){completion();return;}
+        CHECK(deadline.timeIntervalSinceNow>0,"color and statistics anchors must persist after idle debounce");
+        WaitForMenuPreferences(ready,deadline,completion);
+    });
+}
+static void TestColorsAndPositionPersistence(MFMenuUI *menu,MFOverlayView *overlay,void (^completion)(void)) {
+    MFSettings *settings=MFSettings.shared;
+    CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.36,.24,.72) &&
+          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
+          "saved human and bot colors must load independently before the menu opens");
+    ClickMenu(menu,overlay,NavPoint(overlay,3));ScrollMenuToBottom(menu,overlay);
+    ClickItem(menu,overlay,"human_skeleton_color");ClickItem(menu,overlay,"color_preset",2);
+    CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.12,.48,1) &&
+          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
+          "the human color swatch must update only its bound production settings slot");
+    ImGui::ClosePopupsOverWindow(nullptr,false);Frame(menu,overlay);Frame(menu,overlay);
+    ClickItem(menu,overlay,"bot_skeleton_color");ClickItem(menu,overlay,"color_preset",3);
+    CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.12,.48,1) &&
+          ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],1,.85,.08),
+          "the bot color swatch must update only its bound production settings slot");
+    ImGui::ClosePopupsOverWindow(nullptr,false);Frame(menu,overlay);Frame(menu,overlay);
+    ClickMenu(menu,overlay,NavPoint(overlay,2));ScrollMenuToBottom(menu,overlay);
+    const BOOL loot=settings.showLoot,boxes=settings.showBox,stats=settings.showLootStats;
+    MenuTestHit x=MenuItem("loot_stats_x"),y=MenuItem("loot_stats_y");
+    ClickMenu(menu,overlay,CGPointMake(x.origin.x+x.size.x-2,x.origin.y+x.size.y*.5));
+    ClickMenu(menu,overlay,CGPointMake(y.origin.x+2,y.origin.y+y.size.y*.5));
+    CHECK(settings.lootStatsXRatio==1&&settings.lootStatsYRatio==0&&
+          settings.showLoot==loot&&settings.showBox==boxes&&settings.showLootStats==stats,
+          "statistics position sliders must update only their independent screen anchors");
+    WaitForMenuPreferences(^BOOL(MFSettings *s){return s.lootStatsXRatio==1&&s.lootStatsYRatio==0&&
+        ColorMatches([s colorForSlot:MFColorSlotSkeleton],.12,.48,1)&&
+        ColorMatches([s colorForSlot:MFColorSlotBotSkeleton],1,.85,.08);},
+        [NSDate dateWithTimeIntervalSinceNow:3],^{
+            ClickItem(menu,overlay,"loot_stats_reset");
+            WaitForMenuPreferences(^BOOL(MFSettings *s){return fabs(s.lootStatsXRatio-.01f)<.001&&
+                fabs(s.lootStatsYRatio-.18f)<.001;},[NSDate dateWithTimeIntervalSinceNow:3],^{
+                    ClickMenu(menu,overlay,NavPoint(overlay,0));completion();
+                });
+        });
 }
 static void WaitForSettingsSave(BOOL expected, NSDate *deadline, void (^completion)(void)) {
     // Yield the main queue: the production debounce also runs there. A nested
@@ -195,6 +303,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
     }
     TestDrawingTileAndAutomaticSave(menu, overlay, ^{
       TestIndependentLootStatsAndSave(menu, overlay, ^{
+       TestColorsAndPositionPersistence(menu,overlay,^{
         for (int cycle = 0; cycle < 3; cycle++) {
             const CGFloat scale = PanelScale(overlay);
             ClickMenu(menu, overlay, CGPointMake((360 - 78) * scale, 30 * scale));
@@ -224,6 +333,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
         [MFMenuUI setCollapseChangeHandler:nil];
         ImGui::DestroyContext(); window.hidden = YES;
         completion();
+       });
       });
     });
 }
@@ -237,7 +347,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
 static void TestNativeIslandInputAndAccessibility(void) {
     MFHUDIslandView *island = [[MFHUDIslandView alloc] initWithFrame:(CGRect){CGPointZero, MFHUDIslandView.preferredSize}];
     [island layoutIfNeeded];
-    CHECK(CGSizeEqualToSize(island.intrinsicContentSize, CGSizeMake(212,44)) &&
+    CHECK(CGSizeEqualToSize(island.intrinsicContentSize, CGSizeMake(132,36)) &&
           [island.accessibilityIdentifier isEqual:@"hud.dynamicIsland"],
           "the native island must keep its compact, accessible touch surface");
     [island setExpanded:YES animated:NO];
@@ -256,6 +366,11 @@ static void TestNativeIslandInputAndAccessibility(void) {
           CGRectGetMaxX(realLabel.frame) < CGRectGetMinX(botLabel.frame) &&
           CGRectGetMidY(realLabel.frame) == CGRectGetMidY(botLabel.frame),
           "real players must be red on the left and bots white on the right in a single row");
+    [island updateRealCount:999 botCount:999 cameraValid:YES];
+    CHECK(realLabel.intrinsicContentSize.width<=realLabel.bounds.size.width&&
+          botLabel.intrinsicContentSize.width<=botLabel.bounds.size.width,
+          "both three-digit counts must fit the reduced island without clipping");
+    [island updateRealCount:4 botCount:5 cameraValid:YES];
     CHECK([island.accessibilityValue containsString:@"真人4，人机5"] &&
           ![island.accessibilityValue containsString:@"物资"],
           "VoiceOver must identify both numeric counters without announcing loot");
@@ -360,6 +475,7 @@ static void PreviewProductionMenu(void) {
 @implementation MenuRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
+        TestSettingsColorAndAnchorPersistence();
         TestProductionMenuLayoutAndControls(^{
             TestNativeIslandInputAndAccessibility();
             PreviewProductionMenu();

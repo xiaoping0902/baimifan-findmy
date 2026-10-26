@@ -11,7 +11,7 @@
     BOOL _cameraValid;
 }
 
-+ (CGSize)preferredSize { return CGSizeMake(212.0, 44.0); }
++ (CGSize)preferredSize { return CGSizeMake(132.0, 36.0); }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) [self configureIsland];
@@ -37,7 +37,7 @@
 
     _realLabel = [UILabel new];
     _realLabel.userInteractionEnabled = NO;
-    _realLabel.font = [UIFont monospacedDigitSystemFontOfSize:20.0 weight:UIFontWeightBold];
+    _realLabel.font = [UIFont monospacedDigitSystemFontOfSize:18.0 weight:UIFontWeightBold];
     _realLabel.textColor = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
     _realLabel.textAlignment = NSTextAlignmentCenter;
     [self addSubview:_realLabel];
@@ -65,7 +65,7 @@
     self.layer.cornerRadius = CGRectGetHeight(self.bounds) * 0.5;
     self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds
                                                    cornerRadius:self.layer.cornerRadius].CGPath;
-    const CGFloat inset = 20.0, gap = 12.0;
+    const CGFloat inset = 12.0, gap = 8.0;
     const CGFloat labelWidth = MAX(0.0, (width - 2.0 * inset - gap) * 0.5);
     _realLabel.frame = CGRectMake(inset, 0.0, labelWidth, height);
     _botLabel.frame = CGRectMake(inset + labelWidth + gap, 0.0, labelWidth, height);

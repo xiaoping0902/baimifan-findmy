@@ -25,6 +25,7 @@ typedef NS_ENUM(NSInteger, MFColorSlot) {
     MFColorSlotArmor,            // 头甲
     MFColorSlotSkeleton,         // 真人骨骼
     MFColorSlotBackEnemy,        // 背敌
+    MFColorSlotBotSkeleton,      // 人机骨骼（追加，保留旧颜色槽编号）
     MFColorSlotCount
 };
 
@@ -45,7 +46,7 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL drawEnabled;        // 启用
 
 @property (nonatomic, assign) BOOL showBot;            // 人机显示
-/// [M5.150] 队友显示（默认关）：同队且带 PlayerState 的目标
+/// 兼容旧配置字段；队友固定排除，菜单不提供开关，载入时忽略旧的开启值。
 @property (nonatomic, assign) BOOL showTeammates;
 @property (nonatomic, assign) BOOL showName;           // 名字
 @property (nonatomic, assign) BOOL showArmor;          // 头甲
@@ -61,6 +62,9 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL showBox;            // 盒子
 @property (nonatomic, assign) BOOL showLootName;       // 物资名字
 @property (nonatomic, assign) BOOL showLootStats;      // 物资统计窗口
+/// Statistics window's top-left screen anchor, normalized to 0…1.
+@property (nonatomic, assign) float lootStatsXRatio;
+@property (nonatomic, assign) float lootStatsYRatio;
 
 @property (nonatomic, assign) NSInteger minLootLevel;  // 物资等级阈值（0=停用）
 @property (nonatomic, assign) NSInteger minLootValue;  // 物资价值阈值（0=停用）

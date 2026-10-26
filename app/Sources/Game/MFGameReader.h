@@ -49,9 +49,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) float health;
 /// 当前最大血量。0 = 未知；血条按 health / maxHealth 绘制。
 @property (nonatomic, assign) float maxHealth;
-/// 头甲等级 0=无甲
+/// 头甲等级；equipKnown 为 YES 时，0 表示未装备。
 @property (nonatomic, assign) int armorLevel;
-/* [M5.144] 头/甲/包等级（从装备槽物品 ID 的十进制编码解出，1~6；0=未读到） */
+/* 头/甲/包等级 1~6；0 的含义由 equipKnown 决定（已读完整=空，否则未知）。 */
 @property (nonatomic, assign) int helmetLevel;
 @property (nonatomic, assign) int backpackLevel;
 @property (nonatomic, assign) BOOL equipKnown;
@@ -78,7 +78,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) float bearingDeg;
 /// 是否在背后（|bearingDeg| > 90）
 @property (nonatomic, assign) BOOL isBehind;
-/// [M5.178] 目标朝向（ControlRotation.Yaw，度；NAN = 未读到）。雷达用它画方向指针。
+/// 目标朝向（度；优先 ControlRotation.Yaw，远端缺失时用已验证的复制身体朝向；NAN = 未知）。
 @property (nonatomic, assign) float yawDeg;
 @end
 

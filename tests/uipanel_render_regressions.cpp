@@ -8,6 +8,7 @@
 #include <vector>
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "../app/Sources/HUD/MFDrawGeometryCache.h"
 
 struct Hit { std::string name; ImVec2 origin, size; };
 static std::vector<Hit> hits;
@@ -47,6 +48,12 @@ static void Click(UIState& state, const UIPanelLayout& layout, const Hit& item) 
     Frame(state, layout); Frame(state, layout);
     io.AddMouseButtonEvent(0, false);
     Frame(state, layout); Frame(state, layout);
+}
+static void ScrollToBottom(UIState& state,const UIPanelLayout& layout) {
+    ImGuiIO& io=ImGui::GetIO();
+    io.AddMousePosEvent(220*layout.scale,360*layout.scale);
+    io.AddMouseWheelEvent(0,-10);
+    for(int i=0;i<180;++i)Frame(state,layout);
 }
 static void TestHostedLayoutUsesTheNativeViewport(void) {
     const ImVec2 screens[] = {{390,844}, {844,390}, {768,1024}, {1024,768}};
@@ -158,6 +165,9 @@ static void TestIndependentRadarControl(void) {
     CHECK(!state.radarEnabled, "radar must start hidden in the simplified HUD");
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
+    CHECK(std::none_of(hits.begin(), hits.end(), [](const Hit& hit) {
+              return hit.name == "show_teammates";
+          }), "the people page must not expose a teammate drawing control");
     state.pageOffsets[1] = 190;
     Frame(state, layout); Frame(state, layout);
     const bool bot = state.feat[DrawingBot], teammates = state.showTeammates;
@@ -166,6 +176,29 @@ static void TestIndependentRadarControl(void) {
           "the radar row must enable only the radar preference");
     Click(state, layout, Item("radar_enabled"));
     CHECK(!state.radarEnabled, "the radar row must also disable its preference");
+}
+static void TestMovableIndependentLootStatistics(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1; state.tab = 2;
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    ScrollToBottom(state, layout);
+    Hit x = Item("loot_stats_x");
+    x.origin.x += x.size.x - 8*layout.scale; x.size.x = 0;
+    Click(state, layout, x);
+    CHECK(state.lootStatsXRatio == 1 && std::fabs(state.lootStatsYRatio-.18f)<.001f &&
+          !state.lootStatsEnabled && !state.lootEnabled && !state.boxesEnabled,
+          "moving the statistics anchor horizontally must preserve Y and independent display toggles");
+    Hit y = Item("loot_stats_y");
+    y.origin.x += 8*layout.scale; y.size.x = 0;
+    Click(state, layout, y);
+    CHECK(state.lootStatsYRatio == 0 && state.lootStatsXRatio == 1,
+          "vertical statistics positioning must reach the top edge without moving X");
+    state.configDirty = false;
+    Click(state, layout, Item("loot_stats_reset"));
+    CHECK(std::fabs(state.lootStatsXRatio-.01f)<.001f && std::fabs(state.lootStatsYRatio-.18f)<.001f &&
+          state.configDirty && !state.lootStatsEnabled,
+          "resetting statistics placement must restore only the anchor and request persistence");
 }
 static void TestInertiaKeepsFramesActiveUntilSettled(void) {
     UIState state;
@@ -207,18 +240,73 @@ static void TestPersonalitySizeSliderAndFixedIsland(void) {
     CHECK(std::fabs(state.uiScale - kPanelScaleMaximum) < .001f,
           "the appearance size slider must allow enlarging to its supported maximum");
 }
+static bool SameColor(const ImVec4& a, const ImVec4& b) {
+    return std::fabs(a.x-b.x)<.001f && std::fabs(a.y-b.y)<.001f &&
+           std::fabs(a.z-b.z)<.001f && std::fabs(a.w-b.w)<.001f;
+}
+static void TestIndependentSkeletonColorControls(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1; state.tab = 3;
+    CHECK(SameColor(state.humanSkeletonColor, ImVec4(1,.08f,.08f,1)) &&
+          SameColor(state.botSkeletonColor, ImVec4(.10f,1,.20f,1)),
+          "fresh skeleton colors must be vivid red for humans and vivid green for bots");
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    ScrollToBottom(state, layout);
+    const ImVec4 initialBot = state.botSkeletonColor;
+    Click(state, layout, Item("human_skeleton_color"));
+    Click(state, layout, Item("color_preset", 2));
+    CHECK(SameColor(state.humanSkeletonColor, ImVec4(.12f,.48f,1,1)) &&
+          SameColor(state.botSkeletonColor, initialBot) && state.configDirty,
+          "choosing a human color must dirty config and leave the bot color independent");
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    Frame(state, layout); Frame(state, layout);
+    const ImVec4 human = state.humanSkeletonColor;
+    state.configDirty = false;
+    Click(state, layout, Item("bot_skeleton_color"));
+    Click(state, layout, Item("color_preset", 3));
+    CHECK(SameColor(state.botSkeletonColor, ImVec4(1,.85f,.08f,1)) &&
+          SameColor(state.humanSkeletonColor, human) && state.configDirty,
+          "choosing a bot color must dirty config and leave the human color independent");
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    Frame(state, layout);
+}
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); io.IniFilename = nullptr;
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    {
+        MFDrawGeometryCache geometry;
+        io.DisplaySize=ImVec2(640,720); io.DeltaTime=1.f/120;
+        ImGui::NewFrame();
+        ImDrawList *list=ImGui::GetBackgroundDrawList();
+        CHECK(geometry.due(1.0,60), "new category must update immediately");
+        list->AddLine(ImVec2(10,20),ImVec2(70,90),IM_COL32(255,0,0,255),2);
+        geometry.capture(list,0,1.0);
+        ImGui::Render();
+        CHECK(!geometry.due(1.0+1.0/120,60) && geometry.due(1.0+1.0/60,60),
+              "bot work must skip one 120Hz tick and update at 60Hz");
+        CHECK(!geometry.due(1.0+1.0/60,30) && geometry.due(1.0+1.0/30,30),
+              "loot work must update at 30Hz");
+        ImGui::NewFrame(); list=ImGui::GetBackgroundDrawList();
+        geometry.append(list);
+        CHECK(list->IdxBuffer.Size>0 && list->VtxBuffer.Size>0,
+              "skipped category work must retain visible geometry instead of flickering");
+        CHECK(list->VtxBuffer[0].col==IM_COL32(255,0,0,255), "cached category must retain its color");
+        ImGui::Render();
+        geometry.clear();
+        CHECK(geometry.due(1.001,60), "visibility or settings invalidation must update immediately");
+    }
     TestHostedLayoutUsesTheNativeViewport();
     TestUsefulProductionPagesAndMinimize();
     TestResizeAllowsSmallerAndLargerPanels();
     TestIndependentLootControls();
     TestIndependentRadarControl();
+    TestMovableIndependentLootStatistics();
     TestInertiaKeepsFramesActiveUntilSettled();
     TestPersonalitySizeSliderAndFixedIsland();
+    TestIndependentSkeletonColorControls();
     ImGui::DestroyContext();
     std::puts("PASS: production hosted panel geometry, useful pages, minimize and bidirectional resize");
 }
