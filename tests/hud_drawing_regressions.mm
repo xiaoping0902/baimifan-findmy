@@ -212,6 +212,17 @@ static void TestSyntheticDrawing(void) {
     settings.showHealth = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
           "hiding all information must leave no unwanted entity rectangle");
+    settings.showRadar = YES;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount > 8,
+          "the independent radar switch must enable its actual geometry");
+    CHECK([settings save], "the radar preference must save successfully");
+    CHECK([[MFSettings alloc] init].showRadar,
+          "an enabled radar preference must survive reloading settings");
+    settings.showRadar = NO;
+    CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
+          "disabling radar must remove its base, grid and blips");
+    CHECK([settings save] && ![[MFSettings alloc] init].showRadar,
+          "a disabled radar preference must also survive reloading settings");
     settings.showTracer = YES;
 
     settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = YES;

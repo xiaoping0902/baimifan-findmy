@@ -55,6 +55,7 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL showHeld;           // 手持
 @property (nonatomic, assign) BOOL showDistance;       // 距离
 @property (nonatomic, assign) BOOL showHealth;         // 血量
+@property (nonatomic, assign) BOOL showRadar;          // 雷达，独立开关
 
 @property (nonatomic, assign) BOOL showLoot;           // 物资
 @property (nonatomic, assign) BOOL showBox;            // 盒子

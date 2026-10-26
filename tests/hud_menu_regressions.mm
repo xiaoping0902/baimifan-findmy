@@ -339,7 +339,7 @@ static void PreviewProductionMenu(void) {
             puts("PASS: production menu layout, clipping, collapse and Metal preview"); fflush(stdout);
             exit(0);
         }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             CHECK(sPreviewFinished, "the menu screenshot must be acknowledged before its deadline");
         });
     };

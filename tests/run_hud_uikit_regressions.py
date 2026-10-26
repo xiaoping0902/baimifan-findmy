@@ -175,7 +175,7 @@ def main():
                                               "--terminate-running-process", device_id, bundle_id],
                                              stdout=launch_output, stderr=subprocess.STDOUT, env=environment)
                 try:
-                    deadline = time.monotonic() + 180
+                    deadline = time.monotonic() + 240
                     while time.monotonic() < deadline:
                         report = output.read_text(errors="replace") if output.exists() else ""
                         if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
@@ -188,7 +188,19 @@ def main():
                             destination = ROOT / "test-results/menu.png"
                             destination.parent.mkdir(exist_ok=True)
                             destination.unlink(missing_ok=True)
-                            run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=30)
+                            # A newly booted hosted simulator may stall its
+                            # first screenshot request after its Metal frame.
+                            # Retry that utility once; still require a complete
+                            # PNG and the live fixture's acknowledgement.
+                            for attempt in range(2):
+                                try:
+                                    run("xcrun", "simctl", "io", device_id, "screenshot", str(destination), timeout=45)
+                                    break
+                                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                                    if attempt == 1:
+                                        raise
+                                    print("Retrying simulator menu screenshot after utility failure", flush=True)
+                                    destination.unlink(missing_ok=True)
                             png = destination.read_bytes()
                             if not (png.startswith(b"\x89PNG\r\n\x1a\n") and
                                     png.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")):

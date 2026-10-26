@@ -40,6 +40,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     _showHeld = NO;
     _showDistance = YES;
     _showHealth = YES;
+    _showRadar = NO;
 
     _showLoot = NO;
     _showBox = NO;
@@ -116,7 +117,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
         @[@"showArmor", @(_showArmor)], @[@"showSkeleton", @(_showSkeleton)],
         @[@"showTracer", @(_showTracer)], @[@"showTeam", @(_showTeam)],
         @[@"showHeld", @(_showHeld)], @[@"showDistance", @(_showDistance)],
-        @[@"showHealth", @(_showHealth)],
+        @[@"showHealth", @(_showHealth)], @[@"showRadar", @(_showRadar)],
         @[@"showLoot", @(_showLoot)], @[@"showBox", @(_showBox)],
         @[@"showLootName", @(_showLootName)], @[@"showLootStats", @(_showLootStats)],
         @[@"backEnemyEnabled", @(_backEnemyEnabled)],
@@ -168,6 +169,7 @@ static NSString *const kSettingsFile = @"mf_settings.plist";
     LOAD_BOOL(showBot); LOAD_BOOL(showTeammates); LOAD_BOOL(showName); LOAD_BOOL(showArmor);
     LOAD_BOOL(showSkeleton); LOAD_BOOL(showTracer); LOAD_BOOL(showTeam);
     LOAD_BOOL(showHeld); LOAD_BOOL(showDistance); LOAD_BOOL(showHealth);
+    LOAD_BOOL(showRadar);
     LOAD_BOOL(showLoot); LOAD_BOOL(showBox); LOAD_BOOL(showLootName); LOAD_BOOL(showLootStats);
     LOAD_BOOL(backEnemyEnabled); LOAD_BOOL(spectatorMode); LOAD_BOOL(liveMode); LOAD_BOOL(smoothAim);
     LOAD_BOOL(renderSelfTest);

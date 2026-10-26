@@ -17,16 +17,17 @@ static float Home(Canvas& c) {
 static float Drawing(Canvas& c) {
     static const char* names[]={"人机","骨骼","射线","血量","人物名字","队伍与ID","武器名字","背敌提示","距离","头甲包"};
     static const int indices[]={DrawingBot,DrawingSkeleton,DrawingRay,DrawingHealth,DrawingName,DrawingTeam,DrawingWeapon,DrawingOffscreen,DrawingDistance,DrawingEquipment};
-    c.card(0,0,c.width,440,"人物信息");
+    c.card(0,0,c.width,476,"人物信息");
     for(int i=0;i<IM_ARRAYSIZE(indices);++i){
         char id[32];snprintf(id,sizeof(id),"drawing_%d",indices[i]);
         c.toggle(14,34+i*36,c.width-28,names[i],c.st.feat[indices[i]],id);
     }
     c.toggle(14,394,c.width-28,"显示队友",c.st.showTeammates,"show_teammates");
-    c.card(0,452,c.width,130,"显示范围");
-    c.slider(14,488,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
-    c.slider(14,530,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
-    return 582;
+    c.toggle(14,430,c.width-28,"雷达",c.st.radarEnabled,"radar_enabled");
+    c.card(0,488,c.width,130,"显示范围");
+    c.slider(14,524,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
+    c.slider(14,566,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
+    return 618;
 }
 static float Loot(Canvas& c) {
     c.card(0,0,c.width,190,"物资显示");

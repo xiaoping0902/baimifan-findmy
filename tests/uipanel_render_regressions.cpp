@@ -152,6 +152,21 @@ static void TestIndependentLootControls(void) {
                      hit.name == "loot_zipline" || hit.name == "loot_weapon_box";
           }), "implemented loot controls must not expose inactive imported features");
 }
+static void TestIndependentRadarControl(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1; state.tab = 1;
+    CHECK(!state.radarEnabled, "radar must start hidden in the simplified HUD");
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    state.pageOffsets[1] = 190;
+    Frame(state, layout); Frame(state, layout);
+    const bool bot = state.feat[DrawingBot], teammates = state.showTeammates;
+    Click(state, layout, Item("radar_enabled"));
+    CHECK(state.radarEnabled && state.feat[DrawingBot] == bot && state.showTeammates == teammates,
+          "the radar row must enable only the radar preference");
+    Click(state, layout, Item("radar_enabled"));
+    CHECK(!state.radarEnabled, "the radar row must also disable its preference");
+}
 static void TestInertiaKeepsFramesActiveUntilSettled(void) {
     UIState state;
     state.expanded = true; state.anim = 1; state.tab = 2;
@@ -201,6 +216,7 @@ int main() {
     TestUsefulProductionPagesAndMinimize();
     TestResizeAllowsSmallerAndLargerPanels();
     TestIndependentLootControls();
+    TestIndependentRadarControl();
     TestInertiaKeepsFramesActiveUntilSettled();
     TestPersonalitySizeSliderAndFixedIsland();
     ImGui::DestroyContext();

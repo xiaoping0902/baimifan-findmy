@@ -1806,7 +1806,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
          settings:(MFSettings *)st
            camera:(MFCamera)cam
            screen:(ImVec2)screen {
-    if (!dl || screen.x <= 0 || screen.y <= 0) return;
+    if (!st.showRadar || !dl || screen.x <= 0 || screen.y <= 0) return;
 
     MFRadarConfig cfg;
     cfg.selfX = cam.x;
@@ -1825,6 +1825,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     for (MFEntity *e in ents) {
         if (n >= kMaxBlips) break;
         if (e.isLoot || e.isBox) continue;                       /* 雷达只放人 */
+        if (e.isBot && !st.showBot) continue;
+        if (!st.showTeammates && gMFUELocalTeam != 0 &&
+            e.teamId == (int)gMFUELocalTeam) continue;
         if (e.worldX == 0.0f && e.worldY == 0.0f) continue;      /* 未读到坐标 */
         if (!isfinite(e.worldX) || !isfinite(e.worldY)) continue;
 

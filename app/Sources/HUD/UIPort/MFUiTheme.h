@@ -86,10 +86,11 @@ static constexpr int kStandaloneOffscreenDistanceItem = -2;
 static constexpr int kStandaloneWeaponIconItem = -3; // 手持贴图(独立开关, 不进 feat 序列化)
 static constexpr int kStandaloneVehicleIconItem = -4; // 载具贴图(独立开关, 不进 feat 序列化)
 static constexpr int kStandaloneRadarDrawingItem = -5;
-static constexpr int kVisibleDrawingItemCount = 11;
+static constexpr int kVisibleDrawingItemCount = 12;
 static constexpr int kVisibleDrawingFeatureIndices[kVisibleDrawingItemCount] = {
     DrawingHuman, DrawingBot, DrawingSkeleton, DrawingRay, DrawingHealth, DrawingName,
-    DrawingTeam, DrawingWeapon, DrawingOffscreen, DrawingDistance, DrawingEquipment
+    DrawingTeam, DrawingWeapon, DrawingOffscreen, DrawingDistance, DrawingEquipment,
+    kStandaloneRadarDrawingItem
 };
 static constexpr int kVisibleLootItemCount = kConfigurableLootItemCount + 1;
 static constexpr int kHealthBarStyleOptionCount = 3;
@@ -154,7 +155,7 @@ struct UIState
     bool  weaponIconEnabled = false; // 手持贴图(V19 独立开关, 默认关)
     bool  vehicleIconEnabled = true;  // 载具贴图(V20 独立开关, 默认开=保持现状)
     // 极简浏览器同款玩家雷达；V29 在配置末尾保存，不占 feat[] 槽位。
-    bool  radarEnabled = true;
+    bool  radarEnabled = false;
     float radarXRatio = .125f;
     float radarYRatio = 400.0f/1080.0f;
     float radarRadiusRatio = 150.0f/1080.0f;
