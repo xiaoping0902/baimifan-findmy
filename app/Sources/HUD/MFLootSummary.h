@@ -43,5 +43,23 @@ struct Summary {
         });
         return result;
     }
+    std::vector<Row> TopItems(std::size_t limit=5) const {
+        const std::size_t maximum=std::min<std::size_t>(limit,5);
+        std::vector<Row> result;
+        if(!maximum)return result;
+        // Aggregates retain unreadable pickups, but a concrete item list must
+        // not turn a placeholder into a named item or spend one of its lines.
+        for(const Row &row:SortedRows()) {
+            const std::size_t first=row.name.find_first_not_of(" \t\r\n");
+            if(first==std::string::npos)continue;
+            const std::size_t last=row.name.find_last_not_of(" \t\r\n");
+            const std::string label=row.name.substr(first,last-first+1);
+            if(label=="物资未知"||label=="未知物资"||label=="未知"||label=="Unknown"||
+               label=="物资"||label=="容器")continue;
+            result.push_back(row);
+            if(result.size()==maximum)break;
+        }
+        return result;
+    }
 };
 }

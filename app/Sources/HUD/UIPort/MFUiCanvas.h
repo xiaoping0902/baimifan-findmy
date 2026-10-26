@@ -59,19 +59,27 @@ struct Canvas {
         switchShape(x+w-38,y+6.5f,value,key);
         return changed;
     }
-    bool tile(float x,float y,float w,const char* label,bool value,const char* id) {
-        const bool changed=hit(x,y,w,48,id);
+    bool tile(float x,float y,float w,const char* label,bool& value,const char* id) {
+        const bool changed=hit(x,y,w,56,id);
+        if(changed){value=!value;st.configDirty=true;}
         ImGuiID key=ImGui::GetID(id);
         const float t=Motion(st,key^0x1834u,value?1.0f:0.0f);
-        rect(x,y,w,48,MixColor(tc.surface,tc.accent,.035f*t),13);
-        dl->AddRect(p(x,y),p(x+w,y+48),MixColor(tc.border,WithAlpha(tc.accent,65),t),13*s,0,ImMax(.5f,s*.7f));
+        rect(x,y,w,56,MixColor(tc.surface,tc.accent,.035f*t),10);
+        dl->AddRect(p(x,y),p(x+w,y+56),MixColor(tc.border,WithAlpha(tc.accent,65),t),10*s,0,ImMax(.5f,s*.7f));
         float size=12;
-        const float room=ImMax(1.0f,w-62);
+        const float room=ImMax(1.0f,w-8);
         float extent=TextSize(font,size*s,label).x/s;
-        if(extent>room)size=ImMax(8.0f,size*room/extent);
-        text(x+10,y+(48-size)*.5f-1,size,value?tc.text:tc.textMuted,label);
-        switchShape(x+w-47,y+12.5f,value,key);
-        if(changed)st.configDirty=true;
+        if(extent>room)size*=room/extent;
+#ifdef HEIHUANG_UI_TEST_ITEM
+        // Publish the actual fitted text extent as well as the full touch tile.
+        const ImVec2 textExtent=TextSize(font,size*s,label);
+        if(ImGui::IsRectVisible(p(x,y),p(x+w,y+56)))
+            HEIHUANG_UI_TEST_ITEM("feature_tile_text",p(x+4,y+4),textExtent);
+#endif
+        DrawTextCentered(dl,font,size*s,p(x+4,y+4),p(x+w-4,y+33),value?tc.text:tc.textMuted,label);
+        const float switchX=x+(w-26)*.5f;
+        rect(switchX,y+37,26,14,MixColor(tc.track,WithAlpha(IM_COL32(52,199,89,255),(tc.surface>>24)&255),t),7);
+        dl->AddCircleFilled(p(switchX+7+12*t,y+44),5.5f*s,WithAlpha(IM_COL32_WHITE,(tc.text>>24)&255),16);
         return changed;
     }
     bool segment(float x,float y,float w,const char* label,const char* const* options,int count,int& selected,const char* id) {

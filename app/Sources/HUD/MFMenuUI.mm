@@ -404,7 +404,6 @@ static const float kMFMenuBallSize = 56.0f;
     MFEndCard();
 
     MFBeginCard("players", "对局信息", "每项开关都会即时作用于人物标记");
-    MF_SWITCH("人机显示", showBot);
     MF_SWITCH("队友", showTeammates);
     MF_SWITCH("名字", showName);
     MF_SWITCH("头甲", showArmor);
@@ -414,6 +413,15 @@ static const float kMFMenuBallSize = 56.0f;
     MF_SWITCH("射线", showTracer);
     MF_SWITCH("手持", showHeld);
     MF_SWITCH("骨骼", showSkeleton);
+    MFEndCard();
+
+    MFBeginCard("bots", "人机信息", "人机各项独立控制，默认显示名字和骨骼");
+    MF_SWITCH("人机显示", showBot);
+    MF_SWITCH("人机名字", showBotName);
+    MF_SWITCH("人机骨骼", showBotSkeleton);
+    MF_SWITCH("人机血条", showBotHealth);
+    MF_SWITCH("人机射线", showBotTracer);
+    MF_SWITCH("人机头甲包", showBotArmor);
     MFEndCard();
 
     MFBeginCard("loot", "物资与盒子", "关闭物资后隐藏物资；盒子可单独控制");

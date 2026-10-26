@@ -46,6 +46,11 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL drawEnabled;        // 启用
 
 @property (nonatomic, assign) BOOL showBot;            // 人机显示
+@property (nonatomic, assign) BOOL showBotName;        // 人机名字
+@property (nonatomic, assign) BOOL showBotSkeleton;    // 人机骨骼
+@property (nonatomic, assign) BOOL showBotHealth;      // 人机血条
+@property (nonatomic, assign) BOOL showBotTracer;      // 人机射线
+@property (nonatomic, assign) BOOL showBotArmor;       // 人机头甲包
 /// 兼容旧配置字段；队友固定排除，菜单不提供开关，载入时忽略旧的开启值。
 @property (nonatomic, assign) BOOL showTeammates;
 @property (nonatomic, assign) BOOL showName;           // 名字

@@ -257,7 +257,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     NSUInteger _lootCount;
     BOOL _camOK;
     MFDrawGeometryCache _botGeometry, _lootGeometry;
-    MFLootSummary::Summary _lootStatsSummary;
+    std::vector<MFLootSummary::Row> _lootStatsItems;
     std::array<double,4> _lootStatsFilters;
     double _lootStatsAt;
     NSUInteger _lootStatsInputCount;
@@ -1183,6 +1183,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     std::array<double,64> signature{};
     size_t s = 0;
     for (double value : {double(st.showBot), double(st.showSkeleton), double(st.showTracer),
+         double(st.showBotName), double(st.showBotSkeleton), double(st.showBotHealth), double(st.showBotTracer), double(st.showBotArmor),
          double(st.showHealth), double(st.showName), double(st.showTeam), double(st.showHeld),
          double(st.showArmor), double(st.showDistance), double(st.showLoot), double(st.showBox),
          double(st.showLootName), double(st.skeletonDistance), double(st.lootDrawDistance),
@@ -1250,9 +1251,10 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         for (MFEntity *e in ents) {
             if (e.isBot && !st.showBot) continue;
             if (!e.isVisible && !st.showRadar && !st.backEnemyEnabled) continue;
-            if (!st.showSkeleton && !st.showTracer && !st.showName && !st.showHealth &&
-                !st.showHeld && !st.showTeam && !st.showArmor && !st.showDistance &&
-                !st.showRadar && !st.backEnemyEnabled) continue;
+            const BOOL actorContent = e.isBot
+                ? (st.showBotSkeleton || st.showBotTracer || st.showBotName || st.showBotHealth || st.showBotArmor)
+                : (st.showSkeleton || st.showTracer || st.showName || st.showHealth || st.showHeld || st.showTeam || st.showArmor || st.showDistance);
+            if (!actorContent && !st.showRadar && !st.backEnemyEnabled) continue;
             target = MAX(target, e.isBot ? 60 : 120);
         }
         overlay.preferredFPS = target;
@@ -1269,6 +1271,14 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
      */
     if (e.isBot && !st.showBot) return;
     if (gMFUELocalTeam != 0 && e.teamId == (int)gMFUELocalTeam) return;
+    const BOOL showName = e.isBot ? st.showBotName : st.showName;
+    const BOOL showArmor = e.isBot ? st.showBotArmor : st.showArmor;
+    const BOOL showHealth = e.isBot ? st.showBotHealth : st.showHealth;
+    const BOOL showTracer = e.isBot ? st.showBotTracer : st.showTracer;
+    const BOOL showSkeleton = e.isBot ? st.showBotSkeleton : st.showSkeleton;
+    const BOOL showTeam = !e.isBot && st.showTeam;
+    const BOOL showHeld = !e.isBot && st.showHeld;
+    const BOOL showDistance = !e.isBot && st.showDistance;
 
     /* ── [M5.2] 平滑坐标 ── */
     ImVec2 pt = [self smoothPoint:ImVec2(e.screen.x, e.screen.y)
@@ -1306,11 +1316,12 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         /* 退化情况（深度太近 / FOV 异常）：退回按焦距估算，并且居中 */
         float focal = (psc.focal > 0.0f) ? psc.focal : (screen.x * 0.5f);
         float est = 180.0f * focal / MAX(e.distanceMeters * 100.0f, 1.0f);
-        est = MIN(MAX(est, 8.0f), screen.y * 0.8f);
+        est = MIN(est, screen.y * 0.8f);
         topY = pt.y - est * 0.5f;
         botY = pt.y + est * 0.5f;
     }
-    float bodyPx = MAX(botY - topY, 8.0f);
+    const float bodyPx = botY - topY;
+    if (!isfinite(bodyPx) || bodyPx <= 0) return;
     float w = bodyPx * 0.45f;
     ImVec2 p1(pt.x - w * 0.5f, topY);
     ImVec2 p2(pt.x + w * 0.5f, botY);
@@ -1318,7 +1329,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     /* ── 主色：人机用「队伍色」提示、真人用「人物信息色」──
      * 队伍颜色槽 [M5.2] 接线：编队模式下用队员色，未校准时 teamId=0 → 走人物信息色。
      */
-    BOOL useTeamColor = st.showTeam && e.teamId != 0;
+    BOOL useTeamColor = showTeam && e.teamId != 0;
     ImU32 boxCol = useTeamColor
         ? MFU32([st colorForSlot:MFColorSlotTeam])
         : MFU32([st colorForSlot:MFColorSlotPersonInfo]);
@@ -1326,16 +1337,16 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     // Player-authored nickname and hero identity occupy separate rows. Their
     // common name switch controls both names; the team switch adds the number.
     const float lineHeight = MAX(14.0f, MAX(st.fontInfo, st.fontPerson) + 3.0f);
-    const bool playerRow = st.showTeam || st.showName;
-    const bool showHeroName = st.showName && !e.isBot;
-    const bool heroHealthRow = showHeroName || st.showHealth;
-    const int rowCount = (st.showHeld ? 1 : 0) + (st.showArmor ? 1 : 0) +
+    const bool playerRow = showTeam || showName;
+    const bool showHeroName = showName && !e.isBot;
+    const bool heroHealthRow = showHeroName || showHealth;
+    const int rowCount = (showHeld ? 1 : 0) + (showArmor ? 1 : 0) +
                          (playerRow ? 1 : 0) + (heroHealthRow ? 1 : 0);
     const float labelTop = p1.y - 6.0f - rowCount * lineHeight;
-    const float gearY = labelTop + (st.showHeld ? lineHeight : 0.0f);
-    const ImVec2 tracerTarget(pt.x, st.showArmor ? gearY + st.fontInfo * 0.5f
+    const float gearY = labelTop + (showHeld ? lineHeight : 0.0f);
+    const ImVec2 tracerTarget(pt.x, showArmor ? gearY + st.fontInfo * 0.5f
                                                : (rowCount ? labelTop + st.fontInfo * 0.5f : p1.y));
-    if (st.showTracer) {
+    if (showTracer) {
         dl->AddLine(MFMenuPanelIslandCenter(screen), tracerTarget,
                     MFU32([st colorForSlot:e.isBot ? MFColorSlotBotSkeleton : MFColorSlotSkeleton]), 1.2f);
     }
@@ -1348,7 +1359,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     const std::string bagText = MFEntityLabels::Bag(e.backpackLevel, e.bagRawID, e.equipKnown);
     const char *head = headText.c_str(), *armor = armorText.c_str(), *bag = bagText.c_str();
     const char *actorName=MFEntityLabels::ActorName(e.isBot,e.name.UTF8String,e.npcName.UTF8String);
-    const std::string identity = MFEntityLabels::PlayerRow(e.teamId, actorName, st.showTeam, st.showName);
+    const std::string identity = MFEntityLabels::PlayerRow(e.teamId, actorName, showTeam, showName);
 
     float rowY = labelTop;
     auto textRow = [&](const char *text, ImU32 color) {
@@ -1356,8 +1367,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         MFText(dl, st.fontInfo, ImVec2(pt.x - measured.x * 0.5f, rowY), color, text);
         rowY += lineHeight;
     };
-    if (st.showHeld) textRow(held, boxCol);
-    if (st.showArmor) {
+    if (showHeld) textRow(held, boxCol);
+    if (showArmor) {
             const float gap = MFTextSize("  ", st.fontInfo).x;
             const float widths[] = {MFTextSize(head,st.fontInfo).x, MFTextSize(armor,st.fontInfo).x,
                                     MFTextSize(bag,st.fontInfo).x};
@@ -1376,11 +1387,11 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         if (hp.known()) snprintf(number, sizeof(number), "%.0f", hp.current);
         else snprintf(number, sizeof(number), "?");
         const float barWidth = 64.0f;
-        const float gap = showHeroName && st.showHealth ? 6.0f : 0.0f;
-        const float healthWidth = st.showHealth ? barWidth + 5.0f + MFTextSize(number, st.fontInfo).x : 0;
+        const float gap = showHeroName && showHealth ? 6.0f : 0.0f;
+        const float healthWidth = showHealth ? barWidth + 5.0f + MFTextSize(number, st.fontInfo).x : 0;
         float x = pt.x - (nameWidth + gap + healthWidth) * 0.5f;
         if (showHeroName) MFText(dl, st.fontPerson, ImVec2(x, rowY), boxCol, name);
-        if (st.showHealth) {
+        if (showHealth) {
             x += nameWidth + gap;
             const NSInteger style = MIN(2, MAX(0, st.healthBarStyle));
             const float height = style == 0 ? 3.0f : 6.0f;
@@ -1408,7 +1419,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
             MFText(dl, st.fontInfo, ImVec2(b.x + 5, rowY), boxCol, number);
         }
     }
-    if (st.showDistance) {
+    if (showDistance) {
         char distance[32];
         snprintf(distance, sizeof(distance), "%.0fm", e.distanceMeters);
         const ImVec2 measured = MFTextSize(distance, st.fontInfo);
@@ -1416,7 +1427,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     }
 
     /* ── 骨骼（[M5.2] 接线：受 skeletonDistance 限制）── */
-    if (st.showSkeleton && e.distanceMeters <= st.skeletonDistance) {
+    if (showSkeleton && e.distanceMeters <= st.skeletonDistance) {
         /* [M5.141] 优先画真骨骼；读不到再退回占位火柴人 */
         if (![self drawRealBonesForEntity:e drawList:dl settings:st
                                    camera:cam screen:screen]) {
@@ -1436,7 +1447,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
      * [M5.137] 以胶囊中心为基准，上下各摊半身。
      * 旧版把 pt 当脚底、整体往上画 —— 画面上的表现就是"骨架飘在人头顶"。
      */
-    const float half = MAX(bodyPx, 8.0f) * 0.5f;
+    if (!isfinite(bodyPx) || bodyPx <= 0) return;
+    const float half = bodyPx * 0.5f;
     ImU32 col = MFU32([st colorForSlot:e.isBot ? MFColorSlotBotSkeleton : MFColorSlotSkeleton]);
     float th = MAX(1.0f, st.skeletonThickness);
 
@@ -2018,32 +2030,27 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
                                        double(st.lootDrawDistance),double(st.boxDrawDistance)};
     if(!_lootStatsKnown||now<_lootStatsAt||now-_lootStatsAt>=1.0/30.0||
        filters!=_lootStatsFilters||loot.count!=_lootStatsInputCount){
-      _lootStatsSummary={};
+      MFLootSummary::Summary summary;
       for(MFEntity *e in loot){
         const float limit=e.isBox?st.boxDrawDistance:st.lootDrawDistance;
         if(!isfinite(e.distanceMeters)||e.distanceMeters<0||e.distanceMeters>limit)continue;
         if(st.minLootLevel>0&&e.level>0&&e.level<st.minLootLevel)continue;
         if(st.minLootValue>0&&e.value>0&&e.value<st.minLootValue)continue;
-        _lootStatsSummary.Add(e.name.UTF8String,e.level,e.count,e.value,e.distanceMeters,e.isBox);
+        summary.Add(e.name.UTF8String,e.level,e.count,e.value,e.distanceMeters,e.isBox);
       }
+      _lootStatsItems=summary.TopItems();
       _lootStatsAt=now;_lootStatsFilters=filters;_lootStatsInputCount=loot.count;_lootStatsKnown=YES;
     }
-    const auto &summary=_lootStatsSummary;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if(display.x<1||display.y<1)return;
-    // Five plain quality totals, highest quality first. Keep the measured
-    // window solely as a movable anchor; all visible content is outlined text.
+    // Show concrete item names in quality/value order. Keep this transparent
+    // window as the existing position anchor, with at most five visible rows.
     const float font=MAX(14.0f,st.fontInfo), lineHeight=font+8.0f;
-    const char *names[]={"红","金","紫","蓝","绿"};
-    char labels[5][96];
+    const auto &items=_lootStatsItems;
+    if(items.empty())return;
     float width=0;
-    for(int i=0;i<5;++i){
-        const int level=6-i;
-        snprintf(labels[i],sizeof(labels[i]),"%s  %llu件  ¥%lld",names[i],
-                 (unsigned long long)summary.byQuality[level],(long long)summary.valueByQuality[level]);
-        width=MAX(width,MFTextSize(labels[i],font).x);
-    }
-    const ImVec2 panel(MIN(width+4.0f,display.x),MIN(display.y,5.0f*lineHeight+2.0f));
+    for(const auto &item:items)width=MAX(width,MFTextSize(item.name.c_str(),font).x);
+    const ImVec2 panel(MIN(width+4.0f,display.x),MIN(display.y,items.size()*lineHeight+2.0f));
     const ImVec2 available(MAX(0.0f,display.x-panel.x),MAX(0.0f,display.y-panel.y));
     ImGui::SetNextWindowSize(panel,ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImVec2(available.x*st.lootStatsXRatio,available.y*st.lootStatsYRatio), ImGuiCond_Always);
@@ -2054,9 +2061,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground)) {
         const ImVec2 origin=ImGui::GetWindowPos();
         ImDrawList *dl=ImGui::GetWindowDrawList();
-        for(int i=0;i<5;++i)
+        for(size_t i=0;i<items.size();++i)
             MFText(dl,font,ImVec2(origin.x+1,origin.y+1+i*lineHeight),
-                   MFQualityColor(6-i,st),labels[i]);
+                   MFQualityColor(items[i].quality,st),items[i].name.c_str());
     }
     ImGui::End();
     ImGui::PopStyleVar(2);

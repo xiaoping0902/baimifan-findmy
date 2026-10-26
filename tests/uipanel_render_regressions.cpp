@@ -341,6 +341,84 @@ static void TestIndependentSkeletonColorControls(void) {
     ImGui::ClosePopupsOverWindow(nullptr, false);
     Frame(state, layout);
 }
+static void TestIndependentBotDrawingControls(void) {
+    UIState state;
+    state.expanded = true; state.anim = 1; state.tab = 1;
+    const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
+    Frame(state, layout); Frame(state, layout);
+    ScrollToBottom(state, layout);
+    const bool humanName = state.feat[DrawingName], humanSkeleton = state.feat[DrawingSkeleton];
+    const bool humanHealth = state.feat[DrawingHealth], humanTracer = state.feat[DrawingRay];
+    const bool humanArmor = state.feat[DrawingEquipment], bot = state.feat[DrawingBot];
+    CHECK(bot && state.botNameEnabled && state.botSkeletonEnabled &&
+          !state.botHealthEnabled && !state.botTracerEnabled && !state.botArmorEnabled,
+          "the real menu state must start with only bot names and skeletons enabled");
+    const struct { const char *id; bool UIState::*value; } controls[] = {
+        {"bot_name", &UIState::botNameEnabled}, {"bot_skeleton", &UIState::botSkeletonEnabled},
+        {"bot_health", &UIState::botHealthEnabled}, {"bot_tracer", &UIState::botTracerEnabled},
+        {"bot_armor", &UIState::botArmorEnabled},
+    };
+    for (const auto &control : controls) {
+        bool before[5];
+        for (int i = 0; i < 5; ++i) before[i] = state.*(controls[i].value);
+        state.configDirty = false;
+        Click(state, layout, Item(control.id));
+        for (int i = 0; i < 5; ++i)
+            CHECK((state.*(controls[i].value)) == (control.value == controls[i].value ? !before[i] : before[i]),
+                  "each visible bot control must toggle its own value and retain every other bot detail");
+        CHECK(state.configDirty && state.feat[DrawingName] == humanName &&
+              state.feat[DrawingSkeleton] == humanSkeleton && state.feat[DrawingHealth] == humanHealth &&
+              state.feat[DrawingRay] == humanTracer && state.feat[DrawingEquipment] == humanArmor &&
+              state.feat[DrawingBot] == bot,
+              "each actual bot detail switch must dirty settings without changing human features or the bot master");
+    }
+}
+static void TestFunctionalSwitchesUseFourColumns(void) {
+    for (float scale : {kPanelScaleMinimum, 1.0f}) {
+        UIState state;
+        state.expanded = true; state.anim = 1; state.tab = 1;
+        const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), scale);
+        Frame(state, layout); Frame(state, layout);
+        auto checkFittedText = [&] {
+            size_t labels = 0;
+            for (size_t i = 1; i < hits.size(); ++i) if (hits[i].name == "feature_tile_text") {
+                const Hit &label = hits[i], &tile = hits[i-1];
+                CHECK(label.size.x <= tile.size.x - 8*layout.scale + .1f &&
+                      label.size.y <= 29*layout.scale + .1f,
+                      "actual fitted feature labels must stay inside their tiles on small native panels");
+                labels++;
+            }
+            CHECK(labels >= 4, "the real four-column controls must publish their fitted label geometry");
+        };
+        if (scale == kPanelScaleMinimum)
+            CHECK(layout.size.x <= 300, "the compact layout case must exercise a panel narrower than 300 points");
+        checkFittedText();
+        const char *ids[] = {"drawing_2", "drawing_3", "drawing_4", "drawing_5", "drawing_6"};
+        const Hit first = Item(ids[0]);
+        for (int i = 1; i < 4; ++i) {
+            const Hit current = Item(ids[i]), previous = Item(ids[i-1]);
+            CHECK(std::fabs(current.origin.y - first.origin.y) < .1f &&
+                  current.origin.x >= previous.origin.x + previous.size.x,
+                  "the first four real human feature controls must share one row without overlap");
+        }
+        const Hit fifth = Item(ids[4]);
+        CHECK(fifth.origin.y >= first.origin.y + first.size.y &&
+              std::fabs(fifth.origin.x - first.origin.x) < .1f,
+              "the fifth human feature must wrap to the first column of the next row");
+        ScrollToBottom(state, layout);
+        checkFittedText();
+        const Hit botFirst = Item("drawing_1"), botFourth = Item("bot_health"), botFifth = Item("bot_tracer");
+        CHECK(std::fabs(botFirst.origin.y - botFourth.origin.y) < .1f &&
+              botFifth.origin.y >= botFirst.origin.y + botFirst.size.y,
+              "the real bot group must also wrap after four functional switches");
+        Click(state, layout, Item("nav", 2));
+        checkFittedText();
+        const Hit lootFirst = Item("loot_enabled"), lootLast = Item("loot_stats");
+        CHECK(std::fabs(lootFirst.origin.y - lootLast.origin.y) < .1f &&
+              lootLast.origin.x > lootFirst.origin.x + 2 * lootFirst.size.x,
+              "all four actual loot switches must occupy one independent row");
+    }
+}
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); io.IniFilename = nullptr;
@@ -378,6 +456,8 @@ int main() {
     TestPersonalitySizeSliderAndFixedIsland();
     TestColorPopupKeepsItsGeometryStable();
     TestIndependentSkeletonColorControls();
+    TestIndependentBotDrawingControls();
+    TestFunctionalSwitchesUseFourColumns();
     ImGui::DestroyContext();
     std::puts("PASS: production hosted panel geometry, useful pages, minimize and bidirectional resize");
 }

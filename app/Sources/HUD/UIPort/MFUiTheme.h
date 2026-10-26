@@ -150,6 +150,11 @@ struct UIState
     bool  feat[kDrawingItemCount] = {true, true, true, true, false, true, true,
                                      false, false, true, false, true, false, false,
                                      false, false, true};
+    bool  botNameEnabled = true;
+    bool  botSkeletonEnabled = true;
+    bool  botHealthEnabled = false;
+    bool  botTracerEnabled = false;
+    bool  botArmorEnabled = false;
     bool  horseEnabled = false;       // 载具开启时，仅绘制马
     bool  offscreenDistanceEnabled = false;
     bool  weaponIconEnabled = false; // 手持贴图(V19 独立开关, 默认关)
@@ -503,6 +508,7 @@ static void BuildUIChineseRanges(ImGuiIO& io, ImVector<ImWchar>& out)
     builder.AddText(kGeneratedFontChars);
     builder.AddText("灵动岛固定在屏幕顶部中央");
     builder.AddText("统计窗口位置水平垂直恢复默认位置真人骨骼人机骨骼红绿蓝黄白不透明度玩家与英雄名队伍编号");
+    builder.AddText("真人信息人机信息人机显示名字骨骼血条射线头甲包");
     // 固定界面文字在启动时建立；玩家昵称的字形由主循环按需加入，避免整套汉字图集占满显存。
     builder.AddText(
         "黑皇主页绘制瞄准物资设置退出主页运行状态在线刷新项目筛选应用背景图"

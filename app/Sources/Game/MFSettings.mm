@@ -37,7 +37,12 @@ static const NSInteger kMFColorDefaultsVersion = 1;
     _masterEnabled = YES;
     _drawEnabled = YES;
 
-    _showBot = NO;
+    _showBot = YES;
+    _showBotName = YES;
+    _showBotSkeleton = YES;
+    _showBotHealth = NO;
+    _showBotTracer = NO;
+    _showBotArmor = NO;
     _showTeammates = NO;      /* [M5.150] 队友默认不画 */
     _showName = YES;
     _showArmor = YES;
@@ -146,6 +151,9 @@ static const NSInteger kMFColorDefaultsVersion = 1;
     NSArray *bools = @[
         @[@"masterEnabled", @(_masterEnabled)], @[@"drawEnabled", @(_drawEnabled)],
         @[@"showBot", @(_showBot)], @[@"showTeammates", @(_showTeammates)], @[@"showName", @(_showName)],
+        @[@"showBotName", @(_showBotName)], @[@"showBotSkeleton", @(_showBotSkeleton)],
+        @[@"showBotHealth", @(_showBotHealth)], @[@"showBotTracer", @(_showBotTracer)],
+        @[@"showBotArmor", @(_showBotArmor)],
         @[@"showArmor", @(_showArmor)], @[@"showSkeleton", @(_showSkeleton)],
         @[@"showTracer", @(_showTracer)], @[@"showTeam", @(_showTeam)],
         @[@"showHeld", @(_showHeld)], @[@"showDistance", @(_showDistance)],
@@ -205,6 +213,12 @@ static const NSInteger kMFColorDefaultsVersion = 1;
 
     LOAD_BOOL(masterEnabled); LOAD_BOOL(drawEnabled);
     LOAD_BOOL(showBot); LOAD_BOOL(showTeammates); LOAD_BOOL(showName); LOAD_BOOL(showArmor);
+    // Missing keys belong to an older shared human/bot configuration. Seed
+    // the concise bot defaults on every load, retaining its saved master.
+    _showBotName = YES; _showBotSkeleton = YES;
+    _showBotHealth = NO; _showBotTracer = NO; _showBotArmor = NO;
+    LOAD_BOOL(showBotName); LOAD_BOOL(showBotSkeleton); LOAD_BOOL(showBotHealth);
+    LOAD_BOOL(showBotTracer); LOAD_BOOL(showBotArmor);
     _showTeammates = NO; // Teammates are excluded even in older saved configurations.
     LOAD_BOOL(showSkeleton); LOAD_BOOL(showTracer); LOAD_BOOL(showTeam);
     LOAD_BOOL(showHeld); LOAD_BOOL(showDistance); LOAD_BOOL(showHealth);

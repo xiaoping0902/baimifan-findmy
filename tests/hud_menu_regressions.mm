@@ -60,10 +60,59 @@ static void ScrollMenuToBottom(MFMenuUI *menu, MFOverlayView *overlay) {
     ImGui::GetIO().AddMouseWheelEvent(0,-10);
     for(int i=0;i<90;++i)Frame(menu,overlay);
 }
+static void CheckNativeFeatureTileLabels(MFOverlayView *overlay) {
+    size_t labels = 0;
+    const float scale = PanelScale(overlay);
+    for (size_t i = 1; i < sMenuHits.size(); ++i) if (sMenuHits[i].name == "feature_tile_text") {
+        const MenuTestHit &label = sMenuHits[i], &tile = sMenuHits[i-1];
+        CHECK(label.size.x <= tile.size.x-8*scale+.1f && label.size.y <= 29*scale+.1f,
+              "the actual Chinese font must fit each four-column feature label inside its tile");
+        labels++;
+    }
+    CHECK(labels >= 4, "the native menu must expose at least one row of four functional tiles");
+}
 static BOOL ColorMatches(UIColor *color,CGFloat r,CGFloat g,CGFloat b,CGFloat a=1) {
     CGFloat cr=0,cg=0,cb=0,ca=0;
     return [color getRed:&cr green:&cg blue:&cb alpha:&ca] &&
         fabs(cr-r)<.001&&fabs(cg-g)<.001&&fabs(cb-b)<.001&&fabs(ca-a)<.001;
+}
+static void TestIndependentBotSettingsPersistence(void) {
+    MFSettings *settings = MFSettings.shared;
+    [settings resetToDefaults];
+    CHECK(settings.showBot && settings.showBotName && settings.showBotSkeleton &&
+          !settings.showBotHealth && !settings.showBotTracer && !settings.showBotArmor,
+          "fresh bot settings must display only bot names and skeletons");
+    const BOOL name = settings.showName, skeleton = settings.showSkeleton;
+    const BOOL health = settings.showHealth, tracer = settings.showTracer, armor = settings.showArmor;
+    settings.showBot = NO; settings.showBotName = NO; settings.showBotSkeleton = NO;
+    settings.showBotHealth = YES; settings.showBotTracer = YES; settings.showBotArmor = YES;
+    CHECK([settings save], "independent bot settings must save through the production plist writer");
+    MFSettings *loaded = [MFSettings new];
+    CHECK(!loaded.showBot && !loaded.showBotName && !loaded.showBotSkeleton &&
+          loaded.showBotHealth && loaded.showBotTracer && loaded.showBotArmor &&
+          loaded.showName == name && loaded.showSkeleton == skeleton && loaded.showHealth == health &&
+          loaded.showTracer == tracer && loaded.showArmor == armor,
+          "all five bot preferences and their master must persist independently of human preferences");
+    NSString *path = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject
+        stringByAppendingPathComponent:@"mf_settings.plist"];
+    NSMutableDictionary *legacy = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
+    for (NSString *key in @[@"showBotName", @"showBotSkeleton", @"showBotHealth", @"showBotTracer", @"showBotArmor"])
+        [legacy removeObjectForKey:key];
+    legacy[@"showName"] = @NO; legacy[@"showSkeleton"] = @NO;
+    legacy[@"showHealth"] = @YES; legacy[@"showTracer"] = @YES; legacy[@"showArmor"] = @YES;
+    CHECK([legacy writeToFile:path atomically:YES], "legacy bot preferences must save");
+    [settings load];
+    CHECK(!settings.showBot && settings.showBotName && settings.showBotSkeleton &&
+          !settings.showBotHealth && !settings.showBotTracer && !settings.showBotArmor,
+          "loading an old plist must retain its explicit bot master and seed missing bot details independently of humans");
+    legacy[@"showBot"] = @YES;
+    CHECK([legacy writeToFile:path atomically:YES], "legacy enabled bot master fixture must save");
+    loaded = [MFSettings new];
+    CHECK(loaded.showBot && loaded.showBotName && loaded.showBotSkeleton &&
+          !loaded.showBotHealth && !loaded.showBotTracer && !loaded.showBotArmor,
+          "an old enabled bot master must stay enabled with the new concise detail defaults");
+    [settings resetToDefaults];
+    CHECK([settings save], "bot settings fixture must leave normal production defaults for menu interaction");
 }
 static void TestSettingsColorAndAnchorPersistence(void) {
     CHECK(MFColorSlotSkeleton==8&&MFColorSlotBackEnemy==9&&MFColorSlotBotSkeleton==10,
@@ -146,6 +195,42 @@ static void WaitForMenuPreferences(BOOL (^ready)(MFSettings *),NSDate *deadline,
         if(ready([[MFSettings alloc] init])){completion();return;}
         CHECK(deadline.timeIntervalSinceNow>0,"color and statistics anchors must persist after idle debounce");
         WaitForMenuPreferences(ready,deadline,completion);
+    });
+}
+static void TestBotDetailControlsAndSave(MFMenuUI *menu, MFOverlayView *overlay, void (^completion)(void)) {
+    MFSettings *settings = MFSettings.shared;
+    NSArray<NSString *> *keys = @[@"showBotName", @"showBotSkeleton", @"showBotHealth", @"showBotTracer", @"showBotArmor"];
+    const char *ids[] = {"bot_name", "bot_skeleton", "bot_health", "bot_tracer", "bot_armor"};
+    NSArray<NSString *> *humanKeys = @[@"showName", @"showSkeleton", @"showHealth", @"showTracer", @"showArmor", @"showBot"];
+    NSDictionary *humanBefore = [settings dictionaryWithValuesForKeys:humanKeys];
+    NSDictionary *botBefore = [settings dictionaryWithValuesForKeys:keys];
+    ScrollMenuToBottom(menu, overlay);
+    for (NSUInteger i = 0; i < keys.count; ++i) {
+        NSDictionary *before = [settings dictionaryWithValuesForKeys:keys];
+        ClickItem(menu, overlay, ids[i]);
+        for (NSUInteger j = 0; j < keys.count; ++j) {
+            const BOOL expected = i == j ? ![before[keys[j]] boolValue] : [before[keys[j]] boolValue];
+            CHECK([[settings valueForKey:keys[j]] boolValue] == expected,
+                  "a native bot switch must change its corresponding production setting only");
+        }
+        CHECK([[settings dictionaryWithValuesForKeys:humanKeys] isEqual:humanBefore],
+              "native bot detail switches must leave human settings and the bot master untouched");
+    }
+    NSDictionary *changed = [settings dictionaryWithValuesForKeys:keys];
+    WaitForMenuPreferences(^BOOL(MFSettings *s) {
+        return [[s dictionaryWithValuesForKeys:keys] isEqual:changed] &&
+               [[s dictionaryWithValuesForKeys:humanKeys] isEqual:humanBefore];
+    }, [NSDate dateWithTimeIntervalSinceNow:3], ^{
+        const char *restoreIds[] = {"bot_name", "bot_skeleton", "bot_health", "bot_tracer", "bot_armor"};
+        for (const char *id : restoreIds) ClickItem(menu, overlay, id);
+        CHECK([[settings dictionaryWithValuesForKeys:keys] isEqual:botBefore],
+              "each native bot detail control must be reversible");
+        WaitForMenuPreferences(^BOOL(MFSettings *s) {
+            return [[s dictionaryWithValuesForKeys:keys] isEqual:botBefore];
+        }, [NSDate dateWithTimeIntervalSinceNow:3], ^{
+            ClickMenu(menu, overlay, NavPoint(overlay, 0));
+            completion();
+        });
     });
 }
 static void TestNativeColorPopupStability(MFMenuUI *menu,MFOverlayView *overlay) {
@@ -263,21 +348,26 @@ static void TestDrawingTileAndAutomaticSave(MFMenuUI *menu, MFOverlayView *overl
                                            void (^completion)(void)) {
     MFSettings *settings = [MFSettings shared];
     const BOOL initial = settings.showBot;
+    NSArray<NSString *> *botKeys = @[@"showBotName", @"showBotSkeleton", @"showBotHealth", @"showBotTracer", @"showBotArmor"];
+    NSDictionary *botDetails = [settings dictionaryWithValuesForKeys:botKeys];
     ClickMenu(menu, overlay, NavPoint(overlay, 1));
-    const CGFloat scale = PanelScale(overlay);
-    // Actual production renderer: first full-width row on the people page.
-    const CGPoint botTile = CGPointMake(222 * scale, 192 * scale);
+    ScrollMenuToBottom(menu, overlay);
+    const MenuTestHit hit = MenuItem("drawing_1");
+    const CGPoint botTile = CGPointMake(hit.origin.x+hit.size.x*.5,hit.origin.y+hit.size.y*.5);
     CHECK([overlay acceptsInteractionAtPoint:botTile],
           "the visible production drawing tile must accept input");
     ClickMenu(menu, overlay, botTile);
     CHECK(settings.showBot != initial,
           "tapping the active drawing page must change its production setting");
+    CHECK([[settings dictionaryWithValuesForKeys:botKeys] isEqual:botDetails],
+          "temporarily hiding all bots must retain every individual bot feature preference");
     WaitForSettingsSave(settings.showBot, [NSDate dateWithTimeIntervalSinceNow:3], ^{
         ClickMenu(menu, overlay, botTile);
         CHECK(settings.showBot == initial, "a second drawing tap must restore its preference");
+        CHECK([[settings dictionaryWithValuesForKeys:botKeys] isEqual:botDetails],
+              "restoring bot visibility must preserve its previous detail preferences");
         WaitForSettingsSave(initial, [NSDate dateWithTimeIntervalSinceNow:3], ^{
-            ClickMenu(menu, overlay, NavPoint(overlay, 0));
-            completion();
+            TestBotDetailControlsAndSave(menu, overlay, completion);
         });
     });
 }
@@ -297,8 +387,8 @@ static void TestIndependentLootStatsAndSave(MFMenuUI *menu, MFOverlayView *overl
     const BOOL initial = settings.showLootStats;
     const BOOL loot = settings.showLoot, boxes = settings.showBox, names = settings.showLootName;
     ClickMenu(menu, overlay, NavPoint(overlay, 2));
-    const CGFloat scale = PanelScale(overlay);
-    const CGPoint statsRow = CGPointMake(222 * scale, 300 * scale);
+    const MenuTestHit statsHit = MenuItem("loot_stats");
+    const CGPoint statsRow = CGPointMake(statsHit.origin.x+statsHit.size.x*.5,statsHit.origin.y+statsHit.size.y*.5);
     ClickMenu(menu, overlay, statsRow);
     CHECK(settings.showLootStats != initial && settings.showLoot == loot &&
           settings.showBox == boxes && settings.showLootName == names,
@@ -402,6 +492,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
         ClickMenu(menu, overlay, point);
         CHECK(ImGui::GetDrawData()->TotalVtxCount > 100 && ImGui::GetActiveID() == 0,
               "page selection must render content and release its touch owner");
+        if (tab == 1 || tab == 2) CheckNativeFeatureTileLabels(overlay);
     }
     ScrollMenuToBottom(menu,overlay);
     const BOOL fpsBefore=settings.showFPS, masterBefore=settings.masterEnabled, drawingBefore=settings.drawEnabled;
@@ -530,6 +621,43 @@ static MFOverlayView *sPreviewOverlay;
 static MFMenuUI *sPreviewMenu;
 static UIWindow *sPreviewIslandWindow;
 static BOOL sPreviewFinished;
+static NSString *sPreviewAcknowledgement;
+static void PreviewMenuPage(NSUInteger stage);
+static void WaitForPreviewScreenshot(NSUInteger stage) {
+    const char *names[] = {"menu", "menu-drawing", "menu-loot"};
+    NSString *suffixes[] = {@"", @".drawing", @".loot"};
+    NSString *acknowledgement = [sPreviewAcknowledgement stringByAppendingString:suffixes[stage]];
+    printf("READY: %s screenshot\n", names[stage]); fflush(stdout);
+    // Keep each real Metal surface visible until the runner captures its PNG.
+    [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:acknowledgement]) return;
+        [timer invalidate];
+        if (stage < 2) { PreviewMenuPage(stage+1); return; }
+        sPreviewFinished = YES;
+        [sPreviewOverlay stopRendering]; sPreviewWindow.hidden = YES;
+        puts("PASS: production menu layout, clipping, collapse and Metal preview"); fflush(stdout);
+        exit(0);
+    }];
+}
+static void PreviewMenuPage(NSUInteger stage) {
+    [sPreviewOverlay stopRendering];
+    // Use the real navigation hit and input frames, retaining the production
+    // renderer/state. The CPU frames settle page animation before GPU capture.
+    ClickMenu(sPreviewMenu, sPreviewOverlay, NavPoint(sPreviewOverlay, (int)stage));
+    const CGFloat scale = PanelScale(sPreviewOverlay);
+    ImGui::GetIO().AddMousePosEvent(220*scale, 360*scale);
+    ImGui::GetIO().AddMouseWheelEvent(0, 10);
+    for (int frame = 0; frame < 90; ++frame) Frame(sPreviewMenu, sPreviewOverlay);
+    CheckNativeFeatureTileLabels(sPreviewOverlay);
+    (void)MenuItem(stage == 1 ? "drawing_2" : "loot_enabled");
+    (void)MenuItem(stage == 1 ? "drawing_5" : "loot_stats");
+    sPreviewOverlay.firstFrameCompletion = ^(NSString *error) {
+        CHECK(error == nil, "each menu screenshot page must complete a real GPU frame");
+        WaitForPreviewScreenshot(stage);
+    };
+    NSString *error = nil;
+    CHECK([sPreviewOverlay startRenderingWithError:&error], "each menu screenshot page renderer must restart");
+}
 static void PreviewProductionMenu(void) {
     const CGSize size = MFMenuPanelPreferredSize(UIScreen.mainScreen.fixedCoordinateSpace.bounds.size);
     [MFMenuUI setCollapsed:NO];
@@ -560,19 +688,10 @@ static void PreviewProductionMenu(void) {
         CHECK(error == nil, "the production menu must complete a real GPU frame");
         const char *ackPath = getenv("MF_REGRESSION_SCREENSHOT_ACK");
         CHECK(ackPath && *ackPath, "the menu preview requires a screenshot acknowledgement path");
-        NSString *acknowledgement = [NSString stringWithUTF8String:ackPath];
-        puts("READY: menu screenshot"); fflush(stdout);
-        // Keep the Metal surface alive until simctl has actually saved its
-        // screenshot. A fixed eight-second lifetime raced slow CI captures.
-        [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
-            if (![[NSFileManager defaultManager] fileExistsAtPath:acknowledgement]) return;
-            [timer invalidate]; sPreviewFinished = YES;
-            [sPreviewOverlay stopRendering]; sPreviewWindow.hidden = YES;
-            puts("PASS: production menu layout, clipping, collapse and Metal preview"); fflush(stdout);
-            exit(0);
-        }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            CHECK(sPreviewFinished, "the menu screenshot must be acknowledged before its deadline");
+        sPreviewAcknowledgement = [NSString stringWithUTF8String:ackPath];
+        WaitForPreviewScreenshot(0);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 180 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            CHECK(sPreviewFinished, "all three menu screenshots must be acknowledged before their deadline");
         });
     };
     NSString *error = nil;
@@ -584,6 +703,7 @@ static void PreviewProductionMenu(void) {
 @implementation MenuRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     dispatch_async(dispatch_get_main_queue(), ^{
+        TestIndependentBotSettingsPersistence();
         TestSettingsColorAndAnchorPersistence();
         TestProductionMenuLayoutAndControls(^{
             TestNativeIslandInputAndAccessibility();

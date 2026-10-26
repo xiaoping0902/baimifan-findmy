@@ -52,5 +52,56 @@ int main() {
     CHECK(summary.valueByQuality[6]==150 && summary.valueByQuality[1]==20 &&
           summary.valueByQuality[0]==0 && summary.valueByQuality[5]==0,
           "quality summaries must sum acquired pickup values, excluding boxes and negative unknown values");
-    std::puts("PASS: weapon, current durability, team nickname and separate hero labels");
+    MFLootSummary::Summary concrete;
+    concrete.Add("电脑",4,1,9000000,1,false);
+    concrete.Add("金条",5,1,200000,2,false);
+    concrete.Add("怀表",6,1,100000,30,false);
+    concrete.Add("怀表",6,2,500000,10,false);
+    concrete.Add("金币",5,1,10000,5,false);
+    concrete.Add("金杯",5,1,300000,50,false);
+    concrete.Add("非洲之心",6,1,2000000,60,false);
+    concrete.Add("怀表",5,1,5000,4,false);
+    concrete.Add(nullptr,6,3,99999999,1,false);
+    concrete.Add("",6,2,99999999,1,false);
+    concrete.Add(" \t\n",6,1,99999999,1,false);
+    concrete.Add("物资未知",6,1,99999999,1,false);
+    concrete.Add("未知物资",6,1,99999999,1,false);
+    concrete.Add("未知",6,1,99999999,1,false);
+    concrete.Add("Unknown",6,1,99999999,1,false);
+    concrete.Add("物资",6,1,99999999,1,false);
+    concrete.Add("容器",6,1,99999999,1,false);
+    concrete.Add("武器箱",6,1,99999999,1,true);
+    const auto top=concrete.TopItems();
+    CHECK(top.size()==5 && top[0].name=="非洲之心" && top[1].name=="怀表" &&
+          top[2].name=="金杯" && top[3].name=="金条" && top[4].name=="金币",
+          "top loot must show at most five concrete item names by quality then acquired price, not quality bands");
+    CHECK(top[1].quantity==3 && top[1].value==600000 && top[1].nearest==10,
+          "same-name same-quality pickups must merge quantities and acquired values without multiplying stack totals");
+    CHECK(concrete.TopItems(0).empty() && concrete.TopItems(2).size()==2 && concrete.TopItems(99).size()==5,
+          "the top-item view must obey smaller limits and never exceed five concrete lines");
+    MFLootSummary::Summary differentQualities;
+    differentQualities.Add("怀表",5,1,900000,5,false);
+    differentQualities.Add("怀表",6,1,100000,10,false);
+    const auto separate=differentQualities.TopItems();
+    CHECK(separate.size()==2 && separate[0].quality==6 && separate[1].quality==5 &&
+          separate[0].quantity==1 && separate[1].quantity==1,
+          "same labels at different qualities must remain separately ranked items");
+    MFLootSummary::Summary unknownOnly;
+    unknownOnly.Add(nullptr,6,2,100,2,false);
+    CHECK(unknownOnly.TopItems().empty() && unknownOnly.quantity==2 && unknownOnly.totalValue==100,
+          "unknown names must not invent a concrete item or disappear from aggregate accounting");
+    MFLootSummary::Summary ties;
+    ties.Add("远处金杯",5,1,1000,20,false);
+    ties.Add("近处金杯",5,1,1000,10,false);
+    const auto tied=ties.TopItems();
+    CHECK(tied.size()==2 && tied[0].name=="近处金杯" && tied[1].name=="远处金杯",
+          "equal quality and price must keep a deterministic nearest-first tie break");
+    MFLootSummary::Summary unknownQuality;
+    unknownQuality.Add("无等级但有名字的纪念币",0,1,90000000,1,false);
+    unknownQuality.Add("已知等级的金杯",5,1,10,100,false);
+    const auto qualityOrder=unknownQuality.TopItems();
+    CHECK(qualityOrder.size()==2 && qualityOrder[0].name=="已知等级的金杯" &&
+          qualityOrder[1].name=="无等级但有名字的纪念币" && qualityOrder[1].quality==0,
+          "a known item with unknown quality remains eligible after ranked qualities without inventing a grade");
+    std::puts("PASS: labels and at most five concrete loot items ranked by quality and acquired price");
 }

@@ -19,6 +19,7 @@
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
 #include "loot_cache_regressions.h"
 #include "drawing_session_regressions.h"
+#include "skeleton_scale_regressions.h"
 
 @interface MFDrawingLayer (RegressionEntryPoint)
 - (void)overlayBuildUI:(MFImGuiContext *)context overlay:(MFOverlayView *)overlay;
@@ -214,6 +215,7 @@ static void TestSyntheticDrawing(void) {
     IMP originalRemoteRead = method_setImplementation(remoteRead, (IMP)RejectRemoteRead);
     TestLootSessionCaches();
     TestDrawingReadSessions();
+    TestSkeletonPerspectiveScaling();
 
     MFSettings *settings = [MFSettings shared];
     [settings resetToDefaults];
@@ -342,10 +344,39 @@ static void TestSyntheticDrawing(void) {
     CHECK(Frame(drawing, overlay)->TotalVtxCount == 0,
           "hiding all information must leave no unwanted entity rectangle");
 
+    // Bot information has its own switches. The human switches cannot force
+    // health/gear/tracers onto bots or suppress their requested default names.
+    MFEntity *botFields=Entity(1000,0,NO,NO); botFields.address=0; botFields.isBot=YES;
+    botFields.npcName=@"Guard"; botFields.health=25; botFields.maxHealth=100;
+    sEntities=@[botFields]; settings.showBot=YES;
+    settings.showBotName=settings.showBotSkeleton=settings.showBotHealth=settings.showBotTracer=settings.showBotArmor=NO;
+    settings.showHealth=settings.showArmor=settings.showTracer=settings.showHeld=settings.showTeam=settings.showDistance=YES;
+    CHECK(Frame(drawing,overlay)->TotalVtxCount==0,
+          "human information switches must not activate any bot field");
+    settings.showBotName=YES;
+    data=Frame(drawing,overlay);
+    CHECK(data->TotalVtxCount>0 && SolidVertices(data)==0 && ColoredWidth(data,injuredColor)==0,
+          "bot names must render independently without a health bar or tracer");
+    settings.showBotName=NO; settings.showBotHealth=YES;
+    CHECK(ColoredWidth(Frame(drawing,overlay),injuredColor)>10,
+          "the bot health switch must enable its real damaged health geometry");
+    settings.showBotHealth=NO; settings.showBotTracer=YES;
+    CHECK(Frame(drawing,overlay)->TotalVtxCount>0,
+          "the bot tracer switch must enable actual line geometry");
+    settings.showBotTracer=NO; settings.showBotArmor=YES;
+    CHECK(Frame(drawing,overlay)->TotalVtxCount>0,
+          "the independent bot armor switch must enable the equipment row");
+    settings.showBotArmor=NO; settings.showBotSkeleton=YES;
+    CHECK(Frame(drawing,overlay)->TotalVtxCount>0,
+          "the bot skeleton switch must work while the human skeleton switch is off");
+    settings.showBotSkeleton=NO;
+    settings.showHealth=settings.showArmor=settings.showTracer=settings.showHeld=settings.showTeam=settings.showDistance=NO;
+
     // Actual production draw lists must keep lower-rate categories visible
     // while the real-player line follows every 120Hz frame.
     MFEntity *real=Entity(1000,-100,NO,NO), *bot=Entity(1000,100,NO,NO); bot.isBot=YES;
     sEntities=@[real,bot]; settings.showTracer=YES; settings.showBot=YES;
+    settings.showBotName=settings.showBotSkeleton=NO; settings.showBotTracer=YES;
     auto packed=[&](MFColorSlot slot){CGFloat r,g,b,a;[[settings colorForSlot:slot]getRed:&r green:&g blue:&b alpha:&a];
         return IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),(int)(a*255));};
     const ImU32 redLine=packed(MFColorSlotSkeleton), greenLine=packed(MFColorSlotBotSkeleton);
@@ -365,7 +396,7 @@ static void TestSyntheticDrawing(void) {
     settings.showBot=NO;
     CHECK(ColoredWidth(Frame(drawing,overlay,1.f/120),greenLine)==0,
           "bot visibility changes must invalidate cached geometry immediately");
-    settings.showBot=YES; settings.showTracer=NO; sEntities=@[patient];
+    settings.showBot=YES; settings.showTracer=NO; settings.showBotTracer=NO; sEntities=@[patient];
     settings.showRadar = YES;
     CHECK(Frame(drawing, overlay)->TotalVtxCount > 8,
           "the independent radar switch must enable its actual geometry");
@@ -442,6 +473,7 @@ static void TestSyntheticDrawing(void) {
     CHECK(ColoredWidth(Frame(drawing,overlay),heroColor)>heroWidth+30,
           "the hero and nickname must render as separate identity rows");
     settings.showTracer=NO; patient.isBot=YES; patient.npcName=nil;
+    settings.showBotName=YES;
     patient.name=@"RandomBotName12345";
     data=Frame(drawing,overlay);
     const float ordinaryBotWidth=ColoredWidth(data,infoColor);
@@ -453,7 +485,7 @@ static void TestSyntheticDrawing(void) {
     patient.npcName=@"[Boss] SpecialUnit";
     CHECK(ColoredWidth(Frame(drawing,overlay),infoColor)>ordinaryBotWidth+30,
           "a verified special NPC must retain its distinct full label");
-    patient.isBot=NO;patient.npcName=nil;settings.showTracer=YES;
+    patient.isBot=NO;patient.npcName=nil;settings.showTracer=YES;settings.showBotName=NO;
     patient.teamId=0;
     settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = NO;
 
@@ -530,14 +562,31 @@ static void TestSyntheticDrawing(void) {
     data=Frame(drawing, overlay);
     CHECK(data->TotalVtxCount > statsHidden + 8,
           "loot statistics must render independently while all loot markers are hidden");
-    CHECK(SolidVertices(data)==0,"quality totals must contain only outlined text without any panel background");
-    for(int level=2;level<=6;++level)
+    CHECK(SolidVertices(data)==0,"item statistics must contain only outlined names without any panel background");
+    MFEntity *heart=Entity(1000,0,YES,NO), *watch=Entity(1000,10,YES,NO), *cup=Entity(1000,20,YES,NO);
+    MFEntity *purple=Entity(1000,30,YES,NO), *blue=Entity(1000,40,YES,NO), *green=Entity(1000,50,YES,NO);
+    heart.name=@"Heart of Africa"; heart.level=6; heart.value=100;
+    watch.name=@"Pocket Watch"; watch.level=5; watch.value=200;
+    cup.name=@"Gold Cup"; cup.level=5; cup.value=100;
+    purple.name=@"Purple Item"; purple.level=4;
+    blue.name=@"Blue Item"; blue.level=3;
+    green.name=@"Green Item"; green.level=2;
+    sLoot=@[green,blue,purple,cup,watch,heart];
+    Frame(drawing,overlay);data=Frame(drawing,overlay);
+    for(int level=3;level<=6;++level)
         CHECK(ColoredVertices(data,qualityColors[level])>0,
-              "statistics must render the five requested quality totals in their actual colors");
-    CHECK(ColoredVertices(data,qualityColors[1])==0,"white quality must not add a sixth statistics row");
-    for(int level=6;level>2;--level)
-        CHECK(ColoredBottom(data,qualityColors[level])<ColoredBottom(data,qualityColors[level-1]),
-              "quality totals must run vertically from red to gold, purple, blue and green");
+              "named statistics rows must retain their actual quality colors");
+    CHECK(ColoredVertices(data,qualityColors[2])==0,
+          "a sixth named item must not add a sixth statistics row");
+    ImGuiWindow *namedStats=ImGui::FindWindowByName("物资统计");
+    const float statsFont=fmaxf(14.0f,settings.fontInfo);
+    const float expectedNameWidth=ImGui::CalcTextSize("Heart of Africa").x*statsFont/ImGui::GetFontSize()+4;
+    CHECK(namedStats && fabsf(namedStats->Size.x-expectedNameWidth)<1.5f,
+          "the statistics window must measure concrete item names rather than quality count labels");
+    CHECK(ColoredBottom(data,qualityColors[6])<ColoredBottom(data,qualityColors[5]) &&
+          ColoredBottom(data,qualityColors[5])<ColoredBottom(data,qualityColors[4]) &&
+          ColoredBottom(data,qualityColors[4])<ColoredBottom(data,qualityColors[3]),
+          "named items must run vertically in descending quality order");
     settings.showLootStats = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == statsHidden,
           "the statistics switch must remove the entire statistics window");

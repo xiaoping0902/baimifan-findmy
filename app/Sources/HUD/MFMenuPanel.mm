@@ -45,6 +45,11 @@ static void MFPanelStoreToSettings(void) {
     s.masterEnabled = gUI.feat[DrawingHuman];
     s.drawEnabled   = gUI.feat[DrawingHuman];
     s.showBot        = gUI.feat[DrawingBot];
+    s.showBotName    = gUI.botNameEnabled;
+    s.showBotSkeleton = gUI.botSkeletonEnabled;
+    s.showBotHealth  = gUI.botHealthEnabled;
+    s.showBotTracer  = gUI.botTracerEnabled;
+    s.showBotArmor   = gUI.botArmorEnabled;
     s.showTeammates  = NO;
     s.showSkeleton   = gUI.feat[DrawingSkeleton];
     s.showTracer     = gUI.feat[DrawingRay];
@@ -111,6 +116,11 @@ static void MFPanelLoadFromSettings(void) {
     MFSettings *s = [MFSettings shared];
     gUI.feat[DrawingHuman]      = s.masterEnabled && s.drawEnabled;
     gUI.feat[DrawingBot]        = s.showBot;
+    gUI.botNameEnabled          = s.showBotName;
+    gUI.botSkeletonEnabled      = s.showBotSkeleton;
+    gUI.botHealthEnabled        = s.showBotHealth;
+    gUI.botTracerEnabled        = s.showBotTracer;
+    gUI.botArmorEnabled         = s.showBotArmor;
     gUI.showTeammates           = false;
     gUI.feat[DrawingSkeleton]   = s.showSkeleton;
     gUI.feat[DrawingRay]        = s.showTracer;

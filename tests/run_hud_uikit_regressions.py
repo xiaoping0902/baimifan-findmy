@@ -156,7 +156,17 @@ def main():
                 # This suite needs a visible WindowServer-backed surface for
                 # its real Metal screenshot, beyond the booted device used by
                 # the headless geometry fixtures.
-                run("open", "-a", "Simulator", "--args", "-CurrentDeviceUDID", device_id, timeout=30)
+                for attempt in range(2):
+                    try:
+                        run("open", "-a", "Simulator", "--args", "-CurrentDeviceUDID", device_id, timeout=60)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if attempt == 1:
+                            raise
+                        # Intel hosted runners have timed out launching the
+                        # Simulator UI after bootstatus succeeds. Retry its UI
+                        # launch once; the actual GPU/PNG checks remain required.
+                        print("Retrying Simulator UI launch after its 60s timeout", flush=True)
             run("xcrun", "simctl", "install", device_id, str(app))
             container = Path(run("xcrun", "simctl", "get_app_container", device_id,
                                  bundle_id, "data", capture=True).stdout.strip())
@@ -164,7 +174,11 @@ def main():
             output.parent.mkdir(parents=True, exist_ok=True)
             output.unlink(missing_ok=True)
             screenshot_ack = output.with_name("hud-regression-screenshot-done")
-            screenshot_ack.unlink(missing_ok=True)
+            menu_screenshots = (("menu", ""), ("menu-drawing", ".drawing"), ("menu-loot", ".loot"))
+            for name, suffix in menu_screenshots:
+                Path(str(screenshot_ack) + suffix).unlink(missing_ok=True)
+                if args.suite == "menu":
+                    (ROOT / "test-results" / f"{name}.png").unlink(missing_ok=True)
             environment = os.environ.copy()
             environment["SIMCTL_CHILD_MF_REGRESSION_OUTPUT"] = str(output)
             environment["SIMCTL_CHILD_MF_REGRESSION_SCREENSHOT_ACK"] = str(screenshot_ack)
@@ -174,7 +188,7 @@ def main():
                       "drawing": "PASS: production drawing consumes synthetic frames",
                       "projection": "PASS: production projection geometry and invalid-input rejection"}[args.suite]
             report = ""
-            menu_captured = False
+            menu_captured = set()
             launch_log = Path(directory) / "simctl-launch.log"
             with launch_log.open("w") as launch_output:
                 # A short-lived UIKit fixture can finish before simctl's launch
@@ -191,14 +205,17 @@ def main():
                         if time.monotonic() >= next_launch_report:
                             print(f"Launch progress: status={launcher.poll()} result_bytes={len(report)}", flush=True)
                             next_launch_report = time.monotonic() + 30
-                        if args.suite == "menu" and "READY: menu screenshot" in report and not menu_captured:
+                        ready_screenshot = next(((name, suffix) for name, suffix in menu_screenshots
+                                                 if f"READY: {name} screenshot" in report and name not in menu_captured), None)
+                        if args.suite == "menu" and ready_screenshot is not None:
+                            name, suffix = ready_screenshot
                             # The fresh fixture report proves launch completed.
                             # Release a CLI still awaiting its acknowledgement
                             # before asking a second simctl client for the image.
                             # No --console option was used, so the app stays live.
-                            print(f"Menu READY; simctl launch status={launcher.poll()}; releasing launch CLI", flush=True)
+                            print(f"{name} READY; simctl launch status={launcher.poll()}; releasing launch CLI", flush=True)
                             finish_launcher(launcher)
-                            destination = ROOT / "test-results/menu.png"
+                            destination = ROOT / "test-results" / f"{name}.png"
                             destination.parent.mkdir(exist_ok=True)
                             destination.unlink(missing_ok=True)
                             # A newly booted hosted simulator may stall its
@@ -218,8 +235,8 @@ def main():
                             if not (png.startswith(b"\x89PNG\r\n\x1a\n") and
                                     png.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")):
                                 raise RuntimeError("The menu screenshot is not a complete PNG")
-                            screenshot_ack.touch()
-                            menu_captured = True
+                            Path(str(screenshot_ack) + suffix).touch()
+                            menu_captured.add(name)
                         terminal_failure = "FAIL:" in report
                         if args.suite == "overlay":
                             terminal_failure = ("FAIL: production overlay" in report or
@@ -242,6 +259,8 @@ def main():
                     print(launch_log.read_text(errors="replace"), end="", flush=True)
             if marker not in report or "FAIL:" in report:
                 raise SystemExit("UIKit window regression failed")
+            if args.suite == "menu" and len(menu_captured) != len(menu_screenshots):
+                raise SystemExit("All three production menu screenshots are required")
     finally:
         cleanup = [["xcrun", "simctl", "uninstall", device_id, bundle_id]]
         if booted_here:
