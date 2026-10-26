@@ -448,11 +448,13 @@ static void PumpTicks(MFOverlayView *overlay, unsigned remaining, dispatch_block
     });
 }
 
-static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
-    std::puts("CASE: held GPU work bounds drawable acquisitions and resumes after completion");
+static void TestGPUBackpressureIsBounded(BOOL delayDrawable, dispatch_block_t completion) {
+    std::puts(delayDrawable
+        ? "CASE: a late drawable cannot inflate the GPU frame budget"
+        : "CASE: held GPU work bounds drawable acquisitions and resumes after completion");
     OverlayFixture *fixture = [OverlayFixture new];
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
-    [layer releaseAll];
+    if (!delayDrawable) [layer releaseAll];
     id<MTLSharedEvent> barrier = [fixture.overlay.imgui.device newSharedEvent];
     if (!barrier) {
         Expect(NO, "GPU backpressure regression requires Metal shared events");
@@ -470,13 +472,20 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
     };
     fixture.counter.built = dispatch_semaphore_create(0);
     [fixture start];
+    if (delayDrawable) {
+        // Cross the former 1.2s acquisition timeout while real display ticks
+        // continue. Returning that still-owned credit used to permit a third
+        // frame after the delayed callback arrived and released it again.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1400 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{ [layer releaseAll]; });
+    }
     // Also release on an independent deadline if the broken implementation
     // blocks main while trying to acquire a fourth layer drawable.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
                    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ barrier.signaledValue = 1; });
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL built = dispatch_semaphore_wait(fixture.counter.built,
-            dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
+            dispatch_time(DISPATCH_TIME_NOW, (delayDrawable ? 4 : 2) * NSEC_PER_SEC)) == 0;
         dispatch_async(dispatch_get_main_queue(), ^{
             Expect(built, "GPU backpressure regression must build a real production frame");
             PumpTicks(fixture.overlay, 70, ^{
@@ -532,11 +541,13 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
         TestActualFrameTime(^{
             TestDrawableWaitDoesNotBlockMain(^{
                 TestStoppedGenerationCannotBuildAfterRestart(^{
-                    TestGPUBackpressureIsBounded(^{
-                        if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
-                        else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
-                        std::fflush(stdout); std::fflush(stderr);
-                        std::exit(sFailures ? 1 : 0);
+                    TestGPUBackpressureIsBounded(NO, ^{
+                        TestGPUBackpressureIsBounded(YES, ^{
+                            if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
+                            else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
+                            std::fflush(stdout); std::fflush(stderr);
+                            std::exit(sFailures ? 1 : 0);
+                        });
                     });
                 });
             });

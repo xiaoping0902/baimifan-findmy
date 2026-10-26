@@ -38,6 +38,7 @@ jobs:
             python3 tests/run_hud_health_regressions.py
             python3 tests/run_hud_player_data_regressions.py
             python3 tests/run_hud_reader_data_regressions.py
+            python3 tests/run_hud_camera_validation_regressions.py
             python3 tests/run_hud_label_regressions.py
             python3 tests/run_hud_frame_rate_regressions.py
             python3 tests/run_uipanel_regressions.py

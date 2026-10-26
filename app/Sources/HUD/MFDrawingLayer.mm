@@ -5,6 +5,7 @@
 #import "../Render/MFOverlayView.h"
 #import "../Game/MFGameReader.h"
 #include "../Game/MFUEHealth.h"
+#include "../Game/MFUECameraValidation.h"
 #include "../Game/MFUEHeading.h"
 #include "../Game/MFUEPlayerDataObjC.h"
 #import "../Game/MFUEReader.h"
@@ -38,6 +39,7 @@
 #include <math.h>     /* tanf —— 盒子高度按焦距算 */
 
 static BOOL gDrawEnabled = YES;
+static void MFClearBoneCache(void);
 
 /*
  * ★★ [M5.74] 绘制层的数据源 ★★
@@ -103,6 +105,7 @@ typedef NS_ENUM(NSInteger, MFActorKind) {
 @end
 
 static const NSUInteger kMFUEActorBudgetPerFrame = 192;   // 每帧最多读多少个 Actor 坐标（发现用）
+static const CFTimeInterval kMFUEActorDiscoverySeconds = 0.005;
 static const NSTimeInterval kMFUEActorTTL = 2.0;          // 多久没更新就丢弃（[M5.173] 1.0→2.0：掉帧时
                                                           // 轮转一圈可能超过 1 秒，旧值会让整批条目同时过期 → 闪一下全没）
 static const NSTimeInterval kMFUEResolveTTL = 1.0;        // 链结构最快多久重解一次
@@ -140,6 +143,7 @@ static const NSTimeInterval kMFUEPersonPosInterval = 1.0 / 120.0;
                          source:(MFDrawSource *)outSource;
 /// UE4 链断在哪里（限流记录，不要每帧刷屏）
 - (void)noteUE4Issue:(NSString *)reason;
+- (void)synchronizeReadSessionWithResult:(MFUEResolveResult *_Nullable)result;
 /// 懒启动外部数据源（Frida agent → UDP）
 - (void)startExternalFeedIfNeeded;
 /// 用外部数据源组装一帧；数据过期/无相机时返回 NO，让上层回退到本地链
@@ -298,6 +302,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     MFCamera _lastCamera;                   // 上一帧的相机（读失败时沿用）
     CFTimeInterval _lastCameraAt;
     BOOL _classifySticky;                   // 分类一旦可用就锁定，避免整屏忽多忽少
+    BOOL _readSessionKnown;
+    uint64_t _readSessionToken, _readModuleBase, _readWorld, _readLevel;
 }
 
 + (void)setEnabled:(BOOL)enabled { gDrawEnabled = enabled; }
@@ -485,6 +491,36 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     MFHUDLogLine(@"[绘制] UE4 链未通：%@", reason);
 }
 
+// Grace is valid only inside one read session and one world/level. A fresh
+// world may be observable before its player chain is ready: clear the old
+// fallback immediately rather than dereferencing last match's objects.
+- (void)synchronizeReadSessionWithResult:(MFUEResolveResult *)result {
+    const uint64_t token = [MFReadBackend shared].sessionToken;
+    const uint64_t module = [MFUEReader shared].libBase;
+    const uint64_t world = MFUEIsValidPtr(result.gworld) ? result.gworld : 0;
+    const uint64_t level = MFUEIsValidPtr(result.level) ? result.level : 0;
+    const BOOL sessionChanged = !_readSessionKnown || token != _readSessionToken || module != _readModuleBase;
+    const BOOL worldChanged = world && _readWorld && world != _readWorld;
+    const BOOL levelChanged = level && _readLevel && level != _readLevel;
+    if (sessionChanged || worldChanged || levelChanged) {
+        [_ueActors removeAllObjects]; [_ueActorAddrs removeAllObjects]; _ueCursor = 0;
+        _ueResolve = nil; _ueResolveGood = nil;
+        _ueResolveAt = _ueResolveGoodAt = _ueAddrsAt = 0;
+        _lastCamera = (MFCamera){0}; _lastCameraAt = 0;
+        [_personAttrs removeAllObjects]; [_personHealth removeAllObjects]; [_smoothCache removeAllObjects];
+        [_classNameByID removeAllObjects]; [_kindHistogram removeAllObjects];
+        _classResolved = _classFailed = 0; _classifySticky = NO;
+        _kindPerson = _kindLoot = _kindBox = _kindUnknown = _kindReal = _kindBot = 0;
+        _botGeometry.clear(); _lootGeometry.clear(); _geometryActors.clear();
+        _geometrySettingsKnown = _lootStatsKnown = NO;
+        MFClearBoneCache();
+        _readWorld = _readLevel = 0;
+    }
+    _readSessionKnown = YES; _readSessionToken = token; _readModuleBase = module;
+    if (world) _readWorld = world;
+    if (level) _readLevel = level;
+}
+
 - (BOOL)acquireFrameWithSize:(CGSize)size
                       camera:(MFCamera *)outCamera
                     entities:(NSArray<MFEntity *> **)outEntities
@@ -637,9 +673,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         {   // 方位角：只由坐标 + 相机 yaw 算
             float dx = fe.worldX - cam.x, dy = fe.worldY - cam.y;
             float ty = atan2f(dy, dx) / kMF_Deg2Rad;
-            float d = ty - cam.yaw;
-            while (d >  180.0f) d -= 360.0f;
-            while (d < -180.0f) d += 360.0f;
+            const float d = MFUECameraValidation::NormalizeDegrees(ty - cam.yaw);
             e.bearingDeg = d;
             e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
         }
@@ -664,19 +698,21 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
                        entities:(NSArray<MFEntity *> **)outEntities
                            loot:(NSArray<MFEntity *> **)outLoot
                          source:(MFDrawSource *)outSource {
+    [self synchronizeReadSessionWithResult:nil];
     MFUEReader *ue = [MFUEReader shared];
     if (ue.libBase == 0) {
         [self noteUE4Issue:@"libBase = 0（HUD 还没拿到模块基址，见绑定日志）"];
         return NO;
     }
     if (![MFReadBackend shared].gateOpen) {
-        [self noteUE4Issue:@"读取后端门未开（目标 task port 未绑定）"];
+        [self noteUE4Issue:@"读取后端门未开（KFD 尚未绑定）"];
         return NO;
     }
 
     const CFTimeInterval now = CACurrentMediaTime();
     if (_ueResolve == nil || now - _ueResolveAt > kMFUEResolveTTL) {
         MFUEResolveResult *fresh = [ue resolve];
+        [self synchronizeReadSessionWithResult:fresh];
         _ueResolveAt = now;
         if (fresh != nil && fresh.brokenAt == nil) {
             _ueResolve = fresh;
@@ -702,7 +738,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     if ([ue readCamera:&cam result:r]) {
         _lastCamera = cam;
         _lastCameraAt = now;
-    } else if (now - _lastCameraAt <= kMFUECameraGrace) {
+    } else if (_lastCameraAt > 0 && now - _lastCameraAt >= 0 && now - _lastCameraAt <= kMFUECameraGrace) {
         /* [M5.173] 单帧相机读失败沿用上一帧：0.5 秒内绝不黑屏 */
         cam = _lastCamera;
         [self noteUE4Issue:@"相机单帧读失败（沿用上一帧）"];
@@ -740,10 +776,15 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
              * 地址表就空到下一次重读（整整 1 秒），屏幕上"人全没了"。
              */
             if (usable > 0) {
+                NSNumber *nextActor = _ueActorAddrs.count ? _ueActorAddrs[_ueCursor % _ueActorAddrs.count] : nil;
                 [_ueActorAddrs removeAllObjects];
-                _ueCursor = 0;
                 for (int i = 0; i < usable; i++)
                     if (MFUEIsValidPtr(ptrs[i])) [_ueActorAddrs addObject:@(ptrs[i])];
+                // A time-limited scan may take more than the 1s refresh TTL.
+                // Keep its next actor so refreshing the same array cannot
+                // continually restart at the front and starve its tail.
+                const NSUInteger nextIndex = nextActor ? [_ueActorAddrs indexOfObject:nextActor] : NSNotFound;
+                _ueCursor = nextIndex != NSNotFound ? nextIndex : (_ueActorAddrs.count ? _ueCursor % _ueActorAddrs.count : 0);
             } else {
                 [self noteUE4Issue:@"Actor 指针数组整批读失败（沿用上一轮）"];
             }
@@ -755,8 +796,12 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     const NSUInteger total = _ueActorAddrs.count;
     if (total > 0) {
         NSUInteger budget = MIN(kMFUEActorBudgetPerFrame, total);
+        const CFTimeInterval discoveryStartedAt = CACurrentMediaTime();
+        NSUInteger examined = 0;
         for (NSUInteger i = 0; i < budget; i++) {
+            if (examined && CACurrentMediaTime() - discoveryStartedAt >= kMFUEActorDiscoverySeconds) break;
             uint64_t addr = _ueActorAddrs[(_ueCursor + i) % total].unsignedLongLongValue;
+            ++examined;
             uint64_t rootComp = 0;
             if (![rb readU64:addr + rootOffset out:&rootComp]) continue;
             if (!MFUEIsValidPtr(rootComp)) continue;
@@ -836,7 +881,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
                 else                             _classFailed++;
             }
         }
-        _ueCursor = (_ueCursor + budget) % total;
+        _ueCursor = (_ueCursor + examined) % total;
     }
 
     // ── 用当前相机把缓存的世界坐标投影出来 ──
@@ -892,9 +937,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
         {   // 方位角 —— 只由坐标 + 相机 yaw 算，不依赖任何游戏字段
             float dx = a.x - cam.x, dy = a.y - cam.y;
             float ty = atan2f(dy, dx) / kMF_Deg2Rad;
-            float d = ty - cam.yaw;
-            while (d >  180.0f) d -= 360.0f;
-            while (d < -180.0f) d += 360.0f;
+            const float d = MFUECameraValidation::NormalizeDegrees(ty - cam.yaw);
             e.bearingDeg = d;
             e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
         }
@@ -1428,6 +1471,9 @@ typedef struct {
     float    pts[kMFBoneCount][3];
 } MFBoneCacheEntry;
 static MFBoneCacheEntry gMFBoneCache[64];
+static void MFClearBoneCache(void) {
+    for (MFBoneCacheEntry &entry : gMFBoneCache) entry = MFBoneCacheEntry{};
+}
 
 static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     MFBoneCacheEntry *reuse = &gMFBoneCache[0];

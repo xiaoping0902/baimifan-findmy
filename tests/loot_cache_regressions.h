@@ -2,6 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import "../app/Sources/Game/MFGearReader.h"
 #import "../app/Sources/Game/MFItemTable.h"
+#include <unistd.h>
 
 // Exercise the actual Objective-C caches while the surrounding drawing fixture
 // rejects every remote read. Session changes must invalidate before returning
@@ -9,11 +10,13 @@
 static void TestLootSessionCaches(void) {
     MFReadBackend *backend = [MFReadBackend shared];
     MFUEReader *ue = [MFUEReader shared];
-    const uint32_t savedTask = backend.targetTaskPort;
+    const int savedPid = backend.kfdPid;
+    const uint64_t savedRoot = backend.kfdRoot;
     const uint64_t savedBase = ue.libBase;
     const BOOL savedMode = backend.modeFlag;
-    backend.targetTaskPort = 0x1234;
-    backend.modeFlag = NO; // The port setter normally enables its read gate.
+    backend.kfdPid = getpid();
+    backend.kfdRoot = 0x12345000;
+    backend.modeFlag = NO; // No real target or kernel reads in this fixture.
     ue.libBase = 0x100000000ULL;
 
     MFItemTable *table = [MFItemTable new];
@@ -37,11 +40,11 @@ static void TestLootSessionCaches(void) {
     ue.libBase += 0x1000;
     CHECK(!table.ready && tableEmpty(), "ready must invalidate all item-table addresses when the module changes");
     seedTable();
-    backend.targetTaskPort++;
+    backend.kfdRoot += 0x1000;
     backend.modeFlag = NO;
-    CHECK(![table loadIfNeeded] && tableEmpty(), "a new task must not let old readiness bypass table loading");
+    CHECK(![table loadIfNeeded] && tableEmpty(), "a new read session must not let old readiness bypass table loading");
     seedTable();
-    backend.targetTaskPort++;
+    backend.kfdRoot += 0x1000;
     backend.modeFlag = NO;
     MFItemRow *oldRow = nil;
     CHECK(![table lookupComparisonIndex:123 number:0 row:&oldRow] && oldRow == nil && tableEmpty(),
@@ -66,7 +69,7 @@ static void TestLootSessionCaches(void) {
     seedGear();
     CHECK([[gear readGearForVerifiedPickup:actor].displayName isEqualToString:@"old session item"],
           "an unchanged session may return a fresh gear cache entry");
-    backend.targetTaskPort++;
+    backend.kfdRoot += 0x1000;
     backend.modeFlag = NO;
     CHECK([gear readGearForVerifiedPickup:actor] == nil && gearEmpty(),
           "new-task gear reads must discard actor, container, timestamps and failed-table cooldown caches");
@@ -75,8 +78,17 @@ static void TestLootSessionCaches(void) {
     CHECK([gear containedItemsForActor:actor].count == 0 && gearEmpty(),
           "container reads must invalidate module changes before returning cached contents");
 
-    backend.targetTaskPort = savedTask;
+    [backend noteWorldPointer:0x180000000ULL];
+    (void)table.ready;
+    seedTable(); seedGear();
+    [backend noteWorldPointer:0x190000000ULL];
+    CHECK(!table.ready && tableEmpty(), "a new match in the same process invalidates the item table");
+    CHECK([gear readGearForVerifiedPickup:actor] == nil && gearEmpty(),
+          "a new match must invalidate gear before returning an actor cache hit");
+
+    backend.kfdPid = savedPid;
+    backend.kfdRoot = savedRoot;
     backend.modeFlag = savedMode;
     ue.libBase = savedBase;
-    puts("PASS: real loot caches isolate task ports and module bases");
+    puts("PASS: real loot caches isolate KFD read sessions, module bases and match epochs");
 }

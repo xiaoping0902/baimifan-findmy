@@ -61,24 +61,12 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     BOOL _drawablePending;
     uint64_t _renderGeneration;
 
-    /*
-     * [M5.211] 渲染活性自愈。
-     *
-     * 两个卡死点都出现在"换局 / 场景切换"这种高负载时刻，而且表现完全一样：
-     * 进程没崩、菜单还能点，但画面从此不动。
-     *
-     *   ① _drawablePending 永远为 YES：nextDrawable 在窗口/场景重建时可能迟迟
-     *      不回，取 drawable 的回调没跑回主线程，于是此后每个 tick 都在这里 return；
-     *   ② 帧信用（_frameCredits）泄漏：commandBuffer 的完成回调没来（GPU 被系统
-     *      回收 / 提交失败），信用少还一个，几次之后 wait 永远失败。
-     *
-     * 两条都是"静默永久停摆"，没有异常、没有错误码 —— 所以必须靠时间戳兜底，
-     * 不能指望错误分支。
-     */
+    // A slow acquisition still owns its slot and frame credit. A timeout can
+    // diagnose the wait, but cannot cancel Metal or return that credit early.
     CFTimeInterval _drawablePendingAt;      // _drawablePending 置 YES 的时刻，0 = 没在途
+    BOOL _loggedPendingDrawable;
     CFTimeInterval _lastTickAt;             // 最近一次 tick 的时刻
     dispatch_source_t _livenessTimer;       // 独立于 displayLink 的看门狗
-    unsigned _stuckRecoveries;              // 自愈次数（诊断用）
 
     // ── 局部命中（穿透）──────────────────────────────────
     CGRect _interactiveRects[kMFOverlayMaxInteractiveRects];
@@ -235,8 +223,8 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
             [owner->_link invalidate];
             owner->_link = nil;
         }
-        owner->_drawablePending = NO;
-        owner->_drawablePendingAt = 0;
+        // Replacing the display link does not cancel an outstanding Metal
+        // acquisition. Its callback remains the sole owner of that slot.
         owner->_rendering = YES;
         NSString *error = nil;
         if (![owner startRenderingWithError:&error])
@@ -253,7 +241,6 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
         dispatch_source_cancel(_livenessTimer);
         _livenessTimer = nil;
     }
-    _drawablePendingAt = 0;
     _lastTickAt = 0;
     [self invalidateRenderingGeneration];
     [_link invalidate];
@@ -298,29 +285,23 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     CAMetalLayer *ml = self.metalLayer;
     [self layoutSubviews];
 
-    /*
-     * [M5.211] 在途 drawable 超时放行。
-     *
-     * 正常一帧"取 drawable → 画 → 提交"在 16ms 量级；超过 1.2 秒还没回到主线程，
-     * 只可能是那条路断了（窗口/场景重建时合成器迟迟不回收 drawable）。
-     * 此时补偿一次帧信用并清掉在途标记 —— 不这么做，此后每个 tick 都在下面那行
-     * return，画面永久停摆且没有任何错误码。
-     */
-    if (_drawablePending && _drawablePendingAt > 0) {
+    // Never clear a still-owned acquisition or signal its credit on timeout:
+    // the delayed callback will run later and return/submit the same credit.
+    // Releasing early queues more work behind the wait and inflates the GPU
+    // budget every time a slow drawable eventually returns.
+    if (_drawablePending && _drawablePendingAt > 0 && !_loggedPendingDrawable) {
         const CFTimeInterval elapsed = CACurrentMediaTime() - _drawablePendingAt;
         if (elapsed > 1.2) {
-            _drawablePending = NO;
-            _drawablePendingAt = 0;
-            _stuckRecoveries++;
-            dispatch_semaphore_signal(_frameCredits);
-            MFHUDLogLine(@"%@ 渲染自愈 #%u：drawable 在途 %.1fs 未完成，已放行并补回一个帧信用",
-                         self.interactive ? @"菜单" : @"绘制", _stuckRecoveries, elapsed);
+            _loggedPendingDrawable = YES;
+            MFHUDLogLine(@"%@ drawable 在途 %.1fs，保留获取槽与帧信用并等待返回",
+                         self.interactive ? @"菜单" : @"绘制", elapsed);
         }
     }
 
     if (_drawablePending || dispatch_semaphore_wait(_frameCredits, DISPATCH_TIME_NOW) != 0) return;
     _drawablePending = YES;
     _drawablePendingAt = CACurrentMediaTime();
+    _loggedPendingDrawable = NO;
     uint64_t generation = _renderGeneration;
     CGSize size = self.bounds.size;
     CGSize pixels = ml.drawableSize;

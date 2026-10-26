@@ -1,6 +1,7 @@
 #import "MFUEReader.h"
 #include "MFUEPlayerDataObjC.h"
 #include "MFUEActorState.h"
+#include "MFUECameraValidation.h"
 #import "MFSettings.h"                 /* [M5.150] 队友开关 */
 
 /* [M5.155] 供 MFGameReader（真正用于绘制的实体循环）使用的本地玩家信息 */
@@ -82,6 +83,7 @@ static NSString *gUEReport = nil;
             r.gworld, p.gworldStaticOffset];
         return r;
     }
+    [rb noteWorldPointer:r.gworld];
 
     // ③ 本地玩家链（对齐 RefreshControllerChain @ 0x100010b3c）
     MFUE_STEP(gameInstance,      r.gworld + p.world_gameInstance,          @"UWorld+0x%X → GameInstance", p.world_gameInstance);
@@ -199,18 +201,9 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
     c.pitch = f[4]; c.yaw = f[5]; c.roll = f[6];
     c.fov = f[7];
 
-    /* FRotator::Yaw 可能已经是 -180..180，也可能是 0..360 —— 先归一化再判 */
-    while (c.yaw   >  180.0f) c.yaw   -= 360.0f;
-    while (c.yaw   < -180.0f) c.yaw   += 360.0f;
-    while (c.pitch >  180.0f) c.pitch -= 360.0f;
-    while (c.pitch < -180.0f) c.pitch += 360.0f;
-    while (c.roll  >  180.0f) c.roll  -= 360.0f;
-    while (c.roll  < -180.0f) c.roll  += 360.0f;
-
-    if (!isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z)) return NO;
-    if (fabsf(c.x) > 1e6f || fabsf(c.y) > 1e6f || fabsf(c.z) > 1e6f) return NO;
-    if (!(c.fov >= kMFUE_POV_FovMin && c.fov <= kMFUE_POV_FovMax)) return NO;
-    if (!(c.pitch >= -90.5f && c.pitch <= 90.5f)) return NO;
+    // Loading/respawn can expose a torn POV. Reject nonfinite angles before
+    // wrapping; fmod also completes for finite floats too large for +/-360 loops.
+    if (!MFUECameraValidation::NormalizeAndValidate(c, kMFUE_POV_FovMin, kMFUE_POV_FovMax)) return NO;
 
     if (out) *out = c;
     return YES;
@@ -416,9 +409,7 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
             {
                 float dx = pos[0] - camera.x, dy = pos[1] - camera.y;
                 float ty = atan2f(dy, dx) / kMF_Deg2Rad;
-                float d = ty - camera.yaw;
-                while (d >  180.0f) d -= 360.0f;
-                while (d < -180.0f) d += 360.0f;
+                float d = MFUECameraValidation::NormalizeDegrees(ty - camera.yaw);
                 e.bearingDeg = d;
                 e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
             }

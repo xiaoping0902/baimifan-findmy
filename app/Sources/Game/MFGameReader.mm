@@ -6,6 +6,7 @@
 #import "MFSettings.h"
 #import "MFUEOffsets.h"      /* [M5.155] gMFUELocalPawn / gMFUELocalTeam */
 #include "MFUEHealth.h"
+#include "MFUECameraValidation.h"
 #include "MFUEPlayerDataObjC.h"
 #include "MFUEActorState.h"
 #import "MFItemNames.h"      /* [M5.159] 物品 ID → 中文名 */
@@ -219,11 +220,12 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     if (![rb readRemote:camObj + kMFCamera_Y into:&c.y size:4]) return NO;
     if (![rb readRemote:camObj + kMFCamera_Z into:&c.z size:4]) return NO;
     // +0x20/+0x24/+0x28 = 俯仰/偏航/横滚
-    [rb readRemote:camObj + kMFCamera_Pitch into:&c.pitch size:4];
-    [rb readRemote:camObj + kMFCamera_Yaw   into:&c.yaw   size:4];
-    [rb readRemote:camObj + kMFCamera_Roll  into:&c.roll  size:4];
+    if (![rb readRemote:camObj + kMFCamera_Pitch into:&c.pitch size:4]) return NO;
+    if (![rb readRemote:camObj + kMFCamera_Yaw   into:&c.yaw   size:4]) return NO;
+    if (![rb readRemote:camObj + kMFCamera_Roll  into:&c.roll  size:4]) return NO;
     // +0x2C = FOV
-    [rb readRemote:camObj + kMFCamera_FOV   into:&c.fov   size:4];
+    if (![rb readRemote:camObj + kMFCamera_FOV   into:&c.fov   size:4]) return NO;
+    if (!MFUECameraValidation::NormalizeAndValidate(c, kMFUE_POV_FovMin, kMFUE_POV_FovMax)) return NO;
 
     if (out) *out = c;
     return YES;
@@ -459,9 +461,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 float dx = pos[0] - camera.x;
                 float dy = pos[1] - camera.y;
                 float targetYaw = atan2f(dy, dx) / kMF_Deg2Rad;   // 度
-                float d = targetYaw - camera.yaw;
-                while (d >  180.0f) d -= 360.0f;
-                while (d < -180.0f) d += 360.0f;
+                float d = MFUECameraValidation::NormalizeDegrees(targetYaw - camera.yaw);
                 e.bearingDeg = d;                                  // 保留符号
                 e.isBehind = (fabsf(d) > kMFBehindAngleDeg);
             }
