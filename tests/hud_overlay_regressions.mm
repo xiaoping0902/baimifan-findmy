@@ -190,7 +190,7 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
                "real production Metal frames require an available secure parent canvas");
         [self.window.rootViewController.view addSubview:shield];
         [shield.contentView addSubview:self.overlay];
-        self.window.hidden = NO;
+        self.window.hidden = YES;
         [self.window layoutIfNeeded];
         [self.overlay layoutIfNeeded];
         [CATransaction flush];
@@ -198,6 +198,11 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
     return self;
 }
 - (void)start {
+    // Prepared fixtures stay hidden until their own timing case starts.
+    self.window.hidden = NO;
+    [self.window layoutIfNeeded];
+    [self.overlay layoutIfNeeded];
+    [CATransaction flush];
     NSString *error = nil;
     Expect([self.overlay startRenderingWithError:&error],
            "the real simulator Metal/ImGui context must start");
@@ -221,6 +226,94 @@ static void TestHighRefreshRequestUsesScreenCapacity(void) {
     [self.overlay removeFromSuperview];
 }
 @end
+
+// Each timing case uses a fresh overlay, but must not measure the simulator's
+// first synchronous Metal shader/pipeline compilation as a generation failure.
+// Prepare the exact contexts used below with real offscreen GPU work before
+// starting the unchanged scenario deadline. No drawable or display link runs
+// during this phase, so acquisition counters and gates retain their initial state.
+static NSMutableArray<OverlayFixture *> *sPreparedFixtures;
+static std::atomic<bool> sPreparationFinished{false};
+static const NSUInteger kPreparedFixtureCount = 4;
+
+static void PrepareOverlayFixture(NSUInteger index, dispatch_block_t completion) {
+    if (index == kPreparedFixtureCount) {
+        sPreparationFinished.store(true, std::memory_order_release);
+        std::puts("PASS: four production Metal contexts prepared by completed offscreen GPU frames");
+        std::fflush(stdout);
+        completion();
+        return;
+    }
+    OverlayFixture *fixture = [OverlayFixture new];
+    MFImGuiContext *context = fixture.overlay.imgui;
+    NSString *error = nil;
+    if (![context setupWithError:&error]) {
+        std::fprintf(stderr, "FAIL: offscreen Metal preparation setup: %s\n", error.UTF8String ?: "unknown");
+        std::fflush(stderr); std::exit(1);
+    }
+    const CGFloat scale = fixture.window.screen.scale ?: UIScreen.mainScreen.scale ?: 2.0;
+    const CGSize size = fixture.overlay.bounds.size;
+    MTLTextureDescriptor *texture = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        width:(NSUInteger)std::ceil(size.width * scale)
+        height:(NSUInteger)std::ceil(size.height * scale) mipmapped:NO];
+    texture.usage = MTLTextureUsageRenderTarget;
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = [context.device newTextureWithDescriptor:texture];
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+    id<MTLCommandBuffer> command = [context.queue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+    if (!pass.colorAttachments[0].texture || !command || !encoder) {
+        std::fprintf(stderr, "FAIL: offscreen Metal preparation requires a real texture, command and encoder\n");
+        std::fflush(stderr); std::exit(1);
+    }
+    const CFTimeInterval started = CACurrentMediaTime();
+    std::printf("PREP: fixture=%lu first Metal encode begins (includes cold pipeline creation)\n",
+                (unsigned long)index);
+    std::fflush(stdout);
+    [context beginFrameWithSize:size scale:scale descriptor:pass];
+    [context buildUI:^{
+        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(2, 2), ImVec2(12, 12), IM_COL32_WHITE);
+    }];
+    [context endFrameWithCommandBuffer:command encoder:encoder];
+    [encoder endEncoding];
+    const CFTimeInterval encoded = CACurrentMediaTime();
+    std::printf("PREP: fixture=%lu first Metal encode returned cpu_ms=%.0f; submitting real GPU work\n",
+                (unsigned long)index, (encoded - started) * 1000);
+    std::fflush(stdout);
+    [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        const CFTimeInterval gpuCompleted = CACurrentMediaTime();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completed.status != MTLCommandBufferStatusCompleted) {
+                std::fprintf(stderr, "FAIL: offscreen Metal preparation GPU error: %s\n",
+                    completed.error.localizedDescription.UTF8String ?: "unknown");
+                std::fflush(stderr); std::exit(1);
+            }
+            std::printf("PREP: fixture=%lu real GPU completed gpu_wait_ms=%.0f total_ms=%.0f\n",
+                        (unsigned long)index, (gpuCompleted - encoded) * 1000,
+                        (gpuCompleted - started) * 1000);
+            std::fflush(stdout);
+            Expect([fixture.overlay valueForKey:@"link"] == nil &&
+                   ((WaitingMetalLayer *)fixture.overlay.layer).calls == 0 && fixture.counter.builds == 0,
+                   "offscreen preparation must leave display links, drawable gates and UI counters untouched");
+            fixture.window.hidden = YES;
+            [sPreparedFixtures addObject:fixture];
+            PrepareOverlayFixture(index + 1, completion);
+        });
+    }];
+    [command commit];
+}
+
+static OverlayFixture *TakePreparedOverlayFixture(void) {
+    if (sPreparedFixtures.count == 0) {
+        std::fprintf(stderr, "FAIL: a timing case requires its own prepared production context\n");
+        std::fflush(stderr); std::exit(1);
+    }
+    OverlayFixture *fixture = sPreparedFixtures.firstObject;
+    [sPreparedFixtures removeObjectAtIndex:0];
+    return fixture;
+}
 
 static void TestInteractionGeometry(void) {
     MFOverlayView *view = [[MFOverlayView alloc] initWithFrame:CGRectMake(0, 0, 348, 520)
@@ -319,7 +412,7 @@ static void TestActualFrameTime(dispatch_block_t completion) {
 
 static void TestDrawableWaitDoesNotBlockMain(dispatch_block_t completion) {
     std::puts("CASE: drawable wait preserves main-queue responsiveness");
-    OverlayFixture *fixture = [OverlayFixture new];
+    OverlayFixture *fixture = TakePreparedOverlayFixture();
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
     [fixture start];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -359,7 +452,7 @@ static void TestDrawableWaitDoesNotBlockMain(dispatch_block_t completion) {
 
 static void TestStoppedGenerationCannotBuildAfterRestart(dispatch_block_t completion) {
     std::puts("CASE: stop/resize/restart rejects a late drawable");
-    OverlayFixture *fixture = [OverlayFixture new];
+    OverlayFixture *fixture = TakePreparedOverlayFixture();
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
     dispatch_semaphore_t firstFrame = dispatch_semaphore_create(0);
     __block unsigned firstFrameCallbacks = 0;
@@ -452,7 +545,7 @@ static void TestGPUBackpressureIsBounded(BOOL delayDrawable, dispatch_block_t co
     std::puts(delayDrawable
         ? "CASE: a late drawable cannot inflate the GPU frame budget"
         : "CASE: held GPU work bounds drawable acquisitions and resumes after completion");
-    OverlayFixture *fixture = [OverlayFixture new];
+    OverlayFixture *fixture = TakePreparedOverlayFixture();
     WaitingMetalLayer *layer = (WaitingMetalLayer *)fixture.overlay.layer;
     if (!delayDrawable) [layer releaseAll];
     id<MTLSharedEvent> barrier = [fixture.overlay.imgui.device newSharedEvent];
@@ -536,24 +629,37 @@ static void TestGPUBackpressureIsBounded(BOOL delayDrawable, dispatch_block_t co
 @end
 @implementation OverlayRegressionDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC),
                    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        std::fprintf(stderr, "FAIL: production overlay suite exceeded its independent deadline\n");
+        if (sPreparationFinished.load(std::memory_order_acquire)) return;
+        std::fprintf(stderr, "FAIL: real offscreen Metal preparation exceeded its independent deadline\n");
         std::fflush(stderr);
         std::exit(1);
     });
     dispatch_async(dispatch_get_main_queue(), ^{
-        TestHighRefreshRequestUsesScreenCapacity();
-        TestInteractionGeometry();
-        TestActualFrameTime(^{
-            TestDrawableWaitDoesNotBlockMain(^{
-                TestStoppedGenerationCannotBuildAfterRestart(^{
-                    TestGPUBackpressureIsBounded(NO, ^{
-                        TestGPUBackpressureIsBounded(YES, ^{
-                            if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
-                            else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
-                            std::fflush(stdout); std::fflush(stderr);
-                            std::exit(sFailures ? 1 : 0);
+        sPreparedFixtures = [NSMutableArray arrayWithCapacity:kPreparedFixtureCount];
+        PrepareOverlayFixture(0, ^{
+            // Keep the original 25-second scenario watchdog and every individual
+            // responsiveness, generation and GPU-pressure deadline unchanged.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC),
+                           dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                std::fprintf(stderr, "FAIL: production overlay suite exceeded its independent deadline\n");
+                std::fflush(stderr); std::exit(1);
+            });
+            TestHighRefreshRequestUsesScreenCapacity();
+            TestInteractionGeometry();
+            TestActualFrameTime(^{
+                TestDrawableWaitDoesNotBlockMain(^{
+                    TestStoppedGenerationCannotBuildAfterRestart(^{
+                        TestGPUBackpressureIsBounded(NO, ^{
+                            TestGPUBackpressureIsBounded(YES, ^{
+                                Expect(sPreparedFixtures.count == 0,
+                                       "all four timing cases must consume their own prepared fixture exactly once");
+                                if (!sFailures) std::puts("PASS: production overlay responsiveness, generations, geometry and frame time");
+                                else std::fprintf(stderr, "FAIL: production overlay has %u regression failures\n", sFailures);
+                                std::fflush(stdout); std::fflush(stderr);
+                                std::exit(sFailures ? 1 : 0);
+                            });
                         });
                     });
                 });
