@@ -18,16 +18,28 @@ static float Home(Canvas& c) {
 static float Drawing(Canvas& c) {
     static const char* names[]={"人机","骨骼","射线","血量","玩家与英雄名","队伍编号","武器名字","背敌提示","距离","头甲包"};
     static const int indices[]={DrawingBot,DrawingSkeleton,DrawingRay,DrawingHealth,DrawingName,DrawingTeam,DrawingWeapon,DrawingOffscreen,DrawingDistance,DrawingEquipment};
-    c.card(0,0,c.width,440,"人物信息");
+    c.card(0,0,c.width,404,"人物信息");
     for(int i=0;i<IM_ARRAYSIZE(indices);++i){
         char id[32];snprintf(id,sizeof(id),"drawing_%d",indices[i]);
         c.toggle(14,34+i*36,c.width-28,names[i],c.st.feat[indices[i]],id);
     }
-    c.toggle(14,394,c.width-28,"雷达",c.st.radarEnabled,"radar_enabled");
-    c.card(0,452,c.width,130,"显示范围");
-    c.slider(14,488,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
-    c.slider(14,530,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
-    return 582;
+    c.card(0,416,c.width,130,"显示范围");
+    c.slider(14,452,c.width-28,"骨骼距离",c.st.skeletonDistance,20,500,"%.0fm",1,"skeleton_distance",10);
+    c.slider(14,494,c.width-28,"背敌距离",c.st.backEnemyDistance,20,500,"%.0fm",1,"back_enemy_distance",10);
+    return 546;
+}
+static float Radar(Canvas& c) {
+    c.card(0,0,c.width,82,"雷达显示");
+    c.toggle(14,34,c.width-28,"雷达开关",c.st.radarEnabled,"radar_enabled");
+    c.card(0,94,c.width,234,"位置与大小");
+    c.slider(14,130,c.width-28,"水平位置",c.st.radarXRatio,0,1,"%.0f%%",100,"radar_x",.01f);
+    c.slider(14,172,c.width-28,"垂直位置",c.st.radarYRatio,0,1,"%.0f%%",100,"radar_y",.01f);
+    c.slider(14,214,c.width-28,"雷达大小",c.st.radarRadiusRatio,.08f,.25f,"%.0f%%",100,"radar_size",.01f);
+    if(c.button(14,270,c.width-28,"恢复默认位置","radar_reset")){
+        c.st.radarXRatio=.125f;c.st.radarYRatio=400.0f/1080.0f;
+        c.st.radarRadiusRatio=150.0f/1080.0f;c.st.configDirty=true;
+    }
+    return 328;
 }
 static float Loot(Canvas& c) {
     c.card(0,0,c.width,190,"物资显示");
@@ -35,19 +47,29 @@ static float Loot(Canvas& c) {
     c.toggle(14,70,c.width-28,"物资名字",c.st.lootNamesEnabled,"loot_names");
     c.toggle(14,106,c.width-28,"盒子标记",c.st.boxesEnabled,"loot_boxes");
     c.toggle(14,142,c.width-28,"物资统计",c.st.lootStatsEnabled,"loot_stats");
-    c.card(0,202,c.width,228,"筛选与距离");
-    c.slider(14,238,c.width-28,"最低等级",c.st.minLootLevel,0,6,"%.0f",1,"loot_level",1);
-    c.slider(14,280,c.width-28,"最低价值",c.st.minLootValue,0,200000,"%.0f",1,"loot_value",1000);
-    c.slider(14,322,c.width-28,"物资距离",c.st.lootDistance,20,500,"%.0fm",1,"loot_distance",10);
-    c.slider(14,364,c.width-28,"盒子距离",c.st.boxDistance,20,500,"%.0fm",1,"box_distance",10);
-    c.text(14,406,12,c.tc.textMuted,"等级和价值设为 0 时显示全部");
-    c.card(0,442,c.width,178,"统计窗口位置");
-    c.slider(14,478,c.width-28,"水平位置",c.st.lootStatsXRatio,0,1,"%.0f%%",100,"loot_stats_x",.01f);
-    c.slider(14,520,c.width-28,"垂直位置",c.st.lootStatsYRatio,0,1,"%.0f%%",100,"loot_stats_y",.01f);
-    if(c.button(14,570,c.width-28,"恢复默认位置","loot_stats_reset")){
+    c.card(0,202,c.width,122,"六档品质");
+    const char* grades[]={"1 白","2 绿","3 蓝","4 紫","5 金","6 红"};
+    const ImU32 colors[]={IM_COL32(255,255,255,255),IM_COL32(40,255,85,255),
+        IM_COL32(51,140,255,255),IM_COL32(179,77,255,255),IM_COL32(255,204,0,255),IM_COL32(255,41,41,255)};
+    const float cell=(c.width-40)/3;
+    for(int i=0;i<6;++i){
+        const float x=14+(i%3)*(cell+6),y=238+(i/3)*36;
+        c.rect(x,y,cell,29,IM_COL32(26,32,43,245),8);
+        c.text(x+9,y+7,13,colors[i],grades[i]);
+    }
+    c.card(0,336,c.width,228,"筛选与距离");
+    c.slider(14,372,c.width-28,"最低品质",c.st.minLootLevel,0,6,"%.0f",1,"loot_level",1);
+    c.slider(14,414,c.width-28,"最低价值",c.st.minLootValue,0,200000,"%.0f",1,"loot_value",1000);
+    c.slider(14,456,c.width-28,"物资距离",c.st.lootDistance,20,500,"%.0fm",1,"loot_distance",10);
+    c.slider(14,498,c.width-28,"盒子距离",c.st.boxDistance,20,500,"%.0fm",1,"box_distance",10);
+    c.text(14,540,12,c.tc.textMuted,"品质和价值设为 0 时显示全部");
+    c.card(0,576,c.width,178,"统计窗口位置");
+    c.slider(14,612,c.width-28,"水平位置",c.st.lootStatsXRatio,0,1,"%.0f%%",100,"loot_stats_x",.01f);
+    c.slider(14,654,c.width-28,"垂直位置",c.st.lootStatsYRatio,0,1,"%.0f%%",100,"loot_stats_y",.01f);
+    if(c.button(14,704,c.width-28,"恢复默认位置","loot_stats_reset")){
         c.st.lootStatsXRatio=.01f;c.st.lootStatsYRatio=.18f;c.st.configDirty=true;
     }
-    return 620;
+    return 754;
 }
 static float Personality(Canvas& c) {
     c.card(0,0,c.width,394,"界面与字号");
@@ -74,6 +96,7 @@ static float DrawPage(Canvas& c,int tab) {
         case 0:return Home(c);
         case 1:return Drawing(c);
         case 2:return Loot(c);
+        case 4:return Radar(c);
         default:return Personality(c);
     }
 }

@@ -43,9 +43,12 @@ static MFRALayout MFRALayoutFor(ImVec2 screen, const MFRadarConfig *cfg) {
     float rr = isfinite(cfg->radiusRatio) ? cfg->radiusRatio : (150.0f / 1080.0f);
 
     float shortSide = (screen.x < screen.y) ? screen.x : screen.y;
+    if (shortSide < 48.0f) return L;
     L.radius = shortSide * MFRAClamp(rr, 0.08f, 0.25f);
-    L.center = ImVec2(MFRAClamp(screen.x * xr, L.radius, screen.x - L.radius),
-                      MFRAClamp(screen.y * yr, L.radius, screen.y - L.radius));
+    // Include stroke anti-aliasing when the user moves the radar to an edge.
+    const float inset = L.radius + 2.0f;
+    L.center = ImVec2(MFRAClamp(screen.x * xr, inset, screen.x - inset),
+                      MFRAClamp(screen.y * yr, inset, screen.y - inset));
     return L;
 }
 
@@ -227,7 +230,8 @@ void MFRadarRender(ImDrawList *dl, ImVec2 screen,
             snprintf(buf, sizeof(buf), "%.0f", b->distM);
             ImVec2 ts = MFRATextSize(fs, buf);
             MFRAText(dl, fs,
-                     ImVec2(p.x - ts.x * 0.5f, p.y + markerR + 1.0f * scale),
+                     ImVec2(MFRAClamp(p.x - ts.x * 0.5f, center.x-radius+2, center.x+radius-ts.x-2),
+                            MFRAClamp(p.y + markerR + 1.0f * scale, center.y-radius+2, center.y+radius-ts.y-2)),
                      IM_COL32(235, 235, 235, 200), buf);
         }
     }

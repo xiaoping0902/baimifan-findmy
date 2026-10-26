@@ -4,6 +4,7 @@
 #import "MFOverlayView.h"
 #import "../HUD/MFHUDLog.h"
 #import <QuartzCore/CAMetalLayer.h>
+#import <TargetConditionals.h>
 #include "MFPresentedFrameRate.h"
 #include <cmath>
 #include <atomic>
@@ -303,11 +304,15 @@ static BOOL MFValidInteractiveRect(CGRect rect) {
     [self.imgui endFrameWithCommandBuffer:cb encoder:encoder];
     [encoder endEncoding];
     std::shared_ptr<MFOverlayFrameStats> stats = _frameStats;
+#if !TARGET_OS_SIMULATOR
+    // The iPhoneSimulator SDK omits these MTLDrawable presentation APIs.
+    // Keep its sample unavailable (0); GPU completions remain renderedFPS.
     [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
         // The captured generation owns this sampler. Late callbacks after a
         // resize, pause or stop cannot change the active generation's value.
         stats->presented.Record(presented.presentedTime);
     }];
+#endif
     [cb presentDrawable:drawable];
     BOOL reportFirstFrame = !_firstFrameReported && !_firstFramePending;
     if (reportFirstFrame) _firstFramePending = YES;

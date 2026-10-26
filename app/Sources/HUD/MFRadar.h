@@ -19,9 +19,9 @@ typedef struct {
     float selfX, selfY;     // 自己的世界坐标（cm，UE 单位）
     float yawDeg;           // 相机偏航（度，0=+X，90=+Y）
     float rangeM;           // 量程（米）
-    float xRatio;           // 圆心 X 占屏幕宽比例
-    float yRatio;           // 圆心 Y 占屏幕高比例
-    float radiusRatio;      // 半径占屏幕短边比例
+    float xRatio;           // 圆心 X 占屏幕宽比例，0..1；边缘自动完整留在屏幕内
+    float yRatio;           // 圆心 Y 占屏幕高比例，0..1
+    float radiusRatio;      // 半径占屏幕短边比例，0.08..0.25
     bool  northUp;          // true = 北朝上（不跟视角），false = 前方朝上
 } MFRadarConfig;
 

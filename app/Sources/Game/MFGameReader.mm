@@ -328,7 +328,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
                     a[@"char"] = @(isChar);
                     a[@"team"] = @(teamVal);
-                    a[@"bot"]  = @(havePS ? 0 : 1);
+                    a[@"bot"]  = @(isChar&&MFIsUEBot(rb,item));
 
                     if (isChar) {
                         uint64_t uinVal = 0;
@@ -336,6 +336,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                         NSString *name = havePS ? MFReadUEPlayerName(rb, ps) : nil;
                         if (name.length) a[@"name"] = name;
                         MFFillUEHeroAttributes(rb, item, a);
+                        MFFillUENPCAttributes(rb, item, [a[@"bot"] boolValue], name, a);
 
                         /* 手持 */
                         uint64_t combat = 0;
@@ -396,6 +397,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
                 }
                 e.name = attr[@"name"];
                 MFApplyUEHeroAttributes(e, attr);
+                MFApplyUENPCAttributes(e, attr);
                 MFApplyUEEquipmentAttributes(e, attr);
             }
 

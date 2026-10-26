@@ -29,6 +29,7 @@
 #include "imgui_internal.h"
 #include "MFDrawGeometryCache.h"
 #include "MFEntityLabels.h"
+#include "MFLootSummary.h"
 #include <array>
 #include <limits.h>     /* [M5.85] INT_MAX：装备价值是 int64，落到 MFEntity.value(int) 前要钳制 */
 #include <stdlib.h>   /* calloc —— 宽松读要清零 */
@@ -251,6 +252,12 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     NSUInteger _lootCount;
     BOOL _camOK;
     MFDrawGeometryCache _botGeometry, _lootGeometry;
+    MFLootSummary::Summary _lootStatsSummary;
+    std::vector<MFLootSummary::Row> _lootStatsRows;
+    std::array<double,4> _lootStatsFilters;
+    double _lootStatsAt;
+    NSUInteger _lootStatsInputCount;
+    BOOL _lootStatsKnown;
     std::array<double, 64> _geometrySettings;
     BOOL _geometrySettingsKnown;
     ImVec2 _geometryScreen;
@@ -1052,6 +1059,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     if (st.showFPS) [self drawFrameRateBadge:overlay];
     if (!gDrawEnabled || !st.masterEnabled || !st.drawEnabled) {
         _botGeometry.clear(); _lootGeometry.clear();
+        _lootStatsKnown=NO;
         MFMenuPanelReportStats(0, 0, 0, NO, 0);
         [self noteDrawingActivity:NO]; return;
     }
@@ -1081,6 +1089,7 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     _source = source;
     if (!_camOK) {
         _botGeometry.clear(); _lootGeometry.clear();
+        _lootStatsKnown=NO;
         MFMenuPanelReportStats(0, 0, 0, NO, 0);
         [self noteDrawingActivity:NO]; return;
     }
@@ -1247,7 +1256,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     // common name switch controls both names; the team switch adds the number.
     const float lineHeight = MAX(14.0f, MAX(st.fontInfo, st.fontPerson) + 3.0f);
     const bool playerRow = st.showTeam || st.showName;
-    const bool heroHealthRow = st.showName || st.showHealth;
+    const bool showHeroName = st.showName && !e.isBot;
+    const bool heroHealthRow = showHeroName || st.showHealth;
     const int rowCount = (st.showHeld ? 1 : 0) + (st.showArmor ? 1 : 0) +
                          (playerRow ? 1 : 0) + (heroHealthRow ? 1 : 0);
     const float labelTop = p1.y - 6.0f - rowCount * lineHeight;
@@ -1266,7 +1276,8 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     const std::string armorText = MFEntityLabels::Gear("甲", e.armorLevel, e.armorRawID, e.equipKnown, e.armorHP);
     const std::string bagText = MFEntityLabels::Bag(e.backpackLevel, e.bagRawID, e.equipKnown);
     const char *head = headText.c_str(), *armor = armorText.c_str(), *bag = bagText.c_str();
-    const std::string identity = MFEntityLabels::PlayerRow(e.teamId, e.name.UTF8String, st.showTeam, st.showName);
+    const char *actorName=MFEntityLabels::ActorName(e.isBot,e.name.UTF8String,e.npcName.UTF8String);
+    const std::string identity = MFEntityLabels::PlayerRow(e.teamId, actorName, st.showTeam, st.showName);
 
     float rowY = labelTop;
     auto textRow = [&](const char *text, ImU32 color) {
@@ -1288,16 +1299,16 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
     if (playerRow) textRow(identity.c_str(), MFU32([st colorForSlot:MFColorSlotPersonInfo]));
     if (heroHealthRow) {
         const char *name = MFEntityLabels::Hero(e.heroName.UTF8String);
-        const float nameWidth = st.showName ? MFTextSize(name, st.fontPerson).x : 0;
+        const float nameWidth = showHeroName ? MFTextSize(name, st.fontPerson).x : 0;
         const MFUEHealth::Snapshot hp{(float)e.health, e.maxHealth};
         char number[32];
         if (hp.known()) snprintf(number, sizeof(number), "%.0f", hp.current);
         else snprintf(number, sizeof(number), "?");
         const float barWidth = 64.0f;
-        const float gap = st.showName && st.showHealth ? 6.0f : 0.0f;
+        const float gap = showHeroName && st.showHealth ? 6.0f : 0.0f;
         const float healthWidth = st.showHealth ? barWidth + 5.0f + MFTextSize(number, st.fontInfo).x : 0;
         float x = pt.x - (nameWidth + gap + healthWidth) * 0.5f;
-        if (st.showName) MFText(dl, st.fontPerson, ImVec2(x, rowY), boxCol, name);
+        if (showHeroName) MFText(dl, st.fontPerson, ImVec2(x, rowY), boxCol, name);
         if (st.showHealth) {
             x += nameWidth + gap;
             const NSInteger style = MIN(2, MAX(0, st.healthBarStyle));
@@ -1554,6 +1565,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     e.maxHealth     = [health[@"max"] floatValue];
     MFApplyUEEquipmentAttributes(e, a);
     MFApplyUEHeroAttributes(e, a);
+    MFApplyUENPCAttributes(e, a);
     e.weaponRawID = [a[@"wid"] unsignedLongLongValue];
     if (e.weaponRawID) e.weaponId = (int)((e.weaponRawID / 10000000ULL) % 1000ULL);
     NSString *nm = a[@"name"];
@@ -1611,27 +1623,19 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
         return d;
     }
 
-    /* ① 人机位（AGPCharacterBase+0xE60）—— 读不到就保持"当真人画" */
-    uint8_t isAI = 0;
-    if ([rb readRemote:actor + p.character_isAI into:&isAI size:1] && isAI != 0) {
-        d[@"bot"] = @YES;
-    }
-
     /* ② 已死亡才剔除：SDK ImpendingDeath（可救援倒地）仍保留。 */
     if (MFIsUEFullyDead(rb, actor)) {
         d[@"skip"] = @YES;
         return d;
     }
 
-    /* ③ PlayerState：空 = 人机（真机判据），非空才有 UIN / 名字 / 观战位。
-     *    ★ 只有"读到了、确实是 0"才算人机；读失败保持 NO（当真人），
-     *      否则一次偶发读失败就会让人机标记翻面 → 目标时隐时现。 */
+    /* ③ PlayerState supplies nicknames; SDK player-AI flags and validated AI
+     * subclasses still identify bots that also own PlayerState. */
     uint64_t ps = 0;
     BOOL psRead = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps];
     BOOL havePS = psRead && MFUEIsValidPtr(ps);
-    if (psRead && !havePS) d[@"bot"] = @YES;
+    d[@"bot"] = @(MFIsUEBot(rb,actor,p.character_isAI));
     if (havePS) {
-        d[@"bot"] = @NO;
 
         /* 观战 / 未激活：PS+0x4C0 bit0 */
         uint8_t inactive = 0;
@@ -1683,6 +1687,7 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     /* SDK 的两张装备数组；完整的空数组也要保留“已知为空”状态。 */
     MFFillUEEquipmentAttributes(rb, actor, d);
     MFFillUEHeroAttributes(rb, actor, d);
+    MFFillUENPCAttributes(rb, actor, [d[@"bot"] boolValue], d[@"name"], d);
 
     return d;
 }
@@ -1783,9 +1788,9 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
     cfg.selfY = cam.y;
     cfg.yawDeg = cam.yaw;
     cfg.rangeM = 120.0f;          /* 量程 120m，够覆盖当前交战距离 */
-    cfg.xRatio = 0.125f;          /* 参考实现的默认布局 */
-    cfg.yRatio = 0.370f;
-    cfg.radiusRatio = 0.139f;
+    cfg.xRatio = st.radarXRatio;
+    cfg.yRatio = st.radarYRatio;
+    cfg.radiusRatio = st.radarRadiusRatio;
     cfg.northUp = NO;             /* 前方朝上 */
 
     enum { kMaxBlips = 192 };
@@ -1927,37 +1932,78 @@ static MFBoneCacheEntry *MFBoneCacheFor(uint64_t actor) {
 #pragma mark - 统计窗
 
 - (void)drawStats:(MFSettings *)st loot:(NSArray<MFEntity *> *)loot {
-    // Visibility belongs to showLootStats. The drawing overlay passes touches
-    // through, so it must not offer an unreachable close/resize control.
-    ImGui::SetNextWindowSize(ImVec2(220, 160), ImGuiCond_FirstUseEver);
+    const double now=ImGui::GetTime();
+    const std::array<double,4> filters={double(st.minLootLevel),double(st.minLootValue),
+                                       double(st.lootDrawDistance),double(st.boxDrawDistance)};
+    if(!_lootStatsKnown||now<_lootStatsAt||now-_lootStatsAt>=1.0/30.0||
+       filters!=_lootStatsFilters||loot.count!=_lootStatsInputCount){
+      _lootStatsSummary={};
+      for(MFEntity *e in loot){
+        const float limit=e.isBox?st.boxDrawDistance:st.lootDrawDistance;
+        if(!isfinite(e.distanceMeters)||e.distanceMeters<0||e.distanceMeters>limit)continue;
+        if(st.minLootLevel>0&&e.level>0&&e.level<st.minLootLevel)continue;
+        if(st.minLootValue>0&&e.value>0&&e.value<st.minLootValue)continue;
+        _lootStatsSummary.Add(e.name.UTF8String,e.level,e.count,e.value,e.distanceMeters,e.isBox);
+      }
+      _lootStatsRows=_lootStatsSummary.SortedRows();
+      _lootStatsAt=now;_lootStatsFilters=filters;_lootStatsInputCount=loot.count;_lootStatsKnown=YES;
+    }
+    const auto &summary=_lootStatsSummary;
+    const auto &rows=_lootStatsRows;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const ImVec2 previous = ImGui::FindWindowByName("物资统计") ?
-        ImGui::FindWindowByName("物资统计")->Size : ImVec2(220,160);
-    const ImVec2 available(MAX(0.0f,display.x-previous.x),MAX(0.0f,display.y-previous.y));
+    if(display.x<1||display.y<1)return;
+    const size_t maxRows=(size_t)MAX(0,MIN(8,(int)((display.y-212)/22)));
+    const size_t visibleRows=std::min(rows.size(),maxRows);
+    const ImVec2 panel(MIN(268.0f,display.x),MIN(display.y,212.0f+visibleRows*22.0f));
+    const ImVec2 available(MAX(0.0f,display.x-panel.x),MAX(0.0f,display.y-panel.y));
+    ImGui::SetNextWindowSize(panel,ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImVec2(available.x*st.lootStatsXRatio,available.y*st.lootStatsYRatio), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(.055f,.075f,.11f,.96f));
+    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.96f,.97f,1,1));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.65f,.71f,.81f,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12,10));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,14);
     if (ImGui::Begin("物资统计", nullptr,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_AlwaysAutoResize)) {
-        NSUInteger byLevel[7] = {0};
-        long long totalValue = 0;
-        for (MFEntity *e in loot) {
-            int lv = (e.level >= 0 && e.level <= 6) ? e.level : 0;
-            byLevel[lv]++;
-            totalValue += e.value;
-        }
-        ImGui::Text("共 %lu 件", (unsigned long)loot.count);
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::TextUnformatted("物资统计");
+        ImGui::TextDisabled("%llu 件 · %zu 类 · %llu 箱",(unsigned long long)summary.quantity,
+                            rows.size(),(unsigned long long)summary.boxes);
         ImGui::Separator();
-        for (int lv = 6; lv >= 3; lv--) {
-            if (byLevel[lv] == 0) continue;
-            ImGui::TextColored(ImVec4(0.98f, 0.82f, 0.30f, 1.0f),
-                               "%d 级：%lu", lv, (unsigned long)byLevel[lv]);
+        for(int i=0;i<6;++i){
+            const int level=6-i;
+            if(i%2)ImGui::SameLine(12+(panel.x-24)*.5f);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(MFQualityColor(level,st)),
+                               "%d级 %llu",level,(unsigned long long)summary.byQuality[level]);
         }
-        if (byLevel[0]) ImGui::TextDisabled("其他：%lu", (unsigned long)byLevel[0]);
+        if(summary.byQuality[0])ImGui::TextDisabled("品质未知 %llu",(unsigned long long)summary.byQuality[0]);
         ImGui::Separator();
-        ImGui::Text("总价值：%lld", totalValue);
+        if(rows.empty())ImGui::TextDisabled("范围内暂无物资");
+        for(size_t i=0;i<visibleRows;++i){
+            const auto &row=rows[i];
+            char suffix[48];
+            if(isfinite(row.nearest))snprintf(suffix,sizeof(suffix),"×%llu  %.0fm",(unsigned long long)row.quantity,row.nearest);
+            else snprintf(suffix,sizeof(suffix),"×%llu  ?m",(unsigned long long)row.quantity);
+            const float suffixWidth=ImGui::CalcTextSize(suffix).x;
+            const float room=MAX(12.0f,ImGui::GetContentRegionAvail().x-suffixWidth-12);
+            std::string name=row.name;
+            if(ImGui::CalcTextSize(name.c_str()).x>room){
+                do{
+                    size_t last=name.size()-1;
+                    while(last>0&&((unsigned char)name[last]&0xC0)==0x80)--last;
+                    name.resize(last);
+                }while(!name.empty()&&ImGui::CalcTextSize((name+"…").c_str()).x>room);
+                name+="…";
+            }
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(MFQualityColor(row.quality,st)),"%s",name.c_str());
+            ImGui::SameLine(panel.x-12-suffixWidth);
+            ImGui::TextDisabled("%s",suffix);
+        }
+        if(rows.size()>visibleRows)ImGui::TextDisabled("另有 %zu 类",rows.size()-visibleRows);
+        ImGui::TextDisabled("已读总值 %lld",(long long)summary.totalValue);
     }
     ImGui::End();
+    ImGui::PopStyleVar(2);ImGui::PopStyleColor(3);
 }
 
 #pragma mark - 渲染自检

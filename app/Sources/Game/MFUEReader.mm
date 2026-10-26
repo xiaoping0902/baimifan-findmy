@@ -440,7 +440,7 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
                 uint64_t ps = 0;
                 BOOL havePS = [rb readU64:actor + kMFUE_Actor_PlayerState out:&ps] &&
                               MFUEIsValidPtr(ps);
-                e.isBot = havePS ? NO : YES;
+                e.isBot = MFIsUEBot(rb,actor,p.character_isAI);
 
                 /* [M5.153] 观战 / 未激活：PlayerState+0x4C0 的 bit0（剔除表 §5） */
                 if (havePS) {
@@ -492,6 +492,8 @@ static BOOL MFUEBuildCamera(const float f[8], MFCamera *out) {
             MFApplyUEEquipmentAttributes(e, equipmentAttributes);
             MFFillUEHeroAttributes(rb, actor, equipmentAttributes);
             MFApplyUEHeroAttributes(e, equipmentAttributes);
+            MFFillUENPCAttributes(rb, actor, e.isBot, e.name, equipmentAttributes);
+            MFApplyUENPCAttributes(e, equipmentAttributes);
 
             [out addObject:e];
         }

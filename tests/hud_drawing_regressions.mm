@@ -426,6 +426,19 @@ static void TestSyntheticDrawing(void) {
     patient.heroName=@"HeroWithLongerName";
     CHECK(ColoredWidth(Frame(drawing,overlay),heroColor)>heroWidth+30,
           "the hero and nickname must render as separate identity rows");
+    settings.showTracer=NO; patient.isBot=YES; patient.npcName=nil;
+    patient.name=@"RandomBotName12345";
+    data=Frame(drawing,overlay);
+    const float ordinaryBotWidth=ColoredWidth(data,infoColor);
+    CHECK(ordinaryBotWidth>0&&ColoredVertices(data,heroColor)==0,
+          "ordinary bots must show their bot label without a fabricated hero-name row");
+    patient.name=@"AnotherUnrelatedRandomName";
+    CHECK(fabsf(ColoredWidth(Frame(drawing,overlay),infoColor)-ordinaryBotWidth)<.01f,
+          "ordinary AI names must normalize to the same 人机 label");
+    patient.npcName=@"[Boss] SpecialUnit";
+    CHECK(ColoredWidth(Frame(drawing,overlay),infoColor)>ordinaryBotWidth+30,
+          "a verified special NPC must retain its distinct full label");
+    patient.isBot=NO;patient.npcName=nil;settings.showTracer=YES;
     patient.teamId=0;
     settings.showHeld = settings.showArmor = settings.showTeam = settings.showName = NO;
 
@@ -499,8 +512,12 @@ static void TestSyntheticDrawing(void) {
     const int statsHidden = Frame(drawing, overlay)->TotalVtxCount;
     settings.showLootStats = YES;
     Frame(drawing, overlay); // ImGui measures a new auto-sized window on its first frame.
-    CHECK(Frame(drawing, overlay)->TotalVtxCount > statsHidden + 8,
+    data=Frame(drawing, overlay);
+    CHECK(data->TotalVtxCount > statsHidden + 8,
           "loot statistics must render independently while all loot markers are hidden");
+    for(int level=1;level<=6;++level)
+        CHECK(ColoredVertices(data,qualityColors[level])>0,
+              "the statistics list must render all six quality counters in their actual quality colors");
     settings.showLootStats = NO;
     CHECK(Frame(drawing, overlay)->TotalVtxCount == statsHidden,
           "the statistics switch must remove the entire statistics window");

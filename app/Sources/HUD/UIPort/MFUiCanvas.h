@@ -572,9 +572,9 @@ static void RenderUI(UIState& st,ImVec2 screenSize,ImFont* font,ImTextureID bran
     shell.rect(baseW-50,14,32,32,WithAlpha(tc.textFaint,18),16);
     DrawPowerIcon(dl,shell.p(baseW-34,30),13*s,tc.textMuted);
     if(close)st.wantExit=true;
-    const char* labels[]={"主页","人物","物资","外观"};
-    const char* subtitles[]={"","","",""};
-    const int navIcons[]={0,1,4,5};
+    const char* labels[]={"主页","人物","物资","外观","雷达"};
+    const char* subtitles[]={"","","","",""};
+    const int navIcons[]={0,1,4,5,3};
     ImGui::PushID("navigation");
     for(int i=0;i<kNavTabCount;i++){
         ImGui::PushID(i);

@@ -66,6 +66,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double renderedFPS;
 /// Actual overlay presentations measured from CAMetalDrawable.presentedTime.
 /// Zero means no valid recent sample; this is not the underlying game's FPS.
+/// The simulator does not expose drawable presentation timing and reports zero.
 @property (nonatomic, readonly) double presentedFPS;
 /// 空闲帧率（默认 0 = 不降频）。菜单设成 ~12：不交互时不占 GPU。
 @property (nonatomic, assign) NSInteger idleFPS;

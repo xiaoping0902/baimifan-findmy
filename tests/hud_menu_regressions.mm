@@ -72,6 +72,14 @@ static void TestSettingsColorAndAnchorPersistence(void) {
     [settings resetToDefaults];
     CHECK(settings.showFPS,"fresh settings must show the realtime overlay frame rate");
     settings.showFPS=NO;
+    settings.radarXRatio=-1;settings.radarYRatio=4;settings.radarRadiusRatio=9;
+    CHECK(settings.radarXRatio==0&&settings.radarYRatio==1&&settings.radarRadiusRatio==.25f,
+          "radar settings must clamp position and size at the model boundary");
+    settings.radarXRatio=NAN;settings.radarYRatio=INFINITY;settings.radarRadiusRatio=NAN;
+    CHECK(fabs(settings.radarXRatio-.125f)<.001&&fabs(settings.radarYRatio-400.0f/1080.0f)<.001&&
+          fabs(settings.radarRadiusRatio-150.0f/1080.0f)<.001,
+          "invalid radar placement values must recover to the original default layout");
+    settings.radarXRatio=.82f;settings.radarYRatio=.21f;settings.radarRadiusRatio=.23f;
     CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],1,.08,.08)&&
           ColorMatches([settings colorForSlot:MFColorSlotBotSkeleton],1,1,1),
           "fresh native settings must use vivid red humans and white bots");
@@ -86,6 +94,8 @@ static void TestSettingsColorAndAnchorPersistence(void) {
     [settings setColor:[UIColor colorWithRed:.64 green:.52 blue:.23 alpha:1] forSlot:MFColorSlotBotSkeleton];
     CHECK([settings save],"native color/anchor settings fixture must save");
     MFSettings *loaded=[[MFSettings alloc] init];
+    CHECK(fabs(loaded.radarXRatio-.82f)<.001&&fabs(loaded.radarYRatio-.21f)<.001&&
+          fabs(loaded.radarRadiusRatio-.23f)<.001,"radar layout must survive a full disk roundtrip");
     CHECK(!loaded.showFPS&&fabs(loaded.lootStatsXRatio-.43f)<.001&&fabs(loaded.lootStatsYRatio-.72f)<.001&&
           ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&
           ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],.64,.52,.23),
@@ -96,11 +106,15 @@ static void TestSettingsColorAndAnchorPersistence(void) {
     [legacy removeObjectForKey:@"lootStatsXRatio"];[legacy removeObjectForKey:@"lootStatsYRatio"];
     [legacy removeObjectForKey:@"colorDefaultsVersion"];
     [legacy removeObjectForKey:@"showFPS"];
+    [legacy removeObjectForKey:@"radarXRatio"];[legacy removeObjectForKey:@"radarYRatio"];
+    [legacy removeObjectForKey:@"radarRadiusRatio"];
     legacy[@"showTeammates"]=@YES;
     NSMutableDictionary *colors=[legacy[@"colors"] mutableCopy];
     [colors removeObjectForKey:@"10"];legacy[@"colors"]=colors;
     CHECK([legacy writeToFile:path atomically:YES],"legacy settings fixture must save");
     loaded=[[MFSettings alloc] init];
+    CHECK(fabs(loaded.radarXRatio-.125f)<.001&&fabs(loaded.radarYRatio-400.0f/1080.0f)<.001&&
+          fabs(loaded.radarRadiusRatio-150.0f/1080.0f)<.001,"old configurations must inherit radar layout defaults");
     CHECK(loaded.showFPS&&fabs(loaded.lootStatsXRatio-.01f)<.001&&fabs(loaded.lootStatsYRatio-.18f)<.001&&
           ColorMatches([loaded colorForSlot:MFColorSlotBotSkeleton],1,1,1)&&
           ColorMatches([loaded colorForSlot:MFColorSlotSkeleton],.36,.24,.72)&&!loaded.showTeammates,
@@ -168,6 +182,32 @@ static void TestNativeColorPopupStability(MFMenuUI *menu,MFOverlayView *overlay)
     }
     io.AddMouseButtonEvent(0,false);Frame(menu,overlay);Frame(menu,overlay);
 }
+static void TestRadarControlsAndSave(MFMenuUI *menu,MFOverlayView *overlay,void (^completion)(void)) {
+    MFSettings *settings=MFSettings.shared;
+    ClickMenu(menu,overlay,NavPoint(overlay,4));
+    const BOOL radar=settings.showRadar,bot=settings.showBot,loot=settings.showLoot;
+    ClickItem(menu,overlay,"radar_enabled");
+    CHECK(settings.showRadar!=radar&&settings.showBot==bot&&settings.showLoot==loot,
+          "the dedicated radar page switch must affect only radar visibility");
+    ClickItem(menu,overlay,"radar_enabled");
+    MenuTestHit x=MenuItem("radar_x");
+    ClickMenu(menu,overlay,CGPointMake(x.origin.x+x.size.x-2,x.origin.y+x.size.y*.5));
+    ScrollMenuToBottom(menu,overlay);
+    MenuTestHit y=MenuItem("radar_y"),size=MenuItem("radar_size");
+    ClickMenu(menu,overlay,CGPointMake(y.origin.x+2,y.origin.y+y.size.y*.5));
+    ClickMenu(menu,overlay,CGPointMake(size.origin.x+size.size.x-2,size.origin.y+size.size.y*.5));
+    CHECK(settings.radarXRatio==1&&settings.radarYRatio==0&&fabs(settings.radarRadiusRatio-.25f)<.001&&
+          settings.showRadar==radar&&settings.showBot==bot&&settings.showLoot==loot,
+          "radar controls must bind independent production X/Y/size values");
+    WaitForMenuPreferences(^BOOL(MFSettings *s){return s.radarXRatio==1&&s.radarYRatio==0&&
+        fabs(s.radarRadiusRatio-.25f)<.001&&s.showRadar==radar;},[NSDate dateWithTimeIntervalSinceNow:3],^{
+            ClickItem(menu,overlay,"radar_reset");
+            CHECK(settings.showRadar==radar,"resetting radar placement must preserve its own switch");
+            WaitForMenuPreferences(^BOOL(MFSettings *s){return fabs(s.radarXRatio-.125f)<.001&&
+                fabs(s.radarYRatio-400.0f/1080.0f)<.001&&fabs(s.radarRadiusRatio-150.0f/1080.0f)<.001;},
+                [NSDate dateWithTimeIntervalSinceNow:3],completion);
+        });
+}
 static void TestColorsAndPositionPersistence(MFMenuUI *menu,MFOverlayView *overlay,void (^completion)(void)) {
     MFSettings *settings=MFSettings.shared;
     CHECK(ColorMatches([settings colorForSlot:MFColorSlotSkeleton],.36,.24,.72) &&
@@ -201,7 +241,9 @@ static void TestColorsAndPositionPersistence(MFMenuUI *menu,MFOverlayView *overl
             ClickItem(menu,overlay,"loot_stats_reset");
             WaitForMenuPreferences(^BOOL(MFSettings *s){return fabs(s.lootStatsXRatio-.01f)<.001&&
                 fabs(s.lootStatsYRatio-.18f)<.001;},[NSDate dateWithTimeIntervalSinceNow:3],^{
-                    ClickMenu(menu,overlay,NavPoint(overlay,0));completion();
+                    TestRadarControlsAndSave(menu,overlay,^{
+                        ClickMenu(menu,overlay,NavPoint(overlay,0));completion();
+                    });
                 });
         });
 }
@@ -353,7 +395,7 @@ static void TestProductionMenuLayoutAndControls(void (^completion)(void)) {
     CHECK(!settings.masterEnabled && !settings.drawEnabled,
           "the drawing master must also disable both gates");
     ClickMenu(menu, overlay, CGPointMake(222 * masterScale, 348 * masterScale));
-    const int tabs[] = {1,2,3,0};
+    const int tabs[] = {1,2,3,4,0};
     for (int tab : tabs) {
         const CGPoint point = NavPoint(overlay, tab);
         CHECK([overlay acceptsInteractionAtPoint:point], "each useful navigation target must be reachable");

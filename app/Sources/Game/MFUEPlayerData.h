@@ -67,6 +67,64 @@ std::u16string ReadFText(uint64_t address, ReadBytes read) {
     return read(address, &textData, 8) && ValidPointer(textData) ? ReadFString(textData + 0x48, read) : std::u16string{};
 }
 
+struct NPCIdentity {
+    std::u16string chosenName, chosenText;
+    uint32_t npcIndex = 0, npcNumber = 0, characterIndex = 0, tagMask = 0;
+    uint64_t templateTable = 0;
+};
+
+template <typename ReadBytes>
+bool ReadBotIdentity(uint64_t actor, ReadBytes read, uint32_t aiOffset=0xE60) {
+    if(!ValidPointer(actor))return false;
+    uint8_t playerAI=0;
+    if(aiOffset&&read(actor+aiOffset,&playerAI,1)&&playerAI==1)return true;
+    uint64_t playerState=0;
+    // Some AI players own PlayerState. Its presence cannot override the SDK
+    // bIsPlayerAI flag; a failed pointer read cannot establish an ordinary bot.
+    return read(actor+0x390,&playerState,8)&&playerState==0;
+}
+
+template <typename ReadBytes, typename NameLookup>
+bool IsAICharacterClass(uint64_t actor, ReadBytes read, NameLookup nameLookup) {
+    uint64_t cls = 0, seen[16]{};
+    if (!ValidPointer(actor) || !read(actor + 0x08, &cls, sizeof(cls))) return false;
+    for (unsigned i = 0; i < 16 && ValidPointer(cls); ++i) {
+        for (unsigned j = 0; j < i; ++j) if (seen[j] == cls) return false;
+        seen[i] = cls;
+        // SDK UObject.Class +0x08 and UStruct.SuperStruct +0x40.
+        if (nameLookup(cls) == "DFMAICharacter") return true;
+        if (!read(cls + 0x40, &cls, sizeof(cls))) return false;
+    }
+    return false;
+}
+
+template <typename ReadBytes>
+NPCIdentity ReadNPCIdentity(uint64_t actor, bool isBot, bool verifiedAISubclass, ReadBytes read) {
+    NPCIdentity result;
+    if (!isBot || !ValidPointer(actor)) return result;
+    // SDK ADFMCharacter: replicated PoolChosenName_Buffer and NPC FNames.
+    result.chosenName = ReadFString(actor + 0x2E58, read);
+    result.chosenText = ReadFText(actor + 0x2E40, read);
+    uint32_t npc[2]{};
+    if (read(actor + 0x2E28, npc, sizeof(npc)) && npc[0] <= 20000000) {
+        result.npcIndex = npc[0]; result.npcNumber = npc[1];
+    }
+    uint32_t character[2]{};
+    if (read(actor + 0x2E88, character, sizeof(character)) && character[0] <= 20000000)
+        result.characterIndex = character[0];
+    if (!verifiedAISubclass) return result;
+    // Only ADFMAICharacter descendants own AIInfo and CharacterTags.
+    uint64_t table = 0;
+    if (read(actor + 0x3CE8, &table, sizeof(table)) && ValidPointer(table)) result.templateTable = table;
+    ArrayHeader tags{};
+    if (!read(actor + 0x3DD0, &tags, sizeof(tags)) || tags.num <= 0 || tags.num > 32 ||
+        tags.maximum < tags.num || !ValidPointer(tags.data)) return result;
+    uint8_t bytes[32]{};
+    if (!read(tags.data, bytes, (size_t)tags.num)) return result;
+    for (int32_t i = 0; i < tags.num; ++i) if (bytes[i] < 26) result.tagMask |= 1u << bytes[i];
+    return result;
+}
+
 // GPPlayerState.CurrentCharacterLiveStatus is a replicated int32; its enum
 // distinguishes rescuable ImpendingDeath from Death. Health==0 is not death.
 template <typename ReadBytes>

@@ -62,6 +62,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Live operator identity, distinct from the player-authored nickname / UIN.
 @property (nonatomic, assign) uint64_t heroID;
 @property (nonatomic, copy, nullable) NSString *heroName;
+/// Bot-only display name: ordinary AI is 人机; verified special AI has its own name.
+@property (nonatomic, copy, nullable) NSString *npcName;
 /* [M5.159] 原始物品 ID（用于查中文名） */
 @property (nonatomic, assign) uint64_t weaponRawID;
 @property (nonatomic, assign) uint64_t helmetRawID;

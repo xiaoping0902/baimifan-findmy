@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <TargetConditionals.h>
 #import "../app/Sources/Render/MFOverlayView.h"
 #import "MFHUDCaptureShieldView.h"
 #include "HUDRegressionOutput.h"
@@ -497,6 +498,10 @@ static void TestGPUBackpressureIsBounded(dispatch_block_t completion) {
                             Expect(fixture.counter.builds > 2, "returned GPU credits must permit subsequent frames");
                             Expect(fixture.overlay.renderedFPS > 0,
                                    "successful GPU completions must produce an actual rendering FPS sample");
+#if TARGET_OS_SIMULATOR
+                            Expect(fixture.overlay.presentedFPS == 0,
+                                   "simulator GPU completions must not fabricate unavailable presentation timing");
+#endif
                             [fixture dispose];
                             Expect(fixture.overlay.renderedFPS == 0,
                                    "stopping must clear old frame statistics");

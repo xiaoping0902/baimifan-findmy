@@ -34,4 +34,8 @@ inline std::string PlayerRow(int team, const char *nickname, bool showTeam, bool
 
 inline const char *Weapon(const char *name) { return name && *name ? name : "武器未知"; }
 inline const char *Hero(const char *name) { return name && *name ? name : "英雄未知"; }
+inline const char *ActorName(bool bot,const char *nickname,const char *specialNPC) {
+    if(bot)return specialNPC&&*specialNPC?specialNPC:"人机";
+    return nickname&&*nickname?nickname:"玩家未知";
+}
 }

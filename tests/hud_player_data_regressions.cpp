@@ -2,6 +2,8 @@
 #include "../app/Sources/Game/MFUEDataTable.h"
 #include "../app/Sources/Game/MFHeldWeapons.h"
 #include "../app/Sources/Game/MFHeroNames.h"
+#include "../app/Sources/Game/MFNPCNames.h"
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,6 +57,16 @@ int main() {
     CHECK(MFUEPlayerData::ReadUIN(ps, read) == 99887766, "UIN must come from ABasePlayerState::Uin at 0x490");
 
     put(actor + 0x390, ps); put(actor + 0xDC8, uint8_t(1));
+    put(actor+0xE60,uint8_t(1));
+    CHECK(MFUEPlayerData::ReadBotIdentity(actor,read),
+          "the SDK player-AI flag must survive a valid PlayerState pointer");
+    put(actor+0xE60,uint8_t(0));
+    CHECK(!MFUEPlayerData::ReadBotIdentity(actor,read),"an unflagged player with valid PlayerState remains human");
+    put(actor+0x390,uint64_t(0));
+    CHECK(MFUEPlayerData::ReadBotIdentity(actor,read),"a confirmed absent PlayerState identifies ordinary AI");
+    memory.erase(actor+0x390);
+    CHECK(!MFUEPlayerData::ReadBotIdentity(actor,read),"failed PlayerState reads must not change human identity to AI");
+    put(actor+0x390,ps);
     put(ps + 0x944, int32_t(3));
     CHECK(!MFUEPlayerData::IsFullyDead(actor, read), "ImpendingDeath must remain drawable even when the dead-info flag is set");
     put(ps + 0x944, int32_t(2));
@@ -184,6 +196,53 @@ int main() {
     CHECK(!MFHeroNames::Resolve(99999, nullptr) && !MFHeroNames::Resolve(0, nullptr) &&
           !MFHeroNames::Resolve(10010007, nullptr),
           "unknown hero IDs must not be guessed or matched by decimal suffix");
+    const char *specialNPCs[] = {u8"[卫队长官]赛伊德",u8"[地域黑鲨]雷斯",u8"[安全总监]德穆兰",
+        u8"[堕落王子]渡鸦",u8"[效能部长]哈德森",u8"加速部队特勤组",u8"哈夫克支援战车",
+        u8"阿萨拉死囚",u8"哈夫克自动战车"};
+    for (const char *name : specialNPCs)
+        CHECK(MFNPCNames::Resolve(true,{name}) == name,
+              "each supplied special NPC name must survive ordinary bot normalization");
+    CHECK(MFNPCNames::Resolve(true,{u8"赛伊德"}) == u8"[卫队长官]赛伊德" &&
+          MFNPCNames::Resolve(true,{u8"普通士兵", "123456"}) == u8"人机" &&
+          MFNPCNames::Resolve(true,{nullptr}) == u8"人机",
+          "known special aliases must resolve while unnamed or ordinary AI simply displays bot");
+    CHECK(MFNPCNames::Resolve(false,{u8"赛伊德"},1u<<4).empty(),
+          "a human's player-authored name must never be rewritten as an NPC");
+    CHECK(MFNPCNames::Resolve(true,{},1u<<4) == u8"盾兵" &&
+          MFNPCNames::Resolve(true,{},1u<<18) == u8"盾兵" &&
+          MFNPCNames::Resolve(true,{},1u<<4,u8"哈夫克盾兵") == u8"哈夫克盾兵",
+          "both SDK shield roles must display a shield role, preferring validated localized template names");
+    CHECK(MFNPCNames::Resolve(true,{u8"我是赛伊德的粉丝"}) == u8"人机",
+          "substring resemblance must not fabricate a special NPC identity");
+    const uint64_t npcClass = 0x100020000, aiClass = 0x100021000, npcChars = 0x100022000;
+    put(actor+0x08,npcClass); put(npcClass+0x40,aiClass);
+    auto className = [&](uint64_t cls) { return cls==aiClass ? std::string("DFMAICharacter") : std::string("NPCBlueprint"); };
+    CHECK(MFUEPlayerData::IsAICharacterClass(actor,read,className),
+          "AI subclass recognition must walk the SDK Class and SuperStruct fields");
+    put(npcClass+0x40,npcClass);
+    CHECK(!MFUEPlayerData::IsAICharacterClass(actor,read,className),
+          "a corrupt class hierarchy cycle must not grant access to AI-only fields");
+    put(actor+0x2E28,std::array<uint32_t,2>{1234,0});
+    put(actor+0x2E88,std::array<uint32_t,2>{4321,0});
+    const std::u16string npcTitle = u"赛伊德";
+    put(actor+0x2E58,MFUEPlayerData::ArrayHeader{npcChars,4,4});
+    memory[npcChars].resize(8); std::memcpy(memory[npcChars].data(),npcTitle.c_str(),8);
+    put(actor+0x3CE8,uint64_t(0x100023000));
+    put(actor+0x3DD0,MFUEPlayerData::ArrayHeader{npcChars+0x100,2,2});
+    memory[npcChars+0x100] = {1,4};
+    auto npc = MFUEPlayerData::ReadNPCIdentity(actor,true,true,read);
+    CHECK(npc.chosenName==npcTitle && npc.npcIndex==1234 && npc.characterIndex==4321 &&
+          npc.templateTable==0x100023000ULL && (npc.tagMask&(1u<<4)),
+          "SDK replicated NPC name, template, and byte-sized character tags must be read from their verified fields");
+    npc = MFUEPlayerData::ReadNPCIdentity(actor,true,false,read);
+    CHECK(!npc.templateTable && !npc.tagMask && npc.chosenName==npcTitle,
+          "an unverified subclass may only access the common DFMCharacter fields");
+    int npcHumanReads = 0;
+    npc = MFUEPlayerData::ReadNPCIdentity(actor,false,true,[&](uint64_t,void*,size_t){++npcHumanReads;return false;});
+    CHECK(npcHumanReads==0 && npc.chosenName.empty(),"human identity must not attempt NPC-only reads");
+    put(actor+0x3DD0,MFUEPlayerData::ArrayHeader{npcChars+0x100,99,99});
+    CHECK(!MFUEPlayerData::ReadNPCIdentity(actor,true,true,read).tagMask,
+          "invalid tag counts must not become a special role");
     put(actor + 0x18, textData);
     stringAt(0x470, u"威龙");
     put(textData + 0x48, MFUEPlayerData::ArrayHeader{nameData, 3, 3});

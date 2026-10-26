@@ -12,6 +12,9 @@ static const NSInteger kMFColorDefaultsVersion = 1;
 }
 @synthesize lootStatsXRatio = _lootStatsXRatio;
 @synthesize lootStatsYRatio = _lootStatsYRatio;
+@synthesize radarXRatio = _radarXRatio;
+@synthesize radarYRatio = _radarYRatio;
+@synthesize radarRadiusRatio = _radarRadiusRatio;
 
 + (instancetype)shared {
     static MFSettings *s;
@@ -45,6 +48,9 @@ static const NSInteger kMFColorDefaultsVersion = 1;
     _showDistance = YES;
     _showHealth = YES;
     _showRadar = NO;
+    self.radarXRatio = 0.125f;
+    self.radarYRatio = 400.0f / 1080.0f;
+    self.radarRadiusRatio = 150.0f / 1080.0f;
     _showFPS = YES;
 
     _showLoot = NO;
@@ -104,6 +110,15 @@ static const NSInteger kMFColorDefaultsVersion = 1;
 - (void)setLootStatsYRatio:(float)value {
     _lootStatsYRatio = std::isfinite(value) ? fmaxf(0, fminf(1, value)) : 0.18f;
 }
+- (void)setRadarXRatio:(float)value {
+    _radarXRatio = std::isfinite(value) ? fmaxf(0, fminf(1, value)) : 0.125f;
+}
+- (void)setRadarYRatio:(float)value {
+    _radarYRatio = std::isfinite(value) ? fmaxf(0, fminf(1, value)) : 400.0f / 1080.0f;
+}
+- (void)setRadarRadiusRatio:(float)value {
+    _radarRadiusRatio = std::isfinite(value) ? fmaxf(0.08f, fminf(0.25f, value)) : 150.0f / 1080.0f;
+}
 
 - (void)setColorInternal:(UIColor *)c slot:(MFColorSlot)s {
     _colors[@(s)] = c;
@@ -152,6 +167,8 @@ static const NSInteger kMFColorDefaultsVersion = 1;
         @[@"lootDrawDistance", @(_lootDrawDistance)],
         @[@"lootStatsXRatio", @(_lootStatsXRatio)],
         @[@"lootStatsYRatio", @(_lootStatsYRatio)],
+        @[@"radarXRatio", @(_radarXRatio)], @[@"radarYRatio", @(_radarYRatio)],
+        @[@"radarRadiusRatio", @(_radarRadiusRatio)],
         @[@"skeletonDistance", @(_skeletonDistance)],
         @[@"backEnemyRadius", @(_backEnemyRadius)],
         @[@"backEnemyDistance", @(_backEnemyDistance)],
@@ -202,6 +219,9 @@ static const NSInteger kMFColorDefaultsVersion = 1;
     LOAD_NUM(boxDrawDistance); LOAD_NUM(lootDrawDistance); LOAD_NUM(skeletonDistance);
     if (d[@"lootStatsXRatio"]) self.lootStatsXRatio = [d[@"lootStatsXRatio"] floatValue];
     if (d[@"lootStatsYRatio"]) self.lootStatsYRatio = [d[@"lootStatsYRatio"] floatValue];
+    if (d[@"radarXRatio"]) self.radarXRatio = [d[@"radarXRatio"] floatValue];
+    if (d[@"radarYRatio"]) self.radarYRatio = [d[@"radarYRatio"] floatValue];
+    if (d[@"radarRadiusRatio"]) self.radarRadiusRatio = [d[@"radarRadiusRatio"] floatValue];
     LOAD_NUM(backEnemyRadius); LOAD_NUM(backEnemyStyle);
     LOAD_NUM(backEnemyDistance);
     LOAD_NUM(fontPerson); LOAD_NUM(fontBox); LOAD_NUM(fontInfo); LOAD_NUM(fontArmor);

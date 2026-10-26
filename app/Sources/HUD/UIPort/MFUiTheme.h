@@ -21,7 +21,7 @@ static constexpr int kConfigurableLootCategoryIndices[kConfigurableLootItemCount
     2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14,
     17, 18, 19, 20 // 地铁独立开关: 军事宝箱17/保险箱18/超级物资箱19/海盗福利箱20
 };
-static constexpr int kNavTabCount = 4;
+static constexpr int kNavTabCount = 5;
 static constexpr int kUIBackgroundCount = 3;
 static constexpr float kUIBackgroundCycleSeconds = 10.0f;
 static constexpr float kUIBackgroundFadeSeconds = 0.7f;

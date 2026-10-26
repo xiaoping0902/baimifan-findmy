@@ -7,6 +7,7 @@ import unittest
 FONT = Path(__file__).resolve().parents[1] / "app/Resources/NotoSansSC-full.ttf"
 REQUIRED_TEXT = "小玉灵动岛真人机物资观战自身队伍人物干员名字头甲包刀枪血量未知距离统计0123456789:/·—m"
 REQUIRED_TEXT += "红狼威龙无名张姐疯医女医蝶养狗的老黑比特盾狗乌鲁鲁液氮露娜骇爪老头蜂医"
+REQUIRED_TEXT += "卫队长官赛伊德地域黑鲨雷斯安全总监德穆兰堕落王子渡鸦效能部长哈德森加速部队特勤组哈夫克支援战车阿萨拉死囚自动盾兵核清除喷火重甲首领狙击伞近战精英六档品质范围内暂无已读总值另有类箱…×"
 
 
 def font_tables(data):

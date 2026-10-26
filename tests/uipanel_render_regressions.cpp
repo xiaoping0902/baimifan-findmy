@@ -87,8 +87,8 @@ static void TestUsefulProductionPagesAndMinimize(void) {
     Frame(state, layout); Frame(state, layout);
     CHECK(std::count_if(hits.begin(), hits.end(), [](const Hit& hit) {
               return hit.name == "nav";
-          }) == 4, "navigation must expose the four implemented pages without inactive feature pages");
-    const int sequence[] = {1, 2, 3, 0, 3, 1, 0};
+          }) == 5, "navigation must expose five implemented pages including independent radar controls");
+    const int sequence[] = {1, 2, 3, 4, 0, 3, 1, 4, 0};
     for (int tab : sequence) {
         Click(state, layout, Item("nav", tab));
         CHECK(state.tab == tab, "each visible navigation button must select its production page");
@@ -161,21 +161,38 @@ static void TestIndependentLootControls(void) {
 }
 static void TestIndependentRadarControl(void) {
     UIState state;
-    state.expanded = true; state.anim = 1; state.tab = 1;
+    state.expanded = true; state.anim = 1; state.tab = 4;
     CHECK(!state.radarEnabled, "radar must start hidden in the simplified HUD");
     const UIPanelLayout layout = ComputePanelLayout(ImVec2(390,844), 1.0f);
     Frame(state, layout); Frame(state, layout);
     CHECK(std::none_of(hits.begin(), hits.end(), [](const Hit& hit) {
               return hit.name == "show_teammates";
           }), "the people page must not expose a teammate drawing control");
-    state.pageOffsets[1] = 190;
-    Frame(state, layout); Frame(state, layout);
     const bool bot = state.feat[DrawingBot], teammates = state.showTeammates;
     Click(state, layout, Item("radar_enabled"));
     CHECK(state.radarEnabled && state.feat[DrawingBot] == bot && state.showTeammates == teammates,
           "the radar row must enable only the radar preference");
     Click(state, layout, Item("radar_enabled"));
     CHECK(!state.radarEnabled, "the radar row must also disable its preference");
+    const float initialY=state.radarYRatio, initialSize=state.radarRadiusRatio;
+    Hit x=Item("radar_x"); x.origin.x+=x.size.x-8*layout.scale;x.size.x=0;
+    Click(state,layout,x);
+    CHECK(state.radarXRatio==1&&state.radarYRatio==initialY&&state.radarRadiusRatio==initialSize,
+          "radar horizontal control must reach the right edge without changing size or Y");
+    ScrollToBottom(state,layout);
+    Hit y=Item("radar_y");y.origin.x+=8*layout.scale;y.size.x=0;
+    Click(state,layout,y);
+    CHECK(state.radarYRatio==0&&state.radarXRatio==1,
+          "radar vertical control must reach the top edge independently");
+    Hit size=Item("radar_size");size.origin.x+=size.size.x-8*layout.scale;size.size.x=0;
+    Click(state,layout,size);
+    CHECK(std::fabs(state.radarRadiusRatio-.25f)<.001f&&!state.radarEnabled,
+          "radar size must reach its supported maximum without enabling the radar");
+    state.configDirty=false;Click(state,layout,Item("radar_reset"));
+    CHECK(std::fabs(state.radarXRatio-.125f)<.001f&&
+          std::fabs(state.radarYRatio-400.0f/1080.0f)<.001f&&
+          std::fabs(state.radarRadiusRatio-150.0f/1080.0f)<.001f&&state.configDirty,
+          "radar reset must restore all placement values and request persistence");
 }
 static void TestMovableIndependentLootStatistics(void) {
     UIState state;

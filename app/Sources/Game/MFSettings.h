@@ -57,6 +57,10 @@ typedef NS_ENUM(NSInteger, MFBackEnemyStyle) {
 @property (nonatomic, assign) BOOL showDistance;       // 距离
 @property (nonatomic, assign) BOOL showHealth;         // 血量
 @property (nonatomic, assign) BOOL showRadar;          // 雷达，独立开关
+/// Radar center and radius as screen ratios; radius uses the shorter side.
+@property (nonatomic, assign) float radarXRatio;
+@property (nonatomic, assign) float radarYRatio;
+@property (nonatomic, assign) float radarRadiusRatio;
 @property (nonatomic, assign) BOOL showFPS;            // 左上角悬浮层实际呈现帧率
 
 @property (nonatomic, assign) BOOL showLoot;           // 物资

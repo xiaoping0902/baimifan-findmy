@@ -9,9 +9,10 @@
 static constexpr ImU32 kTarget = IM_COL32(240, 25, 125, 255);
 struct Bounds { float l = INFINITY, t = INFINITY, r = -INFINITY, b = -INFINITY; int count = 0; };
 
-static ImDrawData *Frame(const MFRadarConfig &config, const MFRadarBlip *blip) {
+static ImDrawData *Frame(const MFRadarConfig &config, const MFRadarBlip *blip,
+                         ImVec2 screen = ImVec2(640,720)) {
     ImGuiIO &io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(640, 720); io.DeltaTime = 1.0f / 60.0f;
+    io.DisplaySize = screen; io.DeltaTime = 1.0f / 60.0f;
     ImGui::NewFrame();
     MFRadarRender(ImGui::GetForegroundDrawList(), io.DisplaySize, &config, blip, blip ? 1 : 0);
     ImGui::Render();
@@ -95,6 +96,28 @@ int main() {
           "an implausible finite heading must not create a direction marker");
     cfg.yawDeg = NAN;
     CHECK(Frame(cfg, &blip)->TotalVtxCount == 0, "unknown camera orientation must suppress the radar");
+    cfg.yawDeg=0;blip.x=12000;blip.y=0;blip.yawDeg=0;blip.distM=120;
+    const ImVec2 screens[]={{390,844},{844,390},{768,1024},{1024,768}};
+    for(ImVec2 screen:screens)for(float x:{0.0f,1.0f})for(float y:{0.0f,1.0f})
+        for(float radius:{.08f,.25f}){
+            cfg.xRatio=x;cfg.yRatio=y;cfg.radiusRatio=radius;
+            ImDrawData *data=Frame(cfg,&blip,screen);
+            CHECK(data->TotalVtxCount>100,"every radar size/anchor must still draw its full contents");
+            for(int i=0;i<data->CmdLists.Size;++i)for(const ImDrawVert& v:data->CmdLists[i]->VtxBuffer)
+                CHECK(std::isfinite(v.pos.x)&&std::isfinite(v.pos.y)&&v.pos.x>=0&&v.pos.y>=0&&
+                      v.pos.x<=screen.x&&v.pos.y<=screen.y,
+                      "moved radar rings, target headings and distance labels must all stay inside the viewport");
+        }
+    cfg.xRatio=cfg.yRatio=.5f;cfg.radiusRatio=.08f;
+    const MFRALayout small=MFRALayoutFor(ImVec2(640,720),&cfg);
+    cfg.radiusRatio=.25f;
+    const MFRALayout large=MFRALayoutFor(ImVec2(640,720),&cfg);
+    CHECK(large.radius>small.radius*3&&large.center.x==small.center.x&&large.center.y==small.center.y,
+          "changing radar size must change its radius without moving its requested center");
+    cfg.xRatio=1;cfg.yRatio=0;
+    const MFRALayout moved=MFRALayoutFor(ImVec2(640,720),&cfg);
+    CHECK(moved.center.x>large.center.x&&moved.center.y<large.center.y,
+          "horizontal and vertical settings must independently move the production radar layout");
     ImGui::DestroyContext();
     std::puts("PASS: production radar orientation, unknown headings, range and marker bounds");
 }
