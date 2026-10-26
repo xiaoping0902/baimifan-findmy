@@ -507,19 +507,44 @@ static ImU32 MFQualityColor(int level, MFSettings *st) {
          * 所以这里可以每帧直接读 —— 框跟着准星走，不会一卡一卡。
          */
         NSDictionary *frame = [calibrated readFrameWithSize:size];
-        if ([frame[@"cameraOK"] boolValue]) {
-            NSDictionary *cd = frame[@"camera"];
-            MFCamera cam = {0};
-            cam.x     = [cd[@"x"] floatValue];
-            cam.y     = [cd[@"y"] floatValue];
-            cam.z     = [cd[@"z"] floatValue];
-            cam.pitch = [cd[@"pitch"] floatValue];
-            cam.yaw   = [cd[@"yaw"] floatValue];
-            cam.roll  = [cd[@"roll"] floatValue];
-            cam.fov   = [cd[@"fov"] floatValue];
+        NSArray<MFEntity *> *calEnts = frame[@"entities"] ?: @[];
+        NSArray<MFEntity *> *calLoot = frame[@"loot"] ?: @[];
+        NSDictionary *cd = frame[@"camera"];
+        MFCamera cam = {0};
+        cam.x     = [cd[@"x"] floatValue];
+        cam.y     = [cd[@"y"] floatValue];
+        cam.z     = [cd[@"z"] floatValue];
+        cam.pitch = [cd[@"pitch"] floatValue];
+        cam.yaw   = [cd[@"yaw"] floatValue];
+        cam.roll  = [cd[@"roll"] floatValue];
+        cam.fov   = [cd[@"fov"] floatValue];
+
+        if ([frame[@"cameraOK"] boolValue] && (calEnts.count || calLoot.count)) {
             if (outCamera) *outCamera = cam;
-            if (outEntities) *outEntities = frame[@"entities"] ?: @[];
-            if (outLoot) *outLoot = frame[@"loot"] ?: @[];
+            if (outEntities) *outEntities = calEnts;
+            if (outLoot) *outLoot = calLoot;
+            if (outSource) *outSource = MFDrawSourceCalibrated;
+            return YES;
+        }
+
+        /*
+         * [M5.209] 校准链「有相机、零目标」= 基址大概率已过期。
+         *
+         * 换局后 readCamera 可能从旧地址凑出看似合法的数值，于是 cameraOK 为 YES，
+         * 但 entityArrayBase / lootArrayBase 指向的是上一局的 Actors 数组。
+         * 旧代码在这里直接 return YES，于是自动 UE4 链永远轮不到 —— 表现就是
+         * "相机还在但不画东西"。现在让自动链先试一次，它能从 GWorld 重新解出新局。
+         */
+        if ([frame[@"cameraOK"] boolValue]) {
+            if ([self acquireUE4FrameWithSize:size camera:outCamera entities:outEntities
+                                         loot:outLoot source:outSource]) {
+                [self noteUE4Issue:@"校准链有相机但零目标（基址可能已过期），已切换到自动链"];
+                return YES;
+            }
+            // 自动链也出不来：按校准结果交差（相机有效、本局确实没有目标）
+            if (outCamera) *outCamera = cam;
+            if (outEntities) *outEntities = calEnts;
+            if (outLoot) *outLoot = calLoot;
             if (outSource) *outSource = MFDrawSourceCalibrated;
             return YES;
         }

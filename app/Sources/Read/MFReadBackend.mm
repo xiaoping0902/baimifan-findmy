@@ -40,6 +40,7 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
 @implementation MFReadBackend {
     uint64_t _readCount;
     uint64_t _failCount;
+    uint64_t _observedWorld;
 }
 
 + (instancetype)shared {
@@ -121,7 +122,24 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
         h *= 1099511628211ULL;
     }
     h ^= self.kfdRoot;
+    // [M5.209] 换局也要换令牌：世界指针变过就把世代折进来，
+    // 让物品表 / 装备表 / 名字表跟着作废（同一进程、不同一局）。
+    h ^= (_matchEpoch * 0x9E3779B97F4A7C15ULL);
     return h ? h : 1;   // 0 预留给"未绑定"
+}
+
+- (void)noteWorldPointer:(uint64_t)world {
+    // 只接受用户态合法指针：换局瞬间读到 0 / 半初始化值不算换局
+    if (world < 0x100000001ULL || world >= 0x2F00000000ULL) return;
+    if (_observedWorld == 0) {
+        _observedWorld = world;      // 第一次见到世界指针：只记世代基线
+        return;
+    }
+    if (world == _observedWorld) return;
+    _observedWorld = world;
+    _matchEpoch += 1;
+    NSLog(@"[MF][Read] 对局切换：世界指针 → 0x%llx，世代 %llu（会话缓存作废）",
+          (unsigned long long)world, (unsigned long long)_matchEpoch);
 }
 
 - (void)setTargetTaskPort:(uint32_t)port {

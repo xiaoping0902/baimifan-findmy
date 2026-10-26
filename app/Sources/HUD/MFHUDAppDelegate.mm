@@ -1299,6 +1299,9 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
                 : [NSString stringWithUTF8String:binding.target.identity.c_str()],
             @"taskPort": @(binding.port), @"libBase": @(binding.base),
             @"kfdRoot": @(backend.kfdRoot), @"kfdPid": @(backend.kfdPid),
+            /* [M5.209] 对局世代：换局时 +1。现场看它有没有跟上，就知道
+             * "换局没被识别"这个 bug 是不是还活着。 */
+            @"matchEpoch": @(backend.matchEpoch),
             @"sessionToken": @(backend.sessionToken),
             @"module": [NSString stringWithUTF8String:binding.module.c_str()],
             @"portAttempts": @(binding.portAttempts), @"moduleAttempts": @(binding.moduleAttempts),

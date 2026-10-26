@@ -59,6 +59,21 @@ NS_ASSUME_NONNULL_BEGIN
 /// task port；端口退场后改用它，语义不变（同一进程实例 = 同一令牌）。
 @property (nonatomic, readonly) uint64_t sessionToken;
 
+/// 对局世代：世界指针（GWorld）变化时 +1，用来判定「打完了，进下一局」。
+///
+/// 为什么需要它：进程还是那个进程，pid/路径/启动时间全没变，但换局会把
+/// UWorld / ULevel / Actors 整套换掉。任何按"进程实例"缓存的绝对地址在换局后
+/// 都指向旧对象，继续用就会读到垃圾 —— 表现出来就是"第一局好好的，第二局
+/// 不画了，还卡"。把世界指针变化折进会话令牌，所有按会话隔离的缓存
+/// （物品表 / 装备表 / 名字表）会自动失效。
+@property (nonatomic, readonly) uint64_t matchEpoch;
+
+/// 报告当前世界指针。地址非法（0 或不在用户态窗口内）时忽略，不推进世代。
+///
+/// 换局瞬间 GWorld 可能短暂为 0 或半初始化，所以只有读到合法指针才比较，
+/// 避免加载动画那一两秒里把缓存反复清空。
+- (void)noteWorldPointer:(uint64_t)world;
+
 /// 统计
 @property (nonatomic, readonly) uint64_t readCount;
 @property (nonatomic, readonly) uint64_t failCount;

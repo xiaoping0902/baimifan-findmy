@@ -247,11 +247,19 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     int count = [rb readInt32:base + off.current.entityCountOffset];
     if (count <= 0 || count > 4096) return out;      // 防越界
 
+    /*
+     * [M5.209] 连续读空就熔断。
+     *
+     * 正常的局里，"整段指针全是无效值"撑不到几十个；一旦连续这么多次读不出东西，
+     * 基本可以断定这个基址已经失效（典型场景：换局了但没被识别）。
+     * 继续跑满 count 次只会把渲染线程按在几千次无效内核读上 —— 那正是卡死。
+     */
+    int consecutiveMisses = 0;
     for (int i = 0; i < count; i++) {
         @autoreleasepool {
             uint64_t itemPtrAddr = base + 0x8 * (uint64_t)i;   // 指针数组，真机校准
             uint64_t item = [rb readU64:itemPtrAddr];
-            if (!item) continue;
+            if (!item) { if (++consecutiveMisses > 64) break; continue; }
 
             MFEntity *e = [[MFEntity alloc] init];
             e.address = item;
@@ -259,8 +267,11 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             // 已证：坐标在 +0x220（3 float）
             float pos[3] = {0};
             if (![rb readFloat3:item + off.current.entityPositionOffset out:pos]) {
-                continue;        /* [M5.155] 坐标读不到就不产出实体（以前会画一个空气框） */
+                /* [M5.155] 坐标读不到就不产出实体（以前会画一个空气框） */
+                if (++consecutiveMisses > 64) break;
+                continue;
             }
+            consecutiveMisses = 0;
             e.worldX = pos[0]; e.worldY = pos[1]; e.worldZ = pos[2];
 
             /*
@@ -502,10 +513,12 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
     MFSettings *st = [MFSettings shared];
 
+    /* [M5.209] 与实体循环同样的熔断：基址失效时不要跑满 count 次无效读 */
+    int consecutiveMisses = 0;
     for (int i = 0; i < count; i++) {
         @autoreleasepool {
             uint64_t item = [rb readU64:base + 0x8 * (uint64_t)i];
-            if (!item) continue;
+            if (!item) { if (++consecutiveMisses > 64) break; continue; }
 
             MFEntity *e = [[MFEntity alloc] init];
             e.address = item;
@@ -515,6 +528,7 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
             int32_t value = 0;
             if (off.current.lootValueOffset &&
                 ![rb readRemote:item + off.current.lootValueOffset into:&value size:4]) {
+                if (++consecutiveMisses > 64) break;
                 continue;
             }
             if (value == 0) continue;                 // 原实现：价值为 0 直接跳过
@@ -529,8 +543,10 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
 
             float pos[3] = {0};
             if (![rb readFloat3:item + off.current.entityPositionOffset out:pos]) {
+                if (++consecutiveMisses > 64) break;
                 continue;
             }
+            consecutiveMisses = 0;
             e.worldX = pos[0]; e.worldY = pos[1]; e.worldZ = pos[2];
 
             float cam[3] = {camera.x, camera.y, camera.z};
@@ -547,9 +563,47 @@ static BOOL MFReaderIsUnsignedInteger(id value) {
     return out;
 }
 
+#pragma mark - 对局切换
+
+/*
+ * [M5.209] 判断是否换到了下一局，并把过期的绝对基址作废。
+ *
+ * 为什么必须有这一步：
+ *   现在的缓存隔离是按「进程实例」算的（pid | 路径 | 启动时间）。换局时
+ *   进程没变、启动时间没变，令牌就不变，于是 rootObjectBase / entityArrayBase /
+ *   lootArrayBase 这些绝对地址仍然被当成有效 —— 但它们指向的 UWorld / ULevel /
+ *   Actors 已经被游戏整套换掉了。
+ *
+ *   后果不是"读不到"这么温和：
+ *     · readCamera 可能从旧地址凑出一组看似合法的相机数值 → cameraOK = YES
+ *     · 绘制层因此不会回退到自动 UE4 链，直接用了失效的实体数组
+ *     · 实体循环把旧数组当指针数组逐个解引用，几千次无效内核读 → 卡顿甚至卡死
+ *   表现出来正是「打完一局进下一局，画面没了、HUD 也卡住」。
+ *
+ * 判据用 GWorld 静态槽读出的世界指针：换局必换 UWorld，而 libBase 不变，
+ * 所以这个槽是干净的换局信号。非法值（0 / 窗口外）由 noteWorldPointer 忽略，
+ * 加载动画期间的瞬时 0 不会误判。
+ */
+- (BOOL)refreshMatchEpoch {
+    MFReadBackend *rb = [MFReadBackend shared];
+    MFUEReader *ue = [MFUEReader shared];
+    const uint64_t lib = ue.libBase;
+    if (lib == 0) return NO;
+
+    // GWorld 静态槽：libBase + gworldStaticOffset（与 MFUEReader.resolve 同一来源）
+    const uint64_t world = [rb readU64:lib + ue.profile.gworldStaticOffset];
+    const uint64_t before = rb.matchEpoch;
+    [rb noteWorldPointer:world];
+    if (rb.matchEpoch == before) return NO;
+
+    [self clearBasesWithStatus:@"局已切换（世界指针变化，旧绝对基址作废；自动链会重新解析）"];
+    return YES;
+}
+
 #pragma mark - 一次性
 
 - (NSDictionary *)readFrameWithSize:(CGSize)size {
+    [self refreshMatchEpoch];
     MFCamera cam = {0};
     BOOL ok = [self readCamera:&cam];
     MFScreen sc = [MFProjection screenWithSize:size fov:cam.fov];
