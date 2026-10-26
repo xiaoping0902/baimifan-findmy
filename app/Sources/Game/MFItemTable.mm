@@ -115,6 +115,9 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
     MFItemMapLayout _mapLayout;
     uint64_t _gameItem;
     uint64_t _rowStructExpected;
+    uint32_t _cachedTask;
+    uint64_t _cachedBase;
+    BOOL _hasSession;
 }
 
 + (instancetype)shared {
@@ -132,9 +135,19 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
     return self;
 }
 
-- (BOOL)ready { return _ready; }
-- (NSUInteger)rowCount { return _rowCount; }
-- (NSString *)probeReport { return _report; }
+- (void)synchronizeSession {
+    const uint32_t task = [MFReadBackend shared].targetTaskPort;
+    const uint64_t base = [MFUEReader shared].libBase;
+    if (_hasSession && _cachedTask == task && _cachedBase == base) return;
+    _hasSession = YES;
+    _cachedTask = task;
+    _cachedBase = base;
+    [self reset];
+}
+
+- (BOOL)ready { [self synchronizeSession]; return _ready; }
+- (NSUInteger)rowCount { [self synchronizeSession]; return _rowCount; }
+- (NSString *)probeReport { [self synchronizeSession]; return _report; }
 
 - (void)reset {
     _ready = NO;
@@ -191,6 +204,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 #pragma mark 加载
 
 - (BOOL)loadIfNeeded {
+    [self synchronizeSession];
     if (_ready) return YES;
     [_report setString:@""];
 
@@ -349,6 +363,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 - (BOOL)lookupComparisonIndex:(uint32_t)comparisonIndex
                        number:(uint32_t)number
                          row:(MFItemRow *_Nullable *_Nullable)outRow {
+    [self synchronizeSession];
     if (!_ready || comparisonIndex == 0) return NO;
 
     // 主键：先只按 comparisonIndex 找（大多数物品 number 都是 0）
@@ -408,6 +423,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 }
 
 - (BOOL)lookupItemIdString:(NSString *)itemId row:(MFItemRow *_Nullable *_Nullable)outRow {
+    [self synchronizeSession];
     if (!_ready || itemId.length == 0 || !self.nameLookup) return NO;
 
     // 反向遍历成本高，这里只在诊断时用：逐行解名比对
@@ -426,6 +442,7 @@ static inline uint64_t MFItemReadU64(const uint8_t *p) { uint64_t v = 0; memcpy(
 #pragma mark 诊断
 
 - (NSString *)sampleReport:(NSUInteger)limit {
+    [self synchronizeSession];
     if (!_ready) {
         return [NSString stringWithFormat:@"[物品表] 未就绪\n%@", _report];
     }

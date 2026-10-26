@@ -17,6 +17,7 @@
 #include <cstring>
 
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } } while (0)
+#include "loot_cache_regressions.h"
 
 @interface MFDrawingLayer (RegressionEntryPoint)
 - (void)overlayBuildUI:(MFImGuiContext *)context overlay:(MFOverlayView *)overlay;
@@ -210,6 +211,7 @@ static void TestSyntheticDrawing(void) {
     Method remoteRead = class_getInstanceMethod(MFReadBackend.class, @selector(readRemote:into:size:));
     CHECK(remoteRead != NULL, "production memory boundary must exist for the fail-fast guard");
     IMP originalRemoteRead = method_setImplementation(remoteRead, (IMP)RejectRemoteRead);
+    TestLootSessionCaches();
 
     MFSettings *settings = [MFSettings shared];
     [settings resetToDefaults];

@@ -7,7 +7,7 @@
 //
 //    读 1  actor + 0x0FB8，0x70 字节   → PickupBase 头（来源/物品名/数量/耐久）
 //    读 2  actor + 0x1248，0x40 字节   → ItemID.Category / Sequence / ItemCount
-//    读 3  actor + 0x1768，0x40 字节   → ArchiveInfo.EquipmentValue / StarNum
+//    读 3  actor + 0x1768，0x48 字节   → ArchiveInfo.EquipmentValue / StarNum
 //
 //  类型、数量、来源和星级各自做值域校验；ArchiveInfo 只在物品主类型
 //  已成立时读取。其 EquipmentValue 是档案字段，不能保证每个地面物资都有值。
@@ -29,6 +29,7 @@
 #include "MFUEItemData.h"
 #import "MFItemTable.h"      /* [M5.86] 物品定义表：等级/价值/名字的真实来源 */
 #import "MFUEOffsets.h"
+#import "MFUEReader.h"
 #import "../Read/MFReadBackend.h"
 #import <QuartzCore/QuartzCore.h>   /* CACurrentMediaTime（缓存 TTL 计时） */
 #import <string.h>
@@ -180,6 +181,9 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
     NSMutableDictionary<NSNumber *, NSNumber *>   *_itemsCacheAt;
     /// 物品表加载失败后的重试节流（每次重试要几次远程读，不能每帧做）
     CFTimeInterval _tableRetryAt;
+    uint32_t _cachedTask;
+    uint64_t _cachedBase;
+    BOOL _hasSession;
 }
 
 + (instancetype)shared {
@@ -196,6 +200,20 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
         _itemsCacheAt = [NSMutableDictionary dictionary];
     }
     return self;
+}
+
+- (void)synchronizeSession {
+    const uint32_t task = [MFReadBackend shared].targetTaskPort;
+    const uint64_t base = [MFUEReader shared].libBase;
+    if (_hasSession && _cachedTask == task && _cachedBase == base) return;
+    _hasSession = YES;
+    _cachedTask = task;
+    _cachedBase = base;
+    [_cache removeAllObjects];
+    [_cacheAt removeAllObjects];
+    [_itemsCache removeAllObjects];
+    [_itemsCacheAt removeAllObjects];
+    _tableRetryAt = 0;
 }
 
 #pragma mark 值域校验
@@ -237,6 +255,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
                               className:(NSString *_Nullable)className
                                 isActor:(BOOL *_Nullable)outIsActor
                          verifiedPickup:(BOOL)verifiedPickup {
+    [self synchronizeSession];
     if (outIsActor) *outIsActor = NO;
     if (!MFUEIsValidPtr(actor)) return nil;
 
@@ -475,6 +494,7 @@ static inline uint32_t MFGearReadU32(const uint8_t *p) {
 #pragma mark 容器内容
 
 - (NSArray<MFGearInfo *> *)containedItemsForActor:(uint64_t)actor {
+    [self synchronizeSession];
     if (!MFUEIsValidPtr(actor)) return @[];
 
     MFReadBackend *rb = [MFReadBackend shared];
