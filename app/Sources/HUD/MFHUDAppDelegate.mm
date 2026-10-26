@@ -1315,6 +1315,14 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
          */
         @"kernelWrites": @{ @"count": @(mf_kernel_write_count()),
             @"bytes": @(mf_kernel_write_bytes()) },
+        /*
+         * [M5.208] 触发与清痕：kopen 走完就意味着 libkfd 内部已执行 puaf_cleanup
+         * （还原被改坏的页表项伪装）。cleanup=true + openMs>=0 合起来才是
+         * "这一轮真的触发过、并且清过"的证据 —— 单看 UI 上的"已初始化"不够。
+         */
+        @"kernelInit": @{ @"cleanup": @(mf_kernel_cleanup_done() == 1),
+            @"openMs": @(mf_kernel_open_ms()),
+            @"puafPages": @(kernel.puafPages) },
         @"feed": @{ @"running": @(feed.running), @"packetCount": @(packets),
             @"errorCount": @(feed.errorCount), @"fresh": @(feed.fresh),
             @"lastPacketAge": packets && isfinite(age) ? @(age) : NSNull.null,

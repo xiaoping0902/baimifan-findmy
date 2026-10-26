@@ -33,6 +33,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
+/* [M5.208] struct timeval / gettimeofday 用于给 kopen（含内部 puaf_cleanup）计时 */
+#include <sys/time.h>
 
 /*
  * [M5.89] TF_PLATFORM 段直接调 task_for_pid / mach_port_deallocate。
@@ -1551,6 +1553,10 @@ out:
 static volatile uint64_t g_kernel_write_count = 0;
 static volatile uint64_t g_kernel_write_bytes = 0;
 
+/* [M5.208] 内核初始化（触发 + 内部清痕）的耗时与完成标志。-1 / 0 表示没走通。 */
+static double g_kopen_ms = -1.0;
+static int g_cleanup_done = 0;
+
 uint64_t mf_kernel_write_count(void) { return g_kernel_write_count; }
 uint64_t mf_kernel_write_bytes(void) { return g_kernel_write_bytes; }
 
@@ -1665,17 +1671,40 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
 
 int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
 {
+    /*
+     * [M5.208] 记录"触发 → 清痕"这一段到底发生了没有、花了多久。
+     *
+     * 为什么在这里计时：puaf_cleanup 是 libkfd 在 kopen 内部（info_run 之后）
+     * 自己做完的（libkfd.h:338），我们拿不到那一步的独立计时，但可以证明
+     * 整个 kopen 走完了 —— 走完就意味着 cleanup 执行过。把它作为被动状态里的
+     * 一条现场证据，而不是让后来者只看到一句注释。
+     */
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
     mf_lock_kernel();
     int rc = mf_kopen_locked(puaf_pages, puaf_method, kread_method, kwrite_method);
     mf_unlock_kernel();
+    gettimeofday(&t1, NULL);
+    if (rc == 0) {
+        g_kopen_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+        g_cleanup_done = 1;      /* kopen 返回 0 = puaf_cleanup 已在内部执行 */
+    } else {
+        g_kopen_ms = -1.0;
+        g_cleanup_done = 0;
+    }
     return rc;
 }
+
+double mf_kernel_open_ms(void) { return g_kopen_ms; }
+int mf_kernel_cleanup_done(void) { return g_cleanup_done; }
 
 void mf_kclose(void)
 {
     mf_lock_kernel();
     mf_kclose_locked();
     mf_unlock_kernel();
+    /* [M5.208] 通道关闭：痕迹清理状态不再成立，重新初始化时再置位。 */
+    g_cleanup_done = 0;
 }
 
 int mf_kread(uint64_t kaddr, void *uaddr, uint64_t size)

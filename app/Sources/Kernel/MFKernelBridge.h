@@ -322,6 +322,23 @@ uint64_t mf_kernel_write_count(void);
 uint64_t mf_kernel_write_bytes(void);
 void mf_kernel_write_audit_reset(void);
 
+/*
+ * [M5.208] 内核初始化与痕迹清理的可观测证据。
+ *
+ * kfd 的漏洞触发是一次性的，触发后 libkfd 会在 kopen 内部（info_run 之后）
+ * 立刻执行 puaf_cleanup，把被改坏的 vm_map_entry 链接与红黑树指针还原 ——
+ * 也就是「焊完把焊渣清掉」。这一步我们没法单独计时，但 kopen 返回 0
+ * 就说明它跑完了，所以这里暴露两件事：
+ *   · mf_kernel_open_ms()     —— 整个 kopen（含内部 cleanup）耗时，毫秒；
+ *                                 -1 表示还没成功跑过一次
+ *   · mf_kernel_cleanup_done() —— 1 = 本次会话已走过「触发 + 清痕」
+ *
+ * 注意：清理的是页表项伪装，不是被重叠的物理页 —— 后者是读写通道本体，
+ * 只有 kclose 时的 puaf_free 才释放。别把它当痕迹清掉，清了就读不了。
+ */
+double mf_kernel_open_ms(void);
+int mf_kernel_cleanup_done(void);
+
 /* ------------------------------------------------------------------ */
 /* 诊断                                                                */
 /* ------------------------------------------------------------------ */
