@@ -2196,6 +2196,87 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
  * mf_kread32 —— 都依赖递归锁，不能改成普通互斥量。
  */
 
+/*
+ * [M5.237] kopen 成功后立刻把"这台机器上 kfd 实际用的那套地址"落盘。
+ *
+ * 为什么必须做：16.6.1/T8020 没有任何公开验证过的 offsets（kfd_offsets 的 A12
+ * 只到 16.6b1），我们靠运行时 patchfinder 现场扫。真机已经出现三种不同的 panic
+ * （PVH locked / copy_validate / Unexpected fault in kernel static region），
+ * 说明 kopen 返回 0 只代表"漏洞打通"，不代表"落点正确"。要判断到底是哪几个值
+ * 错了，只能把这些值原样打出来：
+ *   · patchfinder 填进 dynamic_info 的 8 个 kernelcache 地址；
+ *   · proc/task/thread 的那几个偏移（其中 thread__thread_id、
+ *     proc__object_size 在我们表里都是 0 —— 这两个最可疑）；
+ *   · ttbr0/ttbr1、ptov 表项、shared_page；
+ *   · 自检：kbase 处能不能读回 0xfeedfacf（这一条最硬）。
+ * 只读、只写文件，不做任何写操作，也不改变流程。
+ */
+static void mf_write_kfd_offsets_snapshot(uint64_t pages, int puaf_method,
+                                          int kread_method, int kwrite_method)
+{
+    struct kfd *kfd = g_kfd;      /* dynamic_info() 宏按这个名字展开 */
+
+    if (g_kfd == NULL) {
+        return;
+    }
+
+    FILE *f = fopen("/var/mobile/Media/mf-debug/mf-kfd-offsets.txt", "w");
+    if (f == NULL) {
+        return;
+    }
+
+    uint32_t magic = 0;
+    int magic_rc = mf_kread32(mf_get_kbase(), &magic);
+    uint64_t kernproc = mf_get_kernel_proc();
+    uint32_t kernproc_pid = 0;
+    int pid_rc = mf_kread32(kernproc + 0x60u, &kernproc_pid);
+
+    fprintf(f, "# kfd runtime snapshot (M5.237)\n");
+    fprintf(f, "slide=%#llx kbase=%#llx kbase_magic_rc=%d kbase_magic=%#x\n",
+            (unsigned long long)g_kfd->perf.kernel_slide,
+            (unsigned long long)mf_get_kbase(), magic_rc, magic);
+    fprintf(f, "dyn cdevsw=%#llx gPhysBase=%#llx gPhysSize=%#llx gVirtBase=%#llx\n",
+            (unsigned long long)dynamic_info(kernelcache__cdevsw),
+            (unsigned long long)dynamic_info(kernelcache__gPhysBase),
+            (unsigned long long)dynamic_info(kernelcache__gPhysSize),
+            (unsigned long long)dynamic_info(kernelcache__gVirtBase));
+    fprintf(f, "dyn perfmon_open=%#llx perfmon_devs=%#llx ptov=%#llx vn_kqfilter=%#llx\n",
+            (unsigned long long)dynamic_info(kernelcache__perfmon_dev_open),
+            (unsigned long long)dynamic_info(kernelcache__perfmon_devices),
+            (unsigned long long)dynamic_info(kernelcache__ptov_table),
+            (unsigned long long)dynamic_info(kernelcache__vn_kqfilter));
+    fprintf(f, "off list_prev=%#llx pid=%#llx fd_ofiles=%#llx proc_size=%#llx task_map=%#llx thread_id=%#llx\n",
+            (unsigned long long)dynamic_info(proc__p_list__le_prev),
+            (unsigned long long)dynamic_info(proc__p_pid),
+            (unsigned long long)dynamic_info(proc__p_fd__fd_ofiles),
+            (unsigned long long)dynamic_info(proc__object_size),
+            (unsigned long long)dynamic_info(task__map),
+            (unsigned long long)dynamic_info(thread__thread_id));
+    fprintf(f, "ttbr0 pa=%#llx va=%#llx ttbr1 pa=%#llx va=%#llx\n",
+            (unsigned long long)g_kfd->perf.ttbr[0].pa,
+            (unsigned long long)g_kfd->perf.ttbr[0].va,
+            (unsigned long long)g_kfd->perf.ttbr[1].pa,
+            (unsigned long long)g_kfd->perf.ttbr[1].va);
+    fprintf(f, "perf gVirtBase=%#llx gPhysBase=%#llx gPhysSize=%#llx shared=%#llx/%#llx\n",
+            (unsigned long long)g_kfd->perf.gVirtBase,
+            (unsigned long long)g_kfd->perf.gPhysBase,
+            (unsigned long long)g_kfd->perf.gPhysSize,
+            (unsigned long long)g_kfd->perf.shared_page.kaddr,
+            (unsigned long long)g_kfd->perf.shared_page.paddr);
+    fprintf(f, "info current_proc=%#llx current_task=%#llx current_map=%#llx current_pmap=%#llx\n",
+            (unsigned long long)g_kfd->info.kaddr.current_proc,
+            (unsigned long long)g_kfd->info.kaddr.current_task,
+            (unsigned long long)g_kfd->info.kaddr.current_map,
+            (unsigned long long)g_kfd->info.kaddr.current_pmap);
+    fprintf(f, "kernel_proc=%#llx pid_rc=%d pid=%u\n",
+            (unsigned long long)kernproc, pid_rc, kernproc_pid);
+    fprintf(f, "puaf_pages=%llu/%llu method=%d kread=%d kwrite=%d\n",
+            (unsigned long long)pages,
+            (unsigned long long)g_kfd->puaf.number_of_puaf_pages,
+            puaf_method, kread_method, kwrite_method);
+    fclose(f);
+}
+
 int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_method)
 {
     /*
@@ -2215,6 +2296,8 @@ int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_
     if (rc == 0) {
         g_kopen_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
         g_cleanup_done = 1;      /* kopen 返回 0 = puaf_cleanup 已在内部执行 */
+        /* [M5.237] 立刻落盘这台机器实际用的地址，供离线核对 */
+        mf_write_kfd_offsets_snapshot(puaf_pages, puaf_method, kread_method, kwrite_method);
     } else {
         g_kopen_ms = -1.0;
         g_cleanup_done = 0;
