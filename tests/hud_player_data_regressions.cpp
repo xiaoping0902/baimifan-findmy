@@ -34,7 +34,17 @@ int main() {
     for (auto family : {0x07d34b9fu, 0x462504d2u, 0x1b588bb3u, 0xda33d83du, 0x8765edeau})
         CHECK(mf_device_configuration(16,6,1,family,6*gb).status == MF_DEVICE_SUPPORTED,
               "the existing arm64e offset family must accept A12 through A16 and M1/M2 chips");
-    for (auto v : {std::array<int,3>{14,8,0}, {15,8,0}, {16,6,2}, {16,7,0}, {17,0,0}, {16,-1,0}}) {
+    /* [M5.229] 15.x 现在放行：链形状由 MFChainCalib 覆盖，成不成由 kopen 的返回值裁决。
+     * 但"放行"只等于 method 0（physpuppet），不许借用 16.4+ 的 smith/landa。 */
+    for (auto v : {std::array<int,3>{15,0,0}, {15,6,1}, {15,8,0}}) {
+        device = mf_device_configuration(v[0], v[1], v[2], 0x07d34b9f, 6 * gb);
+        CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == 0 && device.pages == 1024 &&
+              mf_device_method_allowed(device, 0),
+              "iOS 15 must be allowed to try physpuppet instead of being refused by the version table");
+        CHECK(!mf_device_method_allowed(device, 1) && !mf_device_method_allowed(device, 2),
+              "iOS 15 must not borrow the 16.4+ smith or landa routes");
+    }
+    for (auto v : {std::array<int,3>{14,8,0}, {16,6,2}, {16,7,0}, {17,0,0}, {16,-1,0}}) {
         device = mf_device_configuration(v[0], v[1], v[2], 0x07d34b9f, 6 * gb);
         CHECK(device.status == MF_DEVICE_UNSUPPORTED_OS && device.method == -1 && device.pages == 0 &&
               !mf_device_method_allowed(device, 0), "unsupported offset releases must not produce executable kernel settings");
