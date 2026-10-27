@@ -1,19 +1,27 @@
-// Portable regression for the runtime chain calibration (MFChainCalib.h).
+// Portable regression for the runtime chain calibration (MFChainCalib.h v2).
 //
-// 背景：proc → task → vm_map → pmap 三跳过去写死在 0x18/0x28/0x40（16.1 验证过），
-// 到 16.6.1 上 proc→task 那一跳漂了，读出来的 vm_map 连内核地址都不是。
+// 背景（M5.227 → M5.229）：
+//   v1 只认识一种链形状 —— task = *(proc + A)，A 在 0..0x1000 里扫。
+//   但 iOS 15 与 16 的链形状不同：
+//       15：proc.task @0x10          → task          （一跳）
+//       16：proc.p_ro @0x18 → pr_task @0x08 → task   （两跳，xnu proc_ro.h）
+//   所以 v1 的 84645 组里没有一组能表达 16.x 的真实形状，扩窗只是把错误的形状
+//   多试了几千次。v2 把"形状"本身作为搜索维度，并把它锁在回归里。
 //
-// 这里锁住四件事：
-//   1. 由窄到宽：默认布局必须第一发就中被探测，老设备不多付代价；
-//   2. 阶段二/三只在前面不成立时才展开，且能命中正确组合；
-//   3. 全部不成立时如实报失败，尝试次数有明确上界，不死循环；
-//   4. 枚举顺序不重复、阶段边界正确 —— 否则预算和报告都会骗人。
+// 这里锁住六件事：
+//   1. 两条有文档依据的链分别在**第 1 / 第 2 发**命中（支持范围内不付扫描代价）；
+//   2. 形状/邻域/宽扫四组各能命中，且组号如实上报；
+//   3. 全部不成立时如实报失败，尝试次数正好等于上界；
+//   4. 枚举无重复，且宽扫覆盖 0..0x1000 的每个 8 字节槽位（被前面组覆盖过的除外）；
+//   5. 迭代器顺序 == mfcal_run 的探测顺序（否则预算与报告都会骗人）；
+//   6. 编译期的组数常量与迭代器实际产出必须一致。
 //
 // 不需要内核、不需要设备：probe 回调由假读取器提供。
 #include <cstdio>
 #include <cstring>
 #include <set>
 #include <tuple>
+#include <vector>
 
 #include "../app/Sources/Kernel/MFChainCalib.h"
 
@@ -48,9 +56,18 @@ int ProbeNever(void *ctx, const mfcal_offsets *offsets) {
     return 0;
 }
 
-mfcal_offsets MakeOffsets(unsigned proc_task, unsigned task_map, unsigned map_pmap) {
+int ProbeRecord(void *ctx, const mfcal_offsets *offsets) {
+    auto *seen = static_cast<std::vector<mfcal_offsets> *>(ctx);
+    seen->push_back(*offsets);
+    return 0;
+}
+
+mfcal_offsets Make(unsigned hop, unsigned proc_task, unsigned proc_task2,
+                   unsigned task_map, unsigned map_pmap) {
     mfcal_offsets o;
+    o.proc_hop = hop;
     o.proc_task = proc_task;
+    o.proc_task2 = proc_task2;
     o.task_map = task_map;
     o.map_pmap = map_pmap;
     return o;
@@ -58,75 +75,95 @@ mfcal_offsets MakeOffsets(unsigned proc_task, unsigned task_map, unsigned map_pm
 
 }  // namespace
 
-// 历史默认布局（16.1 上验证过的那套）必须一发命中。
-static void TestLegacyFirst() {
+// iOS 16 的文档链必须第一发命中：支持范围内不该为"扫描"付钱。
+static void TestDocumentedIos16() {
     Target t;
-    t.want = MakeOffsets(0x18u, 0x28u, 0x40u);
+    t.want = Make(2u, 0x18u, 0x08u, 0x28u, 0x40u);
     mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
 
-    Check(r.found == 1, "the documented 16.1 layout must be found");
-    Check(r.stage == 1, "the legacy layout must be hit during the narrowest stage");
-    Check(r.offsets.proc_task == 0x18u, "proc_task must be the legacy 0x18");
-    Check(r.offsets.task_map == 0x28u, "task_map must stay at 0x28");
-    Check(r.offsets.map_pmap == 0x40u, "map_pmap must stay at 0x40");
-    Check(t.calls == r.probed, "probe calls must equal the reported count");
-    Check(r.probed == 4u, "0x18 is the fourth candidate, so four probes are expected");
-    Check(r.budget_exhausted == 0, "a hit is never a budget stop");
-
-    mfcal_offsets legacy = mfcal_legacy_offsets();
-    Check(mfcal_same(&legacy, &t.want), "mfcal_legacy_offsets must describe the same layout");
-}
-
-// 第一发就是 0x00（最省）时不能多探。
-static void TestFirstProbe() {
-    Target t;
-    t.want = MakeOffsets(0x00u, 0x28u, 0x40u);
-    mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
-
-    Check(r.found == 1, "proc_task=0 must be found");
-    Check(r.probed == 1u, "the very first candidate is proc_task=0, so exactly one probe");
+    Check(r.found == 1, "the documented iOS 16 chain must be found");
+    Check(r.stage == 1, "the documented iOS 16 chain belongs to the first group");
+    Check(r.probed == 1u, "it must be the very first candidate");
     Check(t.calls == 1u, "a first-probe hit must not keep probing");
+    Check(r.offsets.proc_hop == 2u, "the hit must keep the two-hop shape");
+    Check(r.offsets.proc_task2 == 0x08u, "pr_task must be read at proc_ro+0x08");
+    Check(mfcal_same(&r.offsets, &t.want), "the reported layout must be the one that worked");
+    Check(mfcal_same(&mfcal_legacy_offsets(), &t.want),
+          "mfcal_legacy_offsets must now describe the two-hop baseline");
 }
 
-// proc→task 落在一个不常见的位置（16.6.1 就是这种）时，阶段一必须覆盖它。
-static void TestShiftedProcTask() {
+// iOS 15 的内嵌链必须第二发命中 —— 形状差异不能靠"扫得更宽"来兜。
+static void TestDocumentedIos15() {
     Target t;
-    t.want = MakeOffsets(0x1d8u, 0x28u, 0x40u);
+    t.want = Make(1u, 0x10u, 0x00u, 0x28u, 0x40u);
     mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
 
-    Check(r.found == 1, "a proc_task far from 0x18 must still be reached in stage 1");
-    Check(r.stage == 1, "stage 1 already covers the whole proc range");
-    Check(r.offsets.proc_task == 0x1d8u, "the found offset must be the one that worked");
-    Check(r.probed == 0x1d8u / 8u + 1u, "probe count must match the candidate position");
+    Check(r.found == 1, "the documented iOS 15 chain must be found");
+    Check(r.stage == 1, "the iOS 15 baseline is part of the first group");
+    Check(r.probed == 2u, "it must be the second candidate, not a sweep result");
+    Check(r.offsets.proc_hop == 1u, "the hit must keep the one-hop shape");
+    Check(r.offsets.proc_task == 0x10u, "proc.task must be read at 0x10");
 }
 
-// pmap 也漂了：阶段二才放开那一跳。
-static void TestStage2Pmap() {
+// 第二跳漂了（pr_task 不在 +0x08）：第二组放开。
+static void TestSecondHopVariant() {
     Target t;
-    t.want = MakeOffsets(0x18u, 0x28u, 0x48u);
+    t.want = Make(2u, 0x18u, 0x10u, 0x28u, 0x40u);
     mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
 
-    Check(r.found == 1, "an off-default map_pmap must be found in stage 2");
-    Check(r.stage == 2, "map_pmap alternatives belong to stage 2");
-    Check(r.offsets.map_pmap == 0x48u, "the found map_pmap must be the one that worked");
-    Check(r.probed > MFCAL_STAGE1_COUNT, "stage 2 can only start after every stage 1 candidate failed");
+    Check(r.found == 1, "an off-default pr_task offset must be found");
+    Check(r.stage == 2, "second-hop alternatives belong to the second group");
+    Check(r.offsets.proc_task2 == 0x10u, "the found second hop must be the one that worked");
+    Check(r.probed > MFCAL_STAGE1_COUNT, "group 2 can only start after group 1 is exhausted");
 }
 
-// map 那一跳也漂了：阶段三才放开 task 内部扫描。
-static void TestStage3TaskMap() {
+// task.map 漂了：第三组。
+static void TestTaskMapMoved() {
     Target t;
-    t.want = MakeOffsets(0x50u, 0x30u, 0x38u);
+    t.want = Make(2u, 0x18u, 0x08u, 0x30u, 0x40u);
     mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
 
-    Check(r.found == 1, "a moved task_map must be found in stage 3");
-    Check(r.stage == 3, "task_map alternatives belong to stage 3");
+    Check(r.found == 1, "a moved task_map must be found");
+    Check(r.stage == 3, "task_map alternatives belong to the third group");
     Check(r.offsets.task_map == 0x30u, "the found task_map must be the one that worked");
-    Check(r.offsets.map_pmap == 0x38u, "the found map_pmap must be the one that worked");
-    Check(r.probed > MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT,
-          "stage 3 can only start after stages 1 and 2 are exhausted");
 }
 
-// 全部不成立：如实报失败，而且尝试次数正好等于上界。
+// pmap 漂了（且是 15 内嵌形状）：第三组。
+static void TestPmapMoved() {
+    Target t;
+    t.want = Make(1u, 0x10u, 0x00u, 0x28u, 0x38u);
+    mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
+
+    Check(r.found == 1, "an off-default map_pmap must be found");
+    Check(r.stage == 3, "map_pmap alternatives belong to the third group");
+    Check(r.offsets.map_pmap == 0x38u, "the found map_pmap must be the one that worked");
+}
+
+// 完全不在先验里：宽扫兜底（两跳）。
+static void TestSweepTwoHop() {
+    Target t;
+    t.want = Make(2u, 0x1f8u, 0x08u, 0x28u, 0x40u);
+    mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
+
+    Check(r.found == 1, "a far-away proc offset must be reached by the two-hop sweep");
+    Check(r.stage == 4, "the wide sweep is the fourth group");
+    Check(r.offsets.proc_task == 0x1f8u, "the found offset must be the one that worked");
+    Check(r.probed > MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT,
+          "group 4 can only start after groups 1-3 are exhausted");
+}
+
+// 完全不在先验里：宽扫兜底（一跳）。
+static void TestSweepOneHop() {
+    Target t;
+    t.want = Make(1u, 0x2a0u, 0x00u, 0x28u, 0x40u);
+    mfcal_result r = mfcal_run(ProbeOnly, &t, 0);
+
+    Check(r.found == 1, "a far-away inline task must be reached by the one-hop sweep");
+    Check(r.stage == 4, "the wide sweep is the fourth group");
+    Check(r.offsets.proc_task == 0x2a0u, "the found offset must be the one that worked");
+}
+
+// 全部不成立：如实报失败，尝试次数正好等于上界。
 static void TestNothingWorks() {
     unsigned calls = 0;
     mfcal_result r = mfcal_run(ProbeNever, &calls, 0);
@@ -136,9 +173,8 @@ static void TestNothingWorks() {
     Check(calls == MFCAL_MAX_PROBES, "probe calls must equal the candidate bound");
     Check(r.budget_exhausted == 0, "an unlimited run is never a budget stop");
     Check(r.stage == 0, "a failed run must not claim a stage");
-
-    mfcal_offsets legacy = mfcal_legacy_offsets();
-    Check(mfcal_same(&r.offsets, &legacy), "a failed run must still report the legacy layout for diagnostics");
+    Check(mfcal_same(&r.offsets, &mfcal_legacy_offsets()),
+          "a failed run must still report the baseline for diagnostics");
 }
 
 // 预算截断：到点就停并标记，不能假装"全试过了"。
@@ -150,88 +186,155 @@ static void TestBudget() {
     Check(r.probed == 5u, "the budget must stop the run exactly at the limit");
     Check(calls == 5u, "the budget must also bound the probe calls");
     Check(r.budget_exhausted == 1, "a truncated run must be labelled budget-exhausted");
+    Check(r.stage == 0, "a truncated run must not claim a stage");
 
     unsigned one = 0;
     mfcal_result r2 = mfcal_run(ProbeNever, &one, 1);
     Check(r2.probed == 1u && r2.budget_exhausted == 1, "a budget of one must stop after one probe");
 }
 
-// 枚举契约：总数、无重复、阶段边界、proc_task 在阶段一内单调。
+// 枚举契约：总数、无重复、组边界、宽扫覆盖面。
 static void TestEnumeration() {
-    std::set<std::tuple<unsigned, unsigned, unsigned>> seen;
-    unsigned previous_proc_task = 0;
-    bool first = true;
-
     const unsigned limit = mfcal_total_probes();
     Check(limit == MFCAL_MAX_PROBES, "total probes must match the documented bound");
+    Check(limit == MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT + MFCAL_STAGE4_COUNT,
+          "the bound must decompose into the four groups");
 
-    for (unsigned i = 0; i < limit; ++i) {
-        mfcal_offsets o;
-        Check(mfcal_probe_at(i, &o) == 1, "every index below the bound must resolve");
+    std::set<std::tuple<unsigned, unsigned, unsigned, unsigned, unsigned>> seen;
+    std::set<std::pair<unsigned, unsigned>> sweep_hop2;   /* (proc_task, proc_task2) */
+    std::set<unsigned> sweep_hop1;
+    unsigned group_counts[5] = {0, 0, 0, 0, 0};
 
-        if (i < MFCAL_STAGE1_COUNT) {
-            Check(o.task_map == 0x28u, "stage 1 must keep task_map at the primary value");
-            Check(o.map_pmap == 0x40u, "stage 1 must keep map_pmap at the primary value");
-            if (!first) {
-                Check(o.proc_task > previous_proc_task, "stage 1 must walk proc_task upwards without gaps");
-            }
-            previous_proc_task = o.proc_task;
-            first = false;
-        } else if (i < MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT) {
-            Check(o.task_map == 0x28u, "stage 2 must keep task_map at the primary value");
-            Check(o.map_pmap != 0x40u, "stage 2 must not repeat the pmap value that stage 1 already tried");
-        } else {
-            Check(o.task_map != 0x28u, "stage 3 must skip the task_map value that stages 1 and 2 already tried");
-        }
-
-        auto key = std::make_tuple(static_cast<unsigned>(o.proc_task),
+    mfcal_iter it;
+    mfcal_iter_reset(&it);
+    mfcal_offsets o;
+    unsigned produced = 0;
+    while (mfcal_iter_next(&it, &o)) {
+        // 注意：迭代器的 stage 在取下一发之后才前进，这里用"已产出数量"划分组。
+        auto key = std::make_tuple(static_cast<unsigned>(o.proc_hop),
+                                   static_cast<unsigned>(o.proc_task),
+                                   static_cast<unsigned>(o.proc_task2),
                                    static_cast<unsigned>(o.task_map),
                                    static_cast<unsigned>(o.map_pmap));
         Check(seen.insert(key).second, "the probe order must not contain duplicates");
+
+        if (produced < MFCAL_STAGE1_COUNT) {
+            group_counts[1]++;
+        } else if (produced < MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT) {
+            group_counts[2]++;
+            Check(o.map_pmap == 0x40u, "group 2 must keep map_pmap at the baseline");
+        } else if (produced < MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT) {
+            group_counts[3]++;
+        } else {
+            group_counts[4]++;
+            if (o.proc_hop == 2u) {
+                Check(o.map_pmap == 0x40u && o.task_map == 0x28u,
+                      "the two-hop sweep must keep the baseline map/pmap");
+                sweep_hop2.insert(std::make_pair(static_cast<unsigned>(o.proc_task),
+                                                 static_cast<unsigned>(o.proc_task2)));
+            } else {
+                Check(o.map_pmap == 0x40u && o.task_map == 0x28u,
+                      "the one-hop sweep must keep the baseline map/pmap");
+                sweep_hop1.insert(o.proc_task);
+            }
+        }
+        ++produced;
     }
 
-    Check(seen.size() == limit, "the enumeration must cover exactly the declared bound");
+    Check(produced == MFCAL_MAX_PROBES, "the iterator must yield exactly the declared bound");
+    Check(group_counts[1] == MFCAL_STAGE1_COUNT, "group 1 must yield exactly its declared count");
+    Check(group_counts[2] == MFCAL_STAGE2_COUNT, "group 2 must yield exactly its declared count");
+    Check(group_counts[3] == MFCAL_STAGE3_COUNT, "group 3 must yield exactly its declared count");
+    Check(group_counts[4] == MFCAL_STAGE4_COUNT, "group 4 must yield exactly its declared count");
+
+    // 宽扫必须覆盖 0..0x1000 的每个 8 字节槽位，只跳过前面各组已验证过的组合。
+    static const unsigned hop2_b[] = {0x08u, 0x00u, 0x10u, 0x18u, 0x20u, 0x28u};
+    for (unsigned off = 0; off <= MFCAL_SWEEP_LAST; off += MFCAL_SWEEP_STEP) {
+        if (off == 0x18u) {
+            for (unsigned b = 0; b < 6u; ++b) {
+                Check(sweep_hop2.count(std::make_pair(off, hop2_b[b])) == 0,
+                      "the two-hop sweep must skip the column groups 1-2 already tried");
+            }
+        } else {
+            for (unsigned b = 0; b < 6u; ++b) {
+                Check(sweep_hop2.count(std::make_pair(off, hop2_b[b])) == 1,
+                      "the two-hop sweep must cover every first-hop slot against every second-hop variant");
+            }
+        }
+        bool covered_hop1 = (off == 0x10u) || (off == 0x00u) || (off == 0x08u) ||
+                            (off == 0x18u) || (off == 0x20u) || (off == 0x30u);
+        if (covered_hop1) {
+            Check(sweep_hop1.count(off) == 0, "the one-hop sweep must skip values already tried");
+        } else {
+            Check(sweep_hop1.count(off) == 1, "the one-hop sweep must cover every other 8-byte slot");
+        }
+    }
+    Check(sweep_hop2.size() == MFCAL_STAGE4_COUNT - (MFCAL_SWEEP_COUNT - MFCAL_SWEEP_SKIP_HOP1),
+          "the two-hop sweep count must match the declared geometry");
+    Check(sweep_hop1.size() == MFCAL_SWEEP_COUNT - MFCAL_SWEEP_SKIP_HOP1,
+          "the one-hop sweep count must match the declared skip");
+
+    // 迭代器与 mfcal_run 必须走同一条序列。
+    std::vector<mfcal_offsets> recorded;
+    unsigned calls = 0;
+    mfcal_run(ProbeRecord, &recorded, 0);
+    (void)calls;
+    Check(recorded.size() == MFCAL_MAX_PROBES, "the run must probe every candidate");
+    mfcal_iter_reset(&it);
+    bool same_order = true;
+    for (unsigned i = 0; i < recorded.size(); ++i) {
+        if (!mfcal_iter_next(&it, &o) || !mfcal_same(&o, &recorded[i])) {
+            same_order = false;
+            break;
+        }
+    }
+    Check(same_order, "mfcal_run must follow the iterator order exactly");
 
     mfcal_offsets out;
     Check(mfcal_probe_at(limit, &out) == 0, "an out-of-range index must be rejected");
-    Check(mfcal_total_probes() == MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT,
-          "the bound must decompose into the three stages");
-    Check(MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT == MFCAL_MAX_PROBES,
-          "the stage counts must add up to the declared bound");
-
     mfcal_result null_run = mfcal_run(nullptr, nullptr, 0);
     Check(null_run.found == 0 && null_run.probed == 0, "a null probe must produce an empty result");
 }
 
-// 关键候选必须真的在列表里，否则"通用"是假的。
+// 关键形状必须真的在列表里，否则"跨 15/16"是假的。
 static void TestCoverage() {
-    std::set<unsigned> proc_tasks;
+    std::set<unsigned> hop2_first;
+    std::set<unsigned> hop1_first;
     std::set<unsigned> task_maps;
     std::set<unsigned> map_pmaps;
     for (unsigned i = 0; i < mfcal_total_probes(); ++i) {
         mfcal_offsets o;
         mfcal_probe_at(i, &o);
-        proc_tasks.insert(o.proc_task);
+        if (o.proc_hop == 2u) {
+            hop2_first.insert(o.proc_task);
+            Check(o.proc_task2 == 0x08u || o.proc_task2 == 0x00u || o.proc_task2 == 0x10u ||
+                      o.proc_task2 == 0x18u || o.proc_task2 == 0x20u || o.proc_task2 == 0x28u,
+                  "a two-hop entry must carry one of the declared second hops");
+        } else {
+            hop1_first.insert(o.proc_task);
+            Check(o.proc_task2 == 0x00u, "a one-hop entry must not carry a second hop");
+        }
         task_maps.insert(o.task_map);
         map_pmaps.insert(o.map_pmap);
     }
 
-    Check(proc_tasks.count(0x18u) == 1, "the legacy proc_task 0x18 must be covered");
-    Check(proc_tasks.count(0x1d8u) == 1, "deep proc offsets such as 0x1d8 must be covered");
-    Check(proc_tasks.size() == MFCAL_PROC_COUNT, "every 8-byte slot in the proc range must be covered");
+    Check(hop2_first.count(0x18u) == 1, "the iOS 16 p_ro offset 0x18 must be covered");
+    Check(hop1_first.count(0x10u) == 1, "the iOS 15 inline task offset 0x10 must be covered");
     Check(task_maps.count(0x28u) == 1, "the documented task_map 0x28 must be covered");
-    Check(task_maps.size() == MFCAL_TASK_COUNT, "every 8-byte slot in the task range must be covered");
+    Check(task_maps.size() == 5, "every task_map alternative must be covered exactly once");
     Check(map_pmaps.count(0x40u) == 1, "the compiled-in map_pmap 0x40 must be covered");
-    Check(map_pmaps.size() >= MFCAL_MAP_PMAP_STAGE2_COUNT, "the pmap alternatives must be covered");
+    Check(map_pmaps.size() == 5, "every map_pmap alternative must be covered exactly once");
 }
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
-    if (std::strcmp(argv[1], "legacy-first") == 0) TestLegacyFirst();
-    else if (std::strcmp(argv[1], "first-probe") == 0) TestFirstProbe();
-    else if (std::strcmp(argv[1], "shifted-proc-task") == 0) TestShiftedProcTask();
-    else if (std::strcmp(argv[1], "stage2-pmap") == 0) TestStage2Pmap();
-    else if (std::strcmp(argv[1], "stage3-task-map") == 0) TestStage3TaskMap();
+    if (std::strcmp(argv[1], "documented-ios16") == 0) TestDocumentedIos16();
+    else if (std::strcmp(argv[1], "documented-ios15") == 0) TestDocumentedIos15();
+    else if (std::strcmp(argv[1], "second-hop-variant") == 0) TestSecondHopVariant();
+    else if (std::strcmp(argv[1], "task-map-moved") == 0) TestTaskMapMoved();
+    else if (std::strcmp(argv[1], "pmap-moved") == 0) TestPmapMoved();
+    else if (std::strcmp(argv[1], "sweep-two-hop") == 0) TestSweepTwoHop();
+    else if (std::strcmp(argv[1], "sweep-one-hop") == 0) TestSweepOneHop();
     else if (std::strcmp(argv[1], "nothing-works") == 0) TestNothingWorks();
     else if (std::strcmp(argv[1], "budget") == 0) TestBudget();
     else if (std::strcmp(argv[1], "enumeration") == 0) TestEnumeration();

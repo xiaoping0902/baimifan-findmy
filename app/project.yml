@@ -80,6 +80,10 @@ targets:
       # M5.80：环境检测用 SecTaskCopyValueForEntitlement 读「系统实际生效」的权限
       #       （只看 IPA 里声明的没用，要问系统认不认这份签名）
       - sdk: Security.framework
+      # [M5.229] Game/MFDeviceIdentity.mm 用 CC_SHA256 生成设备指纹。
+      #          CommonCrypto 是独立 framework（不在 libSystem 的隐式导出里），
+      #          不声明就会在链接阶段 undefined symbol _CC_SHA256。
+      - sdk: CommonCrypto.framework
     settings:
       base:
         PRODUCT_NAME: FindMy

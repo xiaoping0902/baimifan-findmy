@@ -8,11 +8,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 CASES = [
-    "legacy-first",
-    "first-probe",
-    "shifted-proc-task",
-    "stage2-pmap",
-    "stage3-task-map",
+    "documented-ios16",
+    "documented-ios15",
+    "second-hop-variant",
+    "task-map-moved",
+    "pmap-moved",
+    "sweep-two-hop",
+    "sweep-one-hop",
     "nothing-works",
     "budget",
     "enumeration",

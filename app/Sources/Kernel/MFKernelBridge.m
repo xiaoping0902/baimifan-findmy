@@ -50,8 +50,9 @@
 #include "MFLibkfdHost.h"
 
 /*
- * [M5.226] 运行时链路校准的两个依赖：
- *   MFChainCalib.h —— 三跳偏移的扫描顺序/预算/去重（纯 C，Windows 上可回归）
+ * 运行时链路校准的两个依赖：
+ *   MFChainCalib.h —— 链形状（15 一跳 / 16 两跳）的枚举顺序/预算/去重
+ *                     （纯 C，Windows 上可回归）
  *   MFPageTable.h  —— 判据要用真页表走一遍：能读回 Mach-O 头才算数
  */
 #include "MFChainCalib.h"
@@ -81,6 +82,7 @@
 #include "kfd/fun/kpf/patchfinder.h"
 
 /* ── 标准库 ───────────────────────────────────────────────────── */
+#include <dlfcn.h>       /* dladdr —— 取本进程 executable 的 Mach-O 基址 */
 #include <errno.h>
 #include <fcntl.h>       /* open / O_CREAT —— 给 mf_redirect_klog 用 */
 #include <unistd.h>      /* dup2 / getpid */
@@ -453,7 +455,7 @@ static int mf_kopen_locked(uint64_t puaf_pages, int puaf_method, int kread_metho
     MFDeviceConfiguration device = mf_current_device_configuration();
     if (device.status != MF_DEVICE_SUPPORTED || !mf_device_method_allowed(device, puaf_method)) {
         const char *reason = device.status == MF_DEVICE_UNSUPPORTED_OS
-            ? "unsupported OS: bundled kernel offsets require iOS/iPadOS 16.0-16.6.1"
+            ? "unsupported OS: this backend targets iOS/iPadOS 15.0-16.6.1"
             : device.status == MF_DEVICE_UNSUPPORTED_CHIP
             ? "unsupported chip: bundled kernel offsets require A12-A16 / M1-M2"
             : "PUAF method is patched or unreliable on this OS; use device automatic startup";
@@ -1392,32 +1394,52 @@ uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
 /* ================================================================ */
 
 /*
- * PAC strip（T8112 上 t1sz = 17，与 MFCalibrate 用的同一套规则）。
+ * PAC strip —— 必须与 libkfd 用同一条规则。
+ *
+ * 旧版把 (64 - 17) 写死：那是 M1/M2/A16（T8103/T8112/T8120）的 t1sz_boot。
+ * 本机 iPad8,11 是 A12X（T8027），kfd 的 info.h:106-112 明确只对
+ * T8120/T8103/T8112 取 17，其余一律 25。掩码取错一级，PAC 还原就会落到
+ * 0xffff8000_xxxxxxxx 这类"高位不全 1"的形态上，再被下面的 VA 判断否掉 ——
+ * 指针本身是好的，却被判成野指针。这里直接读 kfd 的 T1SZ_BOOT；只有它还没
+ * 初始化（kopen 之前）时才退回 25（多数机型）。
+ *
+ * 依据：
+ *   kfd/libkfd/info/static_info.h:99-102  PTR_MASK/PAC_MASK/UNSIGN_PTR
+ *   kfd/libkfd/info.h:106-112              t1sz_boot = 17 仅限 T8120/T8103/T8112
  */
 static uint64_t mf_bridge_unsign(uint64_t p)
 {
     if (p == 0) {
         return 0;
     }
-    uint64_t ptr_mask = (1ULL << (64 - 17)) - 1ULL;
+    unsigned t1sz = (unsigned)T1SZ_BOOT;
+    if (t1sz < 16u || t1sz > 48u) {
+        t1sz = 25u;                  /* info_init 还没跑：按多数机型 */
+    }
+    uint64_t ptr_mask = (1ULL << (64u - t1sz)) - 1ULL;
     uint64_t pac_mask = ~ptr_mask;
-    if (p & (1ULL << 55)) {
+    if (p & (1ULL << 55)) {          /* 与 static_info.h 的 SIGN(p) 一致 */
         return p | pac_mask;
     }
     return p & ~pac_mask;
 }
 
 /*
- * [M5.226] 只认真正的内核 VA 域。
+ * [M5.229] 内核 VA 域：高 16 位全 1，不是一个固定的 0xfffffe 前缀。
  *
- * 旧的 mf_bridge_is_kaddr 判 >= 0xffff000000000000，太松：16.6.1 那台
- * 读出来的 vm_map 是 0xffffeddcec69b400 —— 高位全 1、看着像内核指针，
- * 实际落在内核 VA 空间之外，于是被放行，整条链带着垃圾往下走。
- * iOS 的内核链接基址在 0xfffffe0000000000 之上，这里按真实边界判。
+ * M5.226 把下界抬到 0xfffffe0000000000，是为了挡住 16.6.1 那次读出来的
+ * 0xffffeddcec69b400。但同一仓库里 MFCalibrate.m:45-55 早记着反例：
+ *     0xfffffe00_...  physmap / gVirtBase
+ *     0xfffffe10_...  kalloc（proc / task / vm_map）
+ *     0xfffffdf1_...  pmap zone + 页表        ← 低于 0xfffffe，被旧下界误杀
+ *     "M5.100 shipped: cpmap = 0xfffffdf0d63d1cb0"
+ * 而本文件里 kread 自己的门槛（MFLibkfdKRead4）就是 0xffff000000000000：
+ * 两处必须一致，否则会出现"读得动、却被判成非法"的怪状态。
+ * 真正的筛选交给整条链最后一步 —— 能不能读出 0xfeedfacf。
  */
 static int mf_bridge_is_kernel_va(uint64_t a)
 {
-    return a >= 0xfffffe0000000000ULL;
+    return a >= 0xffff000000000000ULL;
 }
 
 /* 页表根一定是页对齐的；先用它挡掉扫描里的大量野指针。 */
@@ -1427,14 +1449,15 @@ static int mf_bridge_is_page_aligned(uint64_t a)
 }
 
 typedef struct {
-    uint64_t proc;       /* 起点：kernel_proc 或目标进程的 proc */
+    uint64_t proc;       /* 起点：kernel_proc、目标进程的 proc，或本进程 proc */
     uint64_t want_base;  /* 期望从这个根表读到的 Mach-O 基址；0 = 自动找最低映射页 */
     int auto_base;       /* want_base 为 0 时，第一次成功定位到基址就用它 */
 
     /* 最近一次探测的现场（诊断用） */
     uint64_t task, map, pmap, root;
+    unsigned hop;        /* 这次探测的链形状：1 = task 内嵌，2 = 经 proc_ro */
     int stage;
-    char why[160];
+    char why[220];
 } mf_chain_probe;
 
 static int g_chain_offsets_known;
@@ -1470,29 +1493,71 @@ static int mf_chain_root_reads_macho(uint64_t root, uint64_t want_base, uint64_t
 }
 
 /*
- * [M5.228] 找 proc 里第一个"像内核指针"的偏移。
+ * [M5.229] 失败诊断：在 proc 里找"task 形状"的候选，而不是第一个裸内核指针。
  *
- * 只用于失败诊断：整轮校准都不成立时，这一跳说明"结构体里到底哪里有指针"，
- * 比一句"失败了"有用得多 —— 区间不够、偏移漂移、proc 指针本身不对，
- * 这三种情况给出的结果完全不同。
+ * 为什么换掉 M5.228 的 first_kernel_ptr：proc 挂在 allproc 链表里，
+ * proc+0x00/0x08 就是 le_next/le_prev，从 0 起扫第一个内核指针必然命中它。
+ * 打印 "kptr+0x0" 既不能说明区间够，也不能说明偏移漂移 —— 三种失败原因
+ * （区间不够 / 偏移漂移 / proc 指针本身不对）还是分不开。
+ *
+ * 这里改用形状判据：*(proc+A) = P（内核指针）→ *(P+B) = T（内核指针）
+ * → *(T+0x28) = M（内核指针）→ *(M+0x40) = R（页对齐内核指针）。
+ * 命中就说明"task 在 proc+A，再经 +B"，下一轮直接锁定，不必再全量扫。
  */
-static int mf_chain_first_kernel_ptr(uint64_t proc, uint32_t limit,
-                                     uint32_t *off_out, uint64_t *val_out)
+static void mf_chain_describe_task_like(uint64_t proc, uint32_t limit,
+                                        char *out, size_t cap)
 {
-    uint32_t off = 0;
-    for (off = 0; off <= limit; off += 8u) {
-        uint64_t v = 0;
-        if (mf_kread64(proc + off, &v) != 0) {
-            continue;
+    static const uint32_t second_hops[] = {0x08u, 0x00u, 0x10u, 0x18u, 0x20u, 0x28u};
+    unsigned listed = 0;
+    int has_kptr = 0;
+    uint32_t first_kptr_off = 0;
+    uint64_t first_kptr_val = 0;
+
+    if (out == NULL || cap == 0) return;
+
+    for (uint32_t off = 0; off <= limit; off += 8u) {
+        uint64_t p = 0;
+        if (mf_kread64(proc + off, &p) != 0) continue;
+        p = mf_bridge_unsign(p);
+        if (!mf_bridge_is_kernel_va(p)) continue;
+        if (!has_kptr) {
+            has_kptr = 1;
+            first_kptr_off = off;
+            first_kptr_val = p;
         }
-        v = mf_bridge_unsign(v);
-        if (mf_bridge_is_kernel_va(v)) {
-            if (off_out) *off_out = off;
-            if (val_out) *val_out = v;
-            return 1;
+
+        for (unsigned i = 0; i < (unsigned)(sizeof(second_hops) / sizeof(second_hops[0])); ++i) {
+            uint64_t t = 0, m = 0, r = 0;
+            if (mf_kread64(p + second_hops[i], &t) != 0) continue;
+            t = mf_bridge_unsign(t);
+            if (!mf_bridge_is_kernel_va(t)) continue;
+            if (mf_kread64(t + 0x28u, &m) != 0) continue;
+            m = mf_bridge_unsign(m);
+            if (!mf_bridge_is_kernel_va(m)) continue;
+            if (mf_kread64(m + 0x40u, &r) != 0) continue;
+            r = mf_bridge_unsign(r);
+            if (!mf_bridge_is_kernel_va(r) || !mf_bridge_is_page_aligned(r)) continue;
+
+            if (listed < 2u) {
+                size_t used = strlen(out);
+                snprintf(out + used, cap - used, "%sproctask@%#x/%#x",
+                         used ? " " : "", (unsigned)off, (unsigned)second_hops[i]);
+            }
+            ++listed;
+            break;
         }
     }
-    return 0;
+
+    if (listed == 0) {
+        size_t used = strlen(out);
+        if (has_kptr) {
+            snprintf(out + used, cap - used,
+                     "proctask-none first-kptr %#x=%#llx",
+                     (unsigned)first_kptr_off, (unsigned long long)first_kptr_val);
+        } else {
+            snprintf(out + used, cap - used, "proctask-none no-kptr");
+        }
+    }
 }
 
 static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
@@ -1501,8 +1566,15 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
     uint64_t v = 0;
 
     p->task = p->map = p->pmap = p->root = 0;
+    p->hop = offsets->proc_hop;
 
-    /* 1) proc -> task（这一跳随 iOS 版本漂移，社区实现也承认要扫） */
+    /* 1) proc -> task
+     *
+     * iOS 15：task 内嵌在 proc 里（Dopamine 基线 proc.task = 0x10），一跳到底。
+     * iOS 16：内嵌字段被移除，proc+0x18 是 p_ro，pr_task 在 proc_ro+0x08
+     *         （xnu proc_ro.h 的头两个字段就是 pr_proc / pr_task）。
+     * 这一跳是整条链上唯一随系统版本换形状的地方，所以形状本身要进搜索空间。
+     */
     if (mf_kread64(p->proc + offsets->proc_task, &v) != 0) {
         snprintf(p->why, sizeof(p->why), "read proc+0x%x failed", (unsigned)offsets->proc_task);
         return 0;
@@ -1512,6 +1584,22 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         snprintf(p->why, sizeof(p->why), "proc+0x%x -> %#llx not a kernel VA",
                  (unsigned)offsets->proc_task, (unsigned long long)v);
         return 0;
+    }
+
+    if (offsets->proc_hop == 2u) {
+        uint64_t t = 0;
+        if (mf_kread64(v + offsets->proc_task2, &t) != 0) {
+            snprintf(p->why, sizeof(p->why), "read proc_ro(%#llx)+0x%x failed",
+                     (unsigned long long)v, (unsigned)offsets->proc_task2);
+            return 0;
+        }
+        t = mf_bridge_unsign(t);
+        if (!mf_bridge_is_kernel_va(t)) {
+            snprintf(p->why, sizeof(p->why), "proc_ro+0x%x -> %#llx not a kernel VA",
+                     (unsigned)offsets->proc_task2, (unsigned long long)t);
+            return 0;
+        }
+        v = t;
     }
     p->task = v;
 
@@ -1528,14 +1616,19 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
     }
     p->map = v;
 
-    /* 3) vm_map -> pmap */
+    /* 3) vm_map -> pmap
+     *
+     * 只要求内核 VA：pmap 从 zone 分配，没有"必须页对齐"这条约束
+     * （页表根本身才必须对齐，见下一跳）。M5.226 在这里加 page-align
+     * 会把正确组合直接否掉，属于自己加的限制。
+     */
     if (mf_kread64(p->map + offsets->map_pmap, &v) != 0) {
         snprintf(p->why, sizeof(p->why), "read map+0x%x failed", (unsigned)offsets->map_pmap);
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kernel_va(v) || !mf_bridge_is_page_aligned(v)) {
-        snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx not a page-aligned kernel VA",
+    if (!mf_bridge_is_kernel_va(v)) {
+        snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx not a kernel VA",
                  (unsigned)offsets->map_pmap, (unsigned long long)v);
         return 0;
     }
@@ -1566,38 +1659,95 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
     return 1;
 }
 
+/* 把命中的链形状写成一行可读文本（报告/落盘共用）。 */
+static const char *mf_chain_shape_text(const mfcal_offsets *o, char *buf, size_t cap)
+{
+    if (o == NULL || buf == NULL || cap == 0) return "";
+    if (o->proc_hop == 2u) {
+        snprintf(buf, cap, "2hop %#x/%#x/%#x/%#x",
+                 (unsigned)o->proc_task, (unsigned)o->proc_task2,
+                 (unsigned)o->task_map, (unsigned)o->map_pmap);
+    } else {
+        snprintf(buf, cap, "1hop %#x/%#x/%#x",
+                 (unsigned)o->proc_task, (unsigned)o->task_map, (unsigned)o->map_pmap);
+    }
+    return buf;
+}
+
 /*
- * 用内核对自身做一次校准。
+ * 校准：先问本进程，再问内核。
  *
- * kernel_proc（kernproc 符号直接取）和 kernelbase（patchfinder 算的）是这台
- * 机器上两个不依赖 proc 布局的真值；用它俩把三跳偏移定下来，之后所有进程
- * 共用。任何设备、任何 iOS 16.x 都是同一条路径 —— 不查版本表。
+ * ① 本进程 + 自己的 Mach-O 基址：真值来自 dyld（dladdr），判据与等一下要用在
+ *    游戏上的完全同构 —— 同一个用户地址空间、同一张用户 pmap、同一个
+ *    0xfeedfacf。它不碰内核那一半页表，也不碰 patchfinder 的 kbase。
+ * ② kernel_proc + kernelbase：两者都不依赖 proc 布局（kernproc 符号直读、
+ *    kbase = ARM64_LINK_ADDR + slide），但要求"走内核那一半页表"可用；
+ *    本工程的分级宏按 t1sz=17（47 位）写，而 A12X/A12Z 是 t1sz=25（39 位），
+ *    这一条在非 A16/M1/M2 的设备上本来就是没被证过的，所以放在 ① 后面兜底。
  *
  * 注意不要用 kfd 的 current_task/current_map：kfd 的 iOS16 条目里
  * proc__object_size = 0，于是 current_task == current_proc，那两个值是错的。
  */
+static uint64_t mf_self_image_base(void)
+{
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    /* 用已经定义好的函数取地址即可：dladdr 要的是"本 image 里的任意符号"。 */
+    if (dladdr((const void *)&mf_chain_probe_fn, &info) == 0 || info.dli_fbase == NULL) {
+        return 0;
+    }
+    return (uint64_t)(uintptr_t)info.dli_fbase;
+}
+
 static int mf_chain_calibrate_locked(void)
 {
+    mf_chain_probe probe;
+    mfcal_result r;
+
+    /*
+     * ① 本进程锚点（先跑）：自己的 executable 基址 + 自己的用户页表根。
+     *
+     * 为什么排第一：这条判据与等一下要用在游戏上的**完全同构** —— 同一个
+     * 用户地址、同一张用户 pmap、同一个 0xfeedfacf。而内核锚点要走内核那一半
+     * 页表（TTBR1），本工程的分级宏是按 t1sz=17（47 位）写的；A12X/A12Z 这类
+     * t1sz=25（39 位）的机器上，"走内核那一半"本身就没被证过（M5.107 只在
+     * A16 上验过）。先跑自己这一条，能把"偏移不对"和"锚点不对"分开。
+     */
+    uint64_t self_base = mf_self_image_base();
+    if (self_base != 0) {
+        uint64_t self_proc = mf_find_proc_by_pid((int)getpid(), NULL, 0);
+        if (self_proc != 0 && mf_bridge_is_kernel_va(self_proc)) {
+            memset(&probe, 0, sizeof(probe));
+            probe.proc = self_proc;
+            probe.want_base = self_base;
+            r = mfcal_run(mf_chain_probe_fn, &probe, 0);
+            if (r.found) {
+                g_chain_offsets = r.offsets;
+                g_chain_offsets_known = 1;
+                return 1;
+            }
+        }
+    }
+
+    /*
+     * ② 内核锚点（兜底）：kernel_proc + kernelbase。
+     * 两者都不依赖 proc 布局（kernproc 符号直读、kbase = ARM64_LINK_ADDR + slide），
+     * 前提是 patchfinder 算出的 kbase 恰好指向 Mach-O 头、且内核那一半页表走得通。
+     */
     uint64_t kernel_proc = mf_get_kernel_proc();
     uint64_t kbase = mf_get_kbase();
-
-    if (!mf_bridge_is_kernel_va(kernel_proc) || !mf_bridge_is_kernel_va(kbase)) {
-        return 0;
+    if (mf_bridge_is_kernel_va(kernel_proc) && mf_bridge_is_kernel_va(kbase)) {
+        memset(&probe, 0, sizeof(probe));
+        probe.proc = kernel_proc;
+        probe.want_base = kbase;
+        r = mfcal_run(mf_chain_probe_fn, &probe, 0);
+        if (r.found) {
+            g_chain_offsets = r.offsets;
+            g_chain_offsets_known = 1;
+            return 1;
+        }
     }
-
-    mf_chain_probe probe;
-    memset(&probe, 0, sizeof(probe));
-    probe.proc = kernel_proc;
-    probe.want_base = kbase;
-
-    mfcal_result r = mfcal_run(mf_chain_probe_fn, &probe, 0);
-    if (!r.found) {
-        return 0;
-    }
-
-    g_chain_offsets = r.offsets;
-    g_chain_offsets_known = 1;
-    return 1;
+    return 0;
 }
 
 /*
@@ -1642,10 +1792,11 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
             if (pmap_out) *pmap_out = probe.pmap;
             if (root_out) *root_out = probe.root;
             if (report && report_len) {
+                char shape[64];
                 snprintf(report, report_len,
-                         "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x cached",
+                         "pid=%d proc=%#llx root=%#llx chain %s cached",
                          pid, (unsigned long long)proc, (unsigned long long)probe.root,
-                         cached.proc_task, cached.task_map, cached.map_pmap);
+                         mf_chain_shape_text(&cached, shape, sizeof(shape)));
             }
             return 0;
         }
@@ -1665,10 +1816,11 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
                 if (pmap_out) *pmap_out = probe.pmap;
                 if (root_out) *root_out = probe.root;
                 if (report && report_len) {
+                    char shape[64];
                     snprintf(report, report_len,
-                             "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x calibrated",
+                             "pid=%d proc=%#llx root=%#llx chain %s calibrated",
                              pid, (unsigned long long)proc, (unsigned long long)probe.root,
-                             cached.proc_task, cached.task_map, cached.map_pmap);
+                             mf_chain_shape_text(&cached, shape, sizeof(shape)));
                 }
                 return 0;
             }
@@ -1692,10 +1844,11 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
             if (pmap_out) *pmap_out = scan_probe.pmap;
             if (root_out) *root_out = scan_probe.root;
             if (report && report_len) {
+                char shape[64];
                 snprintf(report, report_len,
-                         "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x stage=%d probes=%u",
+                         "pid=%d proc=%#llx root=%#llx chain %s stage=%d probes=%u",
                          pid, (unsigned long long)proc, (unsigned long long)scan_probe.root,
-                         scan.offsets.proc_task, scan.offsets.task_map, scan.offsets.map_pmap,
+                         mf_chain_shape_text(&scan.offsets, shape, sizeof(shape)),
                          scan.stage, scan.probed);
             }
             return 0;
@@ -1703,19 +1856,18 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
 
         if (report && report_len) {
             /*
-             * 失败现场要能回答三个问题：proc 指针是多少、整轮扫了多少组、
-             * 结构体里第一个内核指针落在哪个偏移。上界不够 / 偏移漂移 /
-             * proc 本身不对，这三种情况给出的结果不一样。
+             * 失败现场要能回答四个问题而不是三个：
+             *   proc 指针是多少、整轮扫了多少组、最后停在哪一组、
+             *   以及 proc 里有没有"task 形状"的候选（有 → 形状/偏移问题；
+             *   只有裸内核指针没有 task 形状 → proc 指针本身可疑）。
              */
-            uint32_t kptr_off = 0;
-            uint64_t kptr_val = 0;
-            int has_kptr = mf_chain_first_kernel_ptr(proc, MFCAL_PROC_LAST, &kptr_off, &kptr_val);
+            char shape[120];
+            shape[0] = '\0';
+            mf_chain_describe_task_like(proc, MFCAL_SWEEP_LAST, shape, sizeof(shape));
             snprintf(report, report_len,
-                     "calib fail; proc=%#llx probes=%u stage=%d %s%#x=%#llx; %s",
+                     "calib fail; proc=%#llx probes=%u stage=%d %s; %s",
                      (unsigned long long)proc, scan.probed, scan.stage,
-                     has_kptr ? "kptr+" : "kptr-none:",
-                     (unsigned)kptr_off, (unsigned long long)kptr_val,
-                     scan_probe.why);
+                     shape, scan_probe.why);
         }
         return -4;
     }
