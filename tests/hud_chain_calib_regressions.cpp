@@ -88,7 +88,8 @@ static void TestDocumentedIos16() {
     Check(r.offsets.proc_hop == 2u, "the hit must keep the two-hop shape");
     Check(r.offsets.proc_task2 == 0x08u, "pr_task must be read at proc_ro+0x08");
     Check(mfcal_same(&r.offsets, &t.want), "the reported layout must be the one that worked");
-    Check(mfcal_same(&mfcal_legacy_offsets(), &t.want),
+    mfcal_offsets baseline = mfcal_legacy_offsets();
+    Check(mfcal_same(&baseline, &t.want),
           "mfcal_legacy_offsets must now describe the two-hop baseline");
 }
 
@@ -173,7 +174,8 @@ static void TestNothingWorks() {
     Check(calls == MFCAL_MAX_PROBES, "probe calls must equal the candidate bound");
     Check(r.budget_exhausted == 0, "an unlimited run is never a budget stop");
     Check(r.stage == 0, "a failed run must not claim a stage");
-    Check(mfcal_same(&r.offsets, &mfcal_legacy_offsets()),
+    mfcal_offsets baseline = mfcal_legacy_offsets();
+    Check(mfcal_same(&r.offsets, &baseline),
           "a failed run must still report the baseline for diagnostics");
 }
 
