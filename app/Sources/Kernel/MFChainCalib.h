@@ -155,6 +155,17 @@ static const uint32_t mfcal_map_pmap_variants[] = {0x40u, 0x38u, 0x48u, 0x30u, 0
 #define MFCAL_MAX_PROBES ((unsigned)(MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + \
                                      MFCAL_STAGE3_COUNT + MFCAL_STAGE4_COUNT))
 
+/*
+ * [M5.231] 默认预算：只跑前三组（两条基线 + 两跳/一跳邻域 + map/pmap 邻域 = 28 发）。
+ *
+ * 宽扫（第 4 组）要顺着 proc 字段一路解引用三千多个未验证指针。真机已经证明
+ * 这条路的代价是内核 panic 重启（panic-full-2026-10-27-162314：
+ * copy_validate(..., 0xffffff8d000002a4, 8) - kaddr not in kernel）。
+ * 桥接层现在给每次解引用加了"页表里映没映"的闸，但宽扫依然是把设备当试验田；
+ * 默认关掉，等有了一台机器上的真实形状再决定要不要放开。
+ */
+#define MFCAL_SAFE_BUDGET ((unsigned)(MFCAL_STAGE1_COUNT + MFCAL_STAGE2_COUNT + MFCAL_STAGE3_COUNT))
+
 static inline int mfcal_same(const mfcal_offsets *a, const mfcal_offsets *b)
 {
     if (a == NULL || b == NULL) return 0;

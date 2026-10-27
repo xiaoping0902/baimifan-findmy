@@ -328,6 +328,26 @@ static void TestCoverage() {
     Check(map_pmaps.size() == 5, "every map_pmap alternative must be covered exactly once");
 }
 
+// 默认预算：只跑前三组。宽扫会把三千多个未验证指针当地址去读，
+// 真机已经用一次内核 panic 证明过代价（copy_validate → 重启）。
+static void TestSafeBudget() {
+    Check(MFCAL_SAFE_BUDGET == 28u, "the default budget must be groups 1-3 only");
+    Check(MFCAL_SAFE_BUDGET < MFCAL_MAX_PROBES, "the default budget must exclude the wide sweep");
+
+    unsigned calls = 0;
+    mfcal_result r = mfcal_run(ProbeNever, &calls, MFCAL_SAFE_BUDGET);
+    Check(r.found == 0, "a bounded run cannot claim success");
+    Check(r.probed == MFCAL_SAFE_BUDGET, "the bounded run must stop exactly at the budget");
+    Check(calls == MFCAL_SAFE_BUDGET, "probe calls must match the budget");
+    Check(r.budget_exhausted == 1, "stopping early because of the budget must be labelled");
+
+    for (unsigned i = 0; i < MFCAL_SAFE_BUDGET; ++i) {
+        mfcal_offsets o;
+        Check(mfcal_probe_at(i, &o) == 1, "every budgeted index must resolve");
+        Check(o.proc_task <= 0x40u, "the budgeted groups must stay near the documented offsets");
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     if (std::strcmp(argv[1], "documented-ios16") == 0) TestDocumentedIos16();
@@ -339,6 +359,7 @@ int main(int argc, char **argv) {
     else if (std::strcmp(argv[1], "sweep-one-hop") == 0) TestSweepOneHop();
     else if (std::strcmp(argv[1], "nothing-works") == 0) TestNothingWorks();
     else if (std::strcmp(argv[1], "budget") == 0) TestBudget();
+    else if (std::strcmp(argv[1], "safe-budget") == 0) TestSafeBudget();
     else if (std::strcmp(argv[1], "enumeration") == 0) TestEnumeration();
     else if (std::strcmp(argv[1], "coverage") == 0) TestCoverage();
     else return 2;

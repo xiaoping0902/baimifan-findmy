@@ -17,6 +17,7 @@ CASES = [
     "sweep-one-hop",
     "nothing-works",
     "budget",
+    "safe-budget",
     "enumeration",
     "coverage",
 ]
