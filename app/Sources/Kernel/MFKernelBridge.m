@@ -1194,7 +1194,7 @@ uint64_t mf_get_current_task(void) { return mf_info_field(5); }
 
 /* 下面这两个 helper 的定义在 5b 段；这里先声明，供链表遍历使用。 */
 static uint64_t mf_bridge_unsign(uint64_t p);
-static int mf_bridge_is_kaddr(uint64_t a);
+static int mf_bridge_is_kernel_va(uint64_t a);
 
 /* p_pid 扫描范围：struct proc 开头这一段里它一定在 */
 #define MF_PID_SCAN_START 0x10
@@ -1227,7 +1227,7 @@ static int mf_collect_proc_chain(uint64_t *out, int max_out)
     int n = 0;
     uint64_t cur = head;
     for (int i = 0; i < 4000 && n < max_out; i++) {
-        if (!mf_bridge_is_kaddr(cur)) {
+        if (!mf_bridge_is_kernel_va(cur)) {
             break;
         }
         out[n++] = cur;
