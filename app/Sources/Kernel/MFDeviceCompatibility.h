@@ -91,7 +91,18 @@ static inline MFDeviceConfiguration mf_device_configuration(int major, int minor
         c.method = 2;
     }
 
-    c.pages = memory >= 5ULL * 1024 * 1024 * 1024 ? (c.method == 0 ? 1024 : 3072) : 512;
+    /*
+     * [M5.236] puaf_pages：landa（16.5.1+）也从 3072 降到 1024。
+     *
+     * 真机证据（panic-full-2026-10-27-170458，iPad8,11 / 16.6.1）：
+     *     pmap_remove_pv: PVH entry at pai 150632 is locked down
+     *         (0x6200000000000000), cannot remove @pmap_data.c:2504
+     * 这不是我们读越界（那次是 copy_validate），而是 landa 的 PUAF 在页表里
+     * 留下被 lock 的 PV 表项；游戏启动后内核回收物理页，pmap_remove_pv 撞上
+     * 就 panic。dangling 页越多，撞上的概率越大 —— 3072 页是给 M 系列大内存
+     * 定的，对这台 8GB iPad 属于过量。先降到 1024，把"被锁 PVH"数量压小。
+     */
+    c.pages = memory >= 5ULL * 1024 * 1024 * 1024 ? 1024 : 512;
     return c;
 }
 

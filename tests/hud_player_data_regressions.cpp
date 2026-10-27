@@ -1,4 +1,4 @@
-#include "../app/Sources/Game/MFUEPlayerData.h"
+﻿#include "../app/Sources/Game/MFUEPlayerData.h"
 #include "../app/Sources/Game/MFUEDataTable.h"
 #include "../app/Sources/Game/MFHeldWeapons.h"
 #include "../app/Sources/Game/MFHeroNames.h"
@@ -17,8 +17,8 @@
 int main() {
     constexpr uint64_t gb = 1024ULL * 1024 * 1024;
     auto device = mf_device_configuration(16, 6, 1, 0x07d34b9f, 6 * gb);
-    CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == 2 && device.pages == 3072,
-          "the connected A12Z tablet on 16.6.1 must select landa and its large-memory allocation");
+    CHECK(device.status == MF_DEVICE_SUPPORTED && device.method == 2 && device.pages == 1024,
+          "the connected A12Z tablet on 16.6.1 must select landa with the reduced page count");
     CHECK(!mf_device_method_allowed(device, 0) && !mf_device_method_allowed(device, 1),
           "patched old methods must be refused on 16.6.1 before an attempt");
     device = mf_device_configuration(16, 1, 0, 0xda33d83d, 8 * gb);
