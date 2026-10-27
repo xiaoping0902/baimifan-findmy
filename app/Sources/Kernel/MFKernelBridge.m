@@ -2211,19 +2211,31 @@ void MFLibkfdKRead4(uint64_t kfd, uint64_t kaddr, void *buf, size_t size)
  *   · 自检：kbase 处能不能读回 0xfeedfacf（这一条最硬）。
  * 只读、只写文件，不做任何写操作，也不改变流程。
  */
-static void mf_write_kfd_offsets_snapshot(uint64_t pages, int puaf_method,
+static void mf_write_kfd_offsets_snapshot(int rc, uint64_t pages, int puaf_method,
                                           int kread_method, int kwrite_method)
 {
     struct kfd *kfd = g_kfd;      /* dynamic_info() 宏按这个名字展开 */
 
-    if (g_kfd == NULL) {
-        return;
-    }
-
-    FILE *f = fopen("/var/mobile/Media/mf-debug/mf-kfd-offsets.txt", "w");
+    /*
+     * [M5.238] 追加写，且失败也写：landa 失败时 patchfinder 往往已经跑过，
+     * 那些地址正是我们要的；只在成功时写，等于把最有价值的一次运行丢掉。
+     */
+    FILE *f = fopen("/var/mobile/Media/mf-debug/mf-kfd-offsets.txt", "a");
     if (f == NULL) {
         return;
     }
+
+    if (g_kfd == NULL) {
+        fprintf(f, "--- rc=%d kfd=NULL pages=%llu method=%d kread=%d kwrite=%d\n",
+                rc, (unsigned long long)pages, puaf_method, kread_method, kwrite_method);
+        fclose(f);
+        return;
+    }
+
+    fprintf(f, "--- rc=%d pages=%llu/%llu method=%d kread=%d kwrite=%d\n",
+            rc, (unsigned long long)pages,
+            (unsigned long long)g_kfd->puaf.number_of_puaf_pages,
+            puaf_method, kread_method, kwrite_method);
 
     uint32_t magic = 0;
     int magic_rc = mf_kread32(mf_get_kbase(), &magic);

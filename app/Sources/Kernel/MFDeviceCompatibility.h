@@ -102,7 +102,17 @@ static inline MFDeviceConfiguration mf_device_configuration(int major, int minor
      * 就 panic。dangling 页越多，撞上的概率越大 —— 3072 页是给 M 系列大内存
      * 定的，对这台 8GB iPad 属于过量。先降到 1024，把"被锁 PVH"数量压小。
      */
-    c.pages = memory >= 5ULL * 1024 * 1024 * 1024 ? 1024 : 512;
+    /*
+     * [M5.238] 页数按原语分开，且 <5GB 一律 512：
+     *   · landa（16.5.1+）需要足够页才能布置成功 —— 真机把 3072 降到 1024 后
+     *     直接 "landa retry limit reached"，连 kopen 都过不去；
+     *   · physpuppet / smith 用 1024 就够，页越多越容易留残留。
+     */
+    if (memory < 5ULL * 1024 * 1024 * 1024) {
+        c.pages = 512;
+    } else {
+        c.pages = (c.method == 2) ? 3072 : 1024;
+    }
     return c;
 }
 
