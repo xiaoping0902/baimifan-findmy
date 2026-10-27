@@ -2308,12 +2308,12 @@ int mf_kopen(uint64_t puaf_pages, int puaf_method, int kread_method, int kwrite_
     if (rc == 0) {
         g_kopen_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
         g_cleanup_done = 1;      /* kopen 返回 0 = puaf_cleanup 已在内部执行 */
-        /* [M5.237] 立刻落盘这台机器实际用的地址，供离线核对 */
-        mf_write_kfd_offsets_snapshot(puaf_pages, puaf_method, kread_method, kwrite_method);
     } else {
         g_kopen_ms = -1.0;
         g_cleanup_done = 0;
     }
+    /* [M5.238] 成败都落盘：失败那次往往已经跑过 patchfinder，地址更有价值 */
+    mf_write_kfd_offsets_snapshot(rc, puaf_pages, puaf_method, kread_method, kwrite_method);
     return rc;
 }
 
