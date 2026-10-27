@@ -1,4 +1,4 @@
-"""Compile and run the adaptive KFD chain search regression without Apple SDK or device access."""
+"""Compile and run the runtime chain calibration regression without Apple SDK or device access."""
 import os
 from pathlib import Path
 import shutil
@@ -8,12 +8,15 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 CASES = [
-    "default-first",
-    "shifted-offsets",
-    "exhaustive-failure",
+    "legacy-first",
+    "first-probe",
+    "shifted-proc-task",
+    "stage2-pmap",
+    "stage3-task-map",
+    "nothing-works",
     "budget",
-    "order-and-uniqueness",
-    "candidate-pools",
+    "enumeration",
+    "coverage",
 ]
 
 
@@ -30,9 +33,9 @@ def main():
     if compiler is None:
         raise SystemExit("A C++17 compiler is required.")
 
-    with tempfile.TemporaryDirectory(prefix="hud-chain-scan-") as directory:
-        binary = Path(directory) / ("chain-scan.exe" if os.name == "nt" else "chain-scan")
-        source = str(ROOT / "tests/hud_chain_scan_regressions.cpp")
+    with tempfile.TemporaryDirectory(prefix="hud-chain-calib-") as directory:
+        binary = Path(directory) / ("chain-calib.exe" if os.name == "nt" else "chain-calib")
+        source = str(ROOT / "tests/hud_chain_calib_regressions.cpp")
         if Path(compiler).name.lower() in ("cl", "cl.exe"):
             options = ["/nologo", "/std:c++17", "/EHsc", "/utf-8", source, f"/Fe:{binary}"]
         else:
@@ -41,11 +44,11 @@ def main():
 
         failed = []
         for case in CASES:
-            result = subprocess.run([str(binary), case], timeout=30)
+            result = subprocess.run([str(binary), case], timeout=60)
             if result.returncode != 0:
                 failed.append(case)
         if failed:
-            raise SystemExit("hud_chain_scan_regressions failed: " + ", ".join(failed))
+            raise SystemExit("hud_chain_calib_regressions failed: " + ", ".join(failed))
 
 
 if __name__ == "__main__":

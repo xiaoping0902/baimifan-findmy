@@ -50,11 +50,11 @@
 #include "MFLibkfdHost.h"
 
 /*
- * [M5.225] 链路偏移自适应的两个依赖：
- *   MFChainScan.h —— 候选枚举与搜索顺序（纯 C，可在 Windows 上直接回归）
- *   MFPageTable.h —— 判据要用真页表走一遍：能读回目标 Mach-O 头才算数
+ * [M5.226] 运行时链路校准的两个依赖：
+ *   MFChainCalib.h —— 三跳偏移的扫描顺序/预算/去重（纯 C，Windows 上可回归）
+ *   MFPageTable.h  —— 判据要用真页表走一遍：能读回 Mach-O 头才算数
  */
-#include "MFChainScan.h"
+#include "MFChainCalib.h"
 #include "MFPageTable.h"
 
 /* ── libkfd 配置开关：必须在 include libkfd.h 之前定义 ───────────────
@@ -1388,10 +1388,12 @@ uint64_t mf_find_proc_by_pid(int pid, char *report, size_t report_len)
 }
 
 /* ================================================================ */
-/* 5b) 跨进程：pid -> 目标 pmap -> 目标页表根（M5.108 / M5.225）      */
+/* 5b) 跨进程：pid -> 目标 pmap -> 目标页表根（M5.108 / M5.226）      */
 /* ================================================================ */
 
-/* PAC strip（T8112 上 t1sz = 17，与 MFCalibrate 用的同一套规则）。 */
+/*
+ * PAC strip（T8112 上 t1sz = 17，与 MFCalibrate 用的同一套规则）。
+ */
 static uint64_t mf_bridge_unsign(uint64_t p)
 {
     if (p == 0) {
@@ -1405,193 +1407,179 @@ static uint64_t mf_bridge_unsign(uint64_t p)
     return p & ~pac_mask;
 }
 
-static int mf_bridge_is_kaddr(uint64_t a)
+/*
+ * [M5.226] 只认真正的内核 VA 域。
+ *
+ * 旧的 mf_bridge_is_kaddr 判 >= 0xffff000000000000，太松：16.6.1 那台
+ * 读出来的 vm_map 是 0xffffeddcec69b400 —— 高位全 1、看着像内核指针，
+ * 实际落在内核 VA 空间之外，于是被放行，整条链带着垃圾往下走。
+ * iOS 的内核链接基址在 0xfffffe0000000000 之上，这里按真实边界判。
+ */
+static int mf_bridge_is_kernel_va(uint64_t a)
 {
-    return a >= 0xffff000000000000ULL;
+    return a >= 0xfffffe0000000000ULL;
 }
 
-/*
- * [M5.225] 四跳偏移自适应。
- *
- * 硬编码链（proc+0x18 → proc_ro+0x08 → task+0x28 → map+0x40）在
- * iPad14,4 / iPadOS 16.1 上是验证过的，但到 iPad8,11 / iPadOS 16.6.1
- * （20G81）上第 5 跳就断：
- *     [MF][Read] attachKFDPid(282) 失败 rc=-7 读 vm_map+0x40 (pmap) 失败
- *
- * 前四跳之所以"没报错"，是因为读回来的野指针高位全 1、看着像内核地址，
- * mf_bridge_is_kaddr 这道硬闸拦不住，错的值一路传下去，直到踩在死地址上。
- * 换句话说：偏移错了的时候，这条链自己发现不了 —— 必须有外部判据。
- *
- * 判据不用"像不像内核地址"，用真东西：拿这个根表走一遍页表，
- * 能把目标进程的 Mach-O 头（0xfeedfacf）读回来才算这组偏移成立。
- *
- * 顺序由 MFChainScan.h 决定：默认组合第一个试，所以 16.1 那些设备
- * 仍然是"一发命中"，不多读一次；只有默认组合不成立时才开始扫。
- */
-typedef struct {
-    uint64_t proc;
-    uint64_t proc_ro, task, map, pmap, root;
-    int stage;          /* 已走通的最后一跳：1=proc 2=proc_ro 3=task 4=map 5=pmap 6=root */
-    int rc;             /* 沿用 -4..-8 的老语义；-9 = 根表读不回 Mach-O */
-    char why[160];
+/* 页表根一定是页对齐的；先用它挡掉扫描里的大量野指针。 */
+static int mf_bridge_is_page_aligned(uint64_t a)
+{
+    return (a & 0xfffULL) == 0;
+}
 
-    /* 默认组合那一发的现场：全失败时进报告，方便下次直接照方抓药 */
-    int default_recorded;
-    uint64_t default_proc_ro, default_task, default_map, default_pmap, default_root;
-    int default_stage, default_rc;
-    char default_why[160];
+typedef struct {
+    uint64_t proc;       /* 起点：kernel_proc 或目标进程的 proc */
+    uint64_t want_base;  /* 期望从这个根表读到的 Mach-O 基址；0 = 自动找最低映射页 */
+    int auto_base;       /* want_base 为 0 时，第一次成功定位到基址就用它 */
+
+    /* 最近一次探测的现场（诊断用） */
+    uint64_t task, map, pmap, root;
+    int stage;
+    char why[160];
 } mf_chain_probe;
 
 static int g_chain_offsets_known;
-static mfchain_offsets g_chain_offsets;
+static mfcal_offsets g_chain_offsets;
 
-static int mf_chain_root_reads_macho(uint64_t root)
+/*
+ * 判据：这组偏移解出来的页表根，必须能读回 Mach-O 头 0xfeedfacf。
+ * 这是整条链上唯一不可伪造的一步 —— 野指针能凑出"像内核地址"的值，
+ * 但凑不出一张能翻译出 Mach-O 头的页表。
+ */
+static int mf_chain_root_reads_macho(uint64_t root, uint64_t want_base, uint64_t *base_out)
 {
-    if (root == 0 || !mf_bridge_is_kaddr(root)) {
-        return 0;
-    }
-    /*
-     * 页表根一定是页对齐的。这一道过滤不是为了"更严格"，是为了少做危险动作：
-     * 扫描阶段会拿到一堆野指针，先用对齐把它挡掉，就不用拿垃圾根表去走页表。
-     * 用 0xFFF 而不是 0x3FFF 是保守选择 —— 万一某代内核不是 16KB 粒度，
-     * 也不至于把正确的那组误判掉。
-     */
-    if ((root & 0xfffULL) != 0) {
+    if (!mf_bridge_is_kernel_va(root) || !mf_bridge_is_page_aligned(root)) {
         return 0;
     }
     mfpt_cache_reset();
-    uint64_t base = 0;
-    if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
-        return 0;
+
+    uint64_t base = want_base;
+    if (base == 0) {
+        if (mfpt_lowest_mapped_page(root, 0x100000000ULL, &base) != 0 || base == 0) {
+            return 0;
+        }
     }
     uint32_t magic = 0;
     if (mfpt_read(root, base, &magic, sizeof(magic)) != 0) {
         return 0;
     }
-    return magic == 0xfeedfacf;
+    if (magic != 0xfeedfacf) {
+        return 0;
+    }
+    if (base_out) *base_out = base;
+    return 1;
 }
 
-static int mf_chain_try(void *ctx, const mfchain_offsets *offsets)
+static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
 {
     mf_chain_probe *p = (mf_chain_probe *)ctx;
     uint64_t v = 0;
 
-    p->proc_ro = p->task = p->map = p->pmap = p->root = 0;
-    p->stage = 1;
-    p->rc = 0;
-    p->why[0] = '\0';
+    p->task = p->map = p->pmap = p->root = 0;
 
-    /* 2) proc -> proc_ro */
-    if (mf_kread64(p->proc + offsets->proc_ro, &v) != 0) {
-        p->rc = -4;
-        snprintf(p->why, sizeof(p->why), "读 proc+0x%x (proc_ro) 失败", (unsigned)offsets->proc_ro);
-        goto fail;
+    /* 1) proc -> task（这一跳随 iOS 版本漂移，社区实现也承认要扫） */
+    if (mf_kread64(p->proc + offsets->proc_task, &v) != 0) {
+        snprintf(p->why, sizeof(p->why), "read proc+0x%x failed", (unsigned)offsets->proc_task);
+        return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kaddr(v)) {
-        p->rc = -4;
-        snprintf(p->why, sizeof(p->why), "proc_ro=0x%llx 不是内核地址", (unsigned long long)v);
-        goto fail;
-    }
-    p->proc_ro = v;
-    p->stage = 2;
-
-    /* 3) proc_ro -> task */
-    if (mf_kread64(p->proc_ro + offsets->pr_task, &v) != 0) {
-        p->rc = -5;
-        snprintf(p->why, sizeof(p->why), "读 proc_ro+0x%x (pr_task) 失败", (unsigned)offsets->pr_task);
-        goto fail;
-    }
-    v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kaddr(v)) {
-        p->rc = -5;
-        snprintf(p->why, sizeof(p->why), "task=0x%llx 不是内核地址", (unsigned long long)v);
-        goto fail;
+    if (!mf_bridge_is_kernel_va(v)) {
+        snprintf(p->why, sizeof(p->why), "proc+0x%x -> %#llx not a kernel VA",
+                 (unsigned)offsets->proc_task, (unsigned long long)v);
+        return 0;
     }
     p->task = v;
-    p->stage = 3;
 
-    /* 4) task -> vm_map */
+    /* 2) task -> vm_map */
     if (mf_kread64(p->task + offsets->task_map, &v) != 0) {
-        p->rc = -6;
-        snprintf(p->why, sizeof(p->why), "读 task+0x%x (vm_map) 失败", (unsigned)offsets->task_map);
-        goto fail;
+        snprintf(p->why, sizeof(p->why), "read task+0x%x failed", (unsigned)offsets->task_map);
+        return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kaddr(v)) {
-        p->rc = -6;
-        snprintf(p->why, sizeof(p->why), "vm_map=0x%llx 不是内核地址", (unsigned long long)v);
-        goto fail;
+    if (!mf_bridge_is_kernel_va(v)) {
+        snprintf(p->why, sizeof(p->why), "task+0x%x -> %#llx not a kernel VA",
+                 (unsigned)offsets->task_map, (unsigned long long)v);
+        return 0;
     }
     p->map = v;
-    p->stage = 4;
 
-    /* 5) vm_map -> pmap */
+    /* 3) vm_map -> pmap */
     if (mf_kread64(p->map + offsets->map_pmap, &v) != 0) {
-        p->rc = -7;
-        snprintf(p->why, sizeof(p->why), "读 vm_map+0x%x (pmap) 失败", (unsigned)offsets->map_pmap);
-        goto fail;
+        snprintf(p->why, sizeof(p->why), "read map+0x%x failed", (unsigned)offsets->map_pmap);
+        return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kaddr(v)) {
-        p->rc = -7;
-        snprintf(p->why, sizeof(p->why), "pmap=0x%llx 不是内核地址", (unsigned long long)v);
-        goto fail;
+    if (!mf_bridge_is_kernel_va(v) || !mf_bridge_is_page_aligned(v)) {
+        snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx not a page-aligned kernel VA",
+                 (unsigned)offsets->map_pmap, (unsigned long long)v);
+        return 0;
     }
     p->pmap = v;
-    p->stage = 5;
 
-    /* 6) pmap -> tte（页表根） */
+    /* 4) pmap -> tte（根表） */
     if (mf_kread64(p->pmap, &v) != 0) {
-        p->rc = -8;
-        snprintf(p->why, sizeof(p->why), "读 pmap->tte 失败");
-        goto fail;
+        snprintf(p->why, sizeof(p->why), "read pmap->tte failed");
+        return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_is_kaddr(v)) {
-        p->rc = -8;
-        snprintf(p->why, sizeof(p->why), "根表=0x%llx 不是内核地址", (unsigned long long)v);
-        goto fail;
+    if (!mf_bridge_is_kernel_va(v) || !mf_bridge_is_page_aligned(v)) {
+        snprintf(p->why, sizeof(p->why), "pmap->tte %#llx not a page-aligned kernel VA",
+                 (unsigned long long)v);
+        return 0;
     }
     p->root = v;
-    p->stage = 6;
 
-    /*
-     * 唯一判据：这组偏移解出来的根表，必须能真的读回目标自己的 Mach-O 头。
-     * 走到这一步说明四跳都"没报错"，但没报错不等于对 —— 只有读到 0xfeedfacf 才算。
-     */
-    if (!mf_chain_root_reads_macho(p->root)) {
-        p->rc = -9;
-        snprintf(p->why, sizeof(p->why), "根表 0x%llx 读不回 Mach-O 头",
-                 (unsigned long long)p->root);
-        goto fail;
+    uint64_t base = 0;
+    if (!mf_chain_root_reads_macho(p->root, p->want_base, &base)) {
+        snprintf(p->why, sizeof(p->why), "root %#llx cannot read a Mach-O header at %#llx",
+                 (unsigned long long)p->root, (unsigned long long)p->want_base);
+        return 0;
+    }
+    if (p->want_base == 0 && p->auto_base == 0 && base != 0) {
+        p->auto_base = 1;
     }
     return 1;
-
-fail:
-    {
-        mfchain_offsets fallback = mfchain_default_offsets();
-        if (!p->default_recorded && mfchain_same(offsets, &fallback)) {
-            p->default_recorded = 1;
-            p->default_proc_ro = p->proc_ro;
-            p->default_task = p->task;
-            p->default_map = p->map;
-            p->default_pmap = p->pmap;
-            p->default_root = p->root;
-            p->default_stage = p->stage;
-            p->default_rc = p->rc;
-            snprintf(p->default_why, sizeof(p->default_why), "%s", p->why);
-        }
-    }
-    return 0;
 }
 
 /*
- * [M5.225] pid -> proc -> proc_ro -> task -> vm_map -> pmap -> tte。
+ * 用内核对自身做一次校准。
  *
- * 失败返回 -1..-8 沿用老语义（取默认组合那一发的 rc），
- * 这样现场日志和历史记录仍然可以对上；-9 表示"链走通了但根表不可用"。
- * report 里带默认组合的逐跳现场，下一次直接照着改候选池。
+ * kernel_proc（kernproc 符号直接取）和 kernelbase（patchfinder 算的）是这台
+ * 机器上两个不依赖 proc 布局的真值；用它俩把三跳偏移定下来，之后所有进程
+ * 共用。任何设备、任何 iOS 16.x 都是同一条路径 —— 不查版本表。
+ *
+ * 注意不要用 kfd 的 current_task/current_map：kfd 的 iOS16 条目里
+ * proc__object_size = 0，于是 current_task == current_proc，那两个值是错的。
+ */
+static int mf_chain_calibrate_locked(void)
+{
+    uint64_t kernel_proc = mf_get_kernel_proc();
+    uint64_t kbase = mf_get_kbase();
+
+    if (!mf_bridge_is_kernel_va(kernel_proc) || !mf_bridge_is_kernel_va(kbase)) {
+        return 0;
+    }
+
+    mf_chain_probe probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.proc = kernel_proc;
+    probe.want_base = kbase;
+
+    mfcal_result r = mfcal_run(mf_chain_probe_fn, &probe, 0);
+    if (!r.found) {
+        return 0;
+    }
+
+    g_chain_offsets = r.offsets;
+    g_chain_offsets_known = 1;
+    return 1;
+}
+
+/*
+ * [M5.226] pid -> proc -> task -> vm_map -> pmap -> tte。
+ *
+ * 与 M5.225 的区别：不再依赖写死的三跳，也不靠"候选池猜"。
+ * 校准优先走内核对自身（真值最硬），校准不到再用目标进程自己当锚点。
+ * 命中结果缓存，同一内核下只付一次代价。
  */
 static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, uint64_t *map_out,
                  uint64_t *pmap_out, uint64_t *root_out, char *report, size_t report_len)
@@ -1607,10 +1595,9 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
     if (proc == 0) {
         return -2;
     }
-    if (!mf_bridge_is_kaddr(proc)) {
+    if (!mf_bridge_is_kernel_va(proc)) {
         if (report && report_len) {
-            snprintf(report, report_len, "proc=0x%llx 不是内核地址",
-                     (unsigned long long)proc);
+            snprintf(report, report_len, "proc=%#llx 不在内核 VA 域", (unsigned long long)proc);
         }
         return -3;
     }
@@ -1619,70 +1606,90 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
     memset(&probe, 0, sizeof(probe));
     probe.proc = proc;
 
-    mfchain_result scan;
-    memset(&scan, 0, sizeof(scan));
-    scan.offsets = mfchain_default_offsets();
-
-    /*
-     * 上次命中的组合优先（换局、换进程时不必重扫）。
-     * 如果它就是默认值，交给 mfchain_search 走 —— 它的第一个候选也是它，
-     * 多这一层判断只是为了避免同一发被读两次。
-     */
+    /* ① 已有校准结果：直接套用，一次探测即可确认它对这个进程也成立 */
     if (g_chain_offsets_known) {
-        mfchain_offsets cached = g_chain_offsets;
-        mfchain_offsets fallback = mfchain_default_offsets();
-        if (mfchain_same(&cached, &fallback)) {
-            g_chain_offsets_known = 0;
-        } else if (mf_chain_try(&probe, &cached)) {
-            scan.found = 1;
-            scan.offsets = cached;
-            scan.attempts = 1;
+        mfcal_offsets cached = g_chain_offsets;
+        if (mf_chain_probe_fn(&probe, &cached)) {
+            if (proc_out) *proc_out = proc;
+            if (task_out) *task_out = probe.task;
+            if (map_out)  *map_out = probe.map;
+            if (pmap_out) *pmap_out = probe.pmap;
+            if (root_out) *root_out = probe.root;
+            if (report && report_len) {
+                snprintf(report, report_len,
+                         "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x cached",
+                         pid, (unsigned long long)proc, (unsigned long long)probe.root,
+                         cached.proc_task, cached.task_map, cached.map_pmap);
+            }
+            return 0;
         }
     }
 
-    if (!scan.found) {
-        scan = mfchain_search(mf_chain_try, &probe, 0);
+    /* ② 首次（或校准失效）：先拿内核对自身校准 —— 真值最硬 */
+    if (!g_chain_offsets_known) {
+        (void)mf_chain_calibrate_locked();
+        if (g_chain_offsets_known) {
+            mfcal_offsets cached = g_chain_offsets;
+            memset(&probe, 0, sizeof(probe));
+            probe.proc = proc;
+            if (mf_chain_probe_fn(&probe, &cached)) {
+                if (proc_out) *proc_out = proc;
+                if (task_out) *task_out = probe.task;
+                if (map_out)  *map_out = probe.map;
+                if (pmap_out) *pmap_out = probe.pmap;
+                if (root_out) *root_out = probe.root;
+                if (report && report_len) {
+                    snprintf(report, report_len,
+                             "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x calibrated",
+                             pid, (unsigned long long)proc, (unsigned long long)probe.root,
+                             cached.proc_task, cached.task_map, cached.map_pmap);
+                }
+                return 0;
+            }
+        }
     }
 
-    if (!scan.found) {
+    /* ③ 内核校准不可用：退到"用目标进程自己当锚点"扫一遍 */
+    {
+        mf_chain_probe scan_probe;
+        memset(&scan_probe, 0, sizeof(scan_probe));
+        scan_probe.proc = proc;
+        scan_probe.want_base = 0;   /* 自动取该进程最低映射页 */
+
+        mfcal_result scan = mfcal_run(mf_chain_probe_fn, &scan_probe, 0);
+        if (scan.found) {
+            g_chain_offsets = scan.offsets;
+            g_chain_offsets_known = 1;
+            if (proc_out) *proc_out = proc;
+            if (task_out) *task_out = scan_probe.task;
+            if (map_out)  *map_out = scan_probe.map;
+            if (pmap_out) *pmap_out = scan_probe.pmap;
+            if (root_out) *root_out = scan_probe.root;
+            if (report && report_len) {
+                snprintf(report, report_len,
+                         "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x stage=%d probes=%u",
+                         pid, (unsigned long long)proc, (unsigned long long)scan_probe.root,
+                         scan.offsets.proc_task, scan.offsets.task_map, scan.offsets.map_pmap,
+                         scan.stage, scan.probed);
+            }
+            return 0;
+        }
+
         if (report && report_len) {
-            /*
-             * 报告保持 ASCII 骨架 + 中文原因：调用方的 why 缓冲只有 192~256 字节，
-             * 中文按 UTF-8 三字节算，把中文堆在前面会把真正的原因挤掉。
-             * stage 的含义：1=proc 2=proc_ro 3=task 4=map 5=pmap 6=root。
-             */
+            /* 一行能塞下的最有用信息：试了多少组、最后卡在哪、最后一句原因 */
             snprintf(report, report_len,
-                     "scan %u fail; default stage=%d ro=%#llx task=%#llx map=%#llx; %s",
-                     scan.attempts, probe.default_stage,
-                     (unsigned long long)probe.default_proc_ro,
-                     (unsigned long long)probe.default_task,
-                     (unsigned long long)probe.default_map,
-                     probe.default_why);
+                     "calib fail; probes=%u stage=%d last proc+0x%x -> %#llx/%#llx/%#llx root=%#llx; %s",
+                     scan.probed, scan.stage,
+                     (unsigned)scan.offsets.proc_task,
+                     (unsigned long long)scan_probe.task,
+                     (unsigned long long)scan_probe.map,
+                     (unsigned long long)scan_probe.pmap,
+                     (unsigned long long)scan_probe.root,
+                     scan_probe.why);
         }
-        return probe.default_rc ? probe.default_rc : -7;
+        return -4;
     }
-
-    if (!g_chain_offsets_known || !mfchain_same(&g_chain_offsets, &scan.offsets)) {
-        g_chain_offsets = scan.offsets;
-        g_chain_offsets_known = 1;
-    }
-
-    if (proc_out) *proc_out = probe.proc;
-    if (task_out) *task_out = probe.task;
-    if (map_out)  *map_out = probe.map;
-    if (pmap_out) *pmap_out = probe.pmap;
-    if (root_out) *root_out = probe.root;
-    if (report && report_len) {
-        snprintf(report, report_len,
-                 "pid=%d proc=%#llx root=%#llx chain %#x/%#x/%#x/%#x try=%u",
-                 pid, (unsigned long long)proc, (unsigned long long)probe.root,
-                 scan.offsets.proc_ro, scan.offsets.pr_task,
-                 scan.offsets.task_map, scan.offsets.map_pmap,
-                 scan.attempts);
-    }
-    return 0;
 }
-
 // [M5.207] mf_clear_proc_csflags 已移除：它只为 task_for_pid 清目标 csflags。
 
 // [M5.207] 5b) TF_PLATFORM 段整体移除。
