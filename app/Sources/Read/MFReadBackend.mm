@@ -85,7 +85,8 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
  */
 - (BOOL)attachKFDPid:(int)pid {
     uint64_t root = 0;
-    char why[192] = {0};
+    /* [M5.225] 384 字节：链路报告带逐跳数值，192 会在中文原因上截断。 */
+    char why[384] = {0};
     int rc = mf_pid_chain(pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why));
     if (rc != 0 || root == 0) {
         NSLog(@"[MF][Read] attachKFDPid(%d) 失败 rc=%d %s", pid, rc, why);
@@ -100,8 +101,13 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     self.kfdRoot = root;
     self.modeFlag = YES;
     mfpt_cache_reset();
-    NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx session=%@",
-          pid, (unsigned long long)root, self.sessionIdentity ?: @"(身份未确认)");
+    /*
+     * [M5.225] 成功时也把链路报告打出来：里面带着命中的四跳偏移
+     * （"链[0x18/0x08/0x28/0x40] 第1组"）。以前只在失败时打，导致
+     * 16.6.1 那台"到底用的哪组偏移"在日志里查不到。
+     */
+    NSLog(@"[MF][Read] KFD 后端就绪 pid=%d root=0x%llx session=%@ %s",
+          pid, (unsigned long long)root, self.sessionIdentity ?: @"(身份未确认)", why);
     return YES;
 }
 

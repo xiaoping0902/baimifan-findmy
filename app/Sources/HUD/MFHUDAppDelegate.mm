@@ -1218,7 +1218,8 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
      * 「后端指向新进程、libBase 还是旧的」这种半吊子状态，绘制会读到垃圾。
      */
     uint64_t root = 0;
-    char why[192] = {0};
+    /* [M5.225] 384 字节：链路报告带逐跳数值，192 会在中文原因上截断。 */
+    char why[384] = {0};
     if (mf_pid_chain(game.pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why)) != 0 || root == 0) {
         [log appendFormat:@"  [rebind] pid=%d 取 pmap 失败：%s\n", game.pid, why];
         return NO;

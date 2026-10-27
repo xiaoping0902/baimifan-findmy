@@ -36,7 +36,8 @@
         root = backend.kfdRoot;
         [rep appendString:@"✓ 复用已绑定的 KFD 根表\n"];
     } else {
-        char why[192] = {0};
+        /* [M5.225] 384 字节：链路报告带逐跳数值，192 会在中文原因上截断。 */
+        char why[384] = {0};
         int rc = mf_pid_chain(pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why));
         if (rc != 0 || root == 0) {
             [rep appendFormat:@"✗ mf_pid_chain 失败 rc=%d %s\n", rc, why];

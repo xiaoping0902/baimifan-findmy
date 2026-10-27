@@ -9,6 +9,8 @@ python3 tests/run_hud_reader_data_regressions.py
 python3 tests/run_hud_camera_validation_regressions.py
 python3 tests/run_hud_label_regressions.py
 python3 tests/run_hud_frame_rate_regressions.py
+# [M5.225] 链路偏移自适应：默认组合优先 + 候选扫描的纯逻辑回归，不需要 Apple SDK
+python3 tests/run_hud_chain_scan_regressions.py
 sources=(tests/hud_regressions.mm)
 for source in app/Sources/HUD/MFHUDWindowHost.mm app/Sources/HUD/MFHUDStartupStatus.mm; do
     if [[ -f "$source" ]]; then sources+=("$source"); fi
