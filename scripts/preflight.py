@@ -400,10 +400,16 @@ def check_frameworks():
         yml = f.read()
 
     # 常见的 C 标准库 / libSystem / SDK 头目录，不需要显式 framework
+    #
+    # CommonCrypto 也在这里：它是 SDK 里的"子框架头"，符号（CC_SHA256 等）
+    # 由 libSystem 导出，没有任何名为 CommonCrypto 的 Mach-O framework。
+    # [M5.229] 曾经按这条规则给 project.yml 加过 `- sdk: CommonCrypto.framework`，
+    # 构建 #230 当场验证了后果：ld: framework 'CommonCrypto' not found。
     IGNORE = {"mach", "mach-o", "sys", "unistd", "stdlib", "string", "errno",
               "stdio", "pthread", "semaphore", "libkern", "os", "spawn",
               "objc", "objc-runtime", "dispatch", "uuid", "signal", "stdint",
-              "time", "math", "netinet", "arpa", "net", "dlfcn", "fcntl"}
+              "time", "math", "netinet", "arpa", "net", "dlfcn", "fcntl",
+              "CommonCrypto"}
 
     exts = (".mm", ".m", ".h", ".c", ".cpp", ".hpp")
     skip = {"imgui", "kfd", "kfund"}
