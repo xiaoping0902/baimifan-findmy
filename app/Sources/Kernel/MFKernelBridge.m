@@ -1720,7 +1720,15 @@ static int mf_chain_autoscan_locked(uint64_t proc, uint64_t want_base,
         return 0;
     }
 
-    for (uint32_t a = 0; a <= 0x400u; a += 8u) {
+    /*
+     * [M5.233] 上界 0x400 → 0x800。
+     *
+     * 真机普查（16.6.1）：proc 在 0x00/0x08/0x18/0x70/0x78/0x80 有堆指针，
+     * 但 0x18 那条走下去不通；而 libkfd 自己的表里记着 iOS 16.6 的
+     * proc__object_size = 0x730 —— task 很可能就在 struct proc 之后那一带，
+     * 之前的 0x400 上界根本没扫到 0x730。
+     */
+    for (uint32_t a = 0; a <= 0x800u; a += 8u) {
         uint64_t first = 0;
         if (mf_kread64(proc + a, &first) != 0) {
             continue;
@@ -1826,14 +1834,14 @@ static void mf_chain_census(uint64_t proc, uint32_t limit, char *out, size_t cap
     unsigned listed = 0;
 
     if (out == NULL || cap == 0) return;
-    if (limit > 0x400u) limit = 0x400u;
+    if (limit > 0x800u) limit = 0x800u;
 
     for (uint32_t off = 0; off <= limit; off += 8u) {
         uint64_t v = 0;
         if (mf_kread64(proc + off, &v) != 0) continue;
         v = mf_bridge_unsign(v);
         if (!mf_bridge_in_heap(v)) continue;
-        if (listed < 6u) {
+        if (listed < 8u) {
             size_t used = strlen(out);
             snprintf(out + used, cap - used, "%sinheap@%#x=%#llx",
                      used ? " " : "", (unsigned)off, (unsigned long long)v);
@@ -2027,9 +2035,9 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
         }
 
         if (report && report_len) {
-            char census[320];
+            char census[560];
             census[0] = '\0';
-            mf_chain_census(proc, 0x200u, census, sizeof(census));
+            mf_chain_census(proc, 0x800u, census, sizeof(census));
             snprintf(report, report_len,
                      "calib fail; proc=%#llx window=%#llx..%#llx probes=%u %s",
                      (unsigned long long)proc,
