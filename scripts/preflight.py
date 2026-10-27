@@ -348,13 +348,19 @@ def check_identity():
             err(f"project.yml 缺 {want}")
 
     # build.yml / README 的应用名
-    for rel, needles in [
-        (".github/workflows/build.yml", ["FindMy.xcodeproj", "FindMy-unsigned.ipa", "scheme FindMy"]),
-        ("README.md", ["com.apple.findmy", "查找"]),
+    #
+    # [M5.236] README.md 已按业主意见删除（"没用"），所以这里是"存在才查"，
+    # 不再因为缺文件报错；build.yml 仍然必须在。
+    for rel, needles, required in [
+        (".github/workflows/build.yml", ["FindMy.xcodeproj", "FindMy-unsigned.ipa", "scheme FindMy"], True),
+        ("README.md", ["com.apple.findmy", "查找"], False),
     ]:
         p = os.path.join(ROOT, rel)
         if not os.path.exists(p):
-            err(f"缺文件 {rel}")
+            if required:
+                err(f"缺文件 {rel}")
+            else:
+                ok(f"{rel} 不存在（已按业主意见移除，跳过）")
             continue
         with open(p, encoding="utf-8") as f:
             txt = f.read()
