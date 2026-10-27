@@ -43,6 +43,7 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     uint64_t _observedWorld;
     int _identityPid;           // sessionIdentity 缓存对应的 pid
     NSString *_identityCache;   // sessionIdentity 的惰性缓存
+    NSString *_lastAttachError; // [M5.228] 最近一次绑定的失败详情
 }
 
 + (instancetype)shared {
@@ -85,11 +86,16 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
  */
 - (BOOL)attachKFDPid:(int)pid {
     uint64_t root = 0;
-    /* [M5.225] 384 字节：链路报告带逐跳数值，192 会在中文原因上截断。 */
+    /* [M5.228] 384 字节：链路报告带逐跳数值与首个内核指针，192 会在中文原因上截断。 */
     char why[384] = {0};
     int rc = mf_pid_chain(pid, NULL, NULL, NULL, NULL, &root, why, sizeof(why));
     if (rc != 0 || root == 0) {
         NSLog(@"[MF][Read] attachKFDPid(%d) 失败 rc=%d %s", pid, rc, why);
+        /*
+         * [M5.228] 同时留存一份给调用方写进 /mf-debug/mf-hud-kfd.txt：
+         * 这条失败详情以前只能靠"恰好在设备前抓 syslog"，事后无法复盘。
+         */
+        _lastAttachError = [NSString stringWithFormat:@"rc=%d %s", rc, why];
         self.kfdRoot = 0;
         self.kfdPid = 0;
         self.modeFlag = NO;
@@ -97,6 +103,7 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
         _identityCache = nil;
         return NO;
     }
+    _lastAttachError = nil;
     self.kfdPid = pid;
     self.kfdRoot = root;
     self.modeFlag = YES;
@@ -118,6 +125,11 @@ static NSString *MFReadSessionIdentityForPid(int pid) {
     _identityPid = 0;
     _identityCache = nil;
     mfpt_cache_reset();
+}
+
+/* [M5.228] readonly 属性的 getter（ivar 在类扩展里显式声明，不用 @synthesize）。 */
+- (NSString *)lastAttachError {
+    return _lastAttachError;
 }
 
 /*

@@ -1469,6 +1469,32 @@ static int mf_chain_root_reads_macho(uint64_t root, uint64_t want_base, uint64_t
     return 1;
 }
 
+/*
+ * [M5.228] 找 proc 里第一个"像内核指针"的偏移。
+ *
+ * 只用于失败诊断：整轮校准都不成立时，这一跳说明"结构体里到底哪里有指针"，
+ * 比一句"失败了"有用得多 —— 区间不够、偏移漂移、proc 指针本身不对，
+ * 这三种情况给出的结果完全不同。
+ */
+static int mf_chain_first_kernel_ptr(uint64_t proc, uint32_t limit,
+                                     uint32_t *off_out, uint64_t *val_out)
+{
+    uint32_t off = 0;
+    for (off = 0; off <= limit; off += 8u) {
+        uint64_t v = 0;
+        if (mf_kread64(proc + off, &v) != 0) {
+            continue;
+        }
+        v = mf_bridge_unsign(v);
+        if (mf_bridge_is_kernel_va(v)) {
+            if (off_out) *off_out = off;
+            if (val_out) *val_out = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
 {
     mf_chain_probe *p = (mf_chain_probe *)ctx;
@@ -1676,15 +1702,19 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
         }
 
         if (report && report_len) {
-            /* 一行能塞下的最有用信息：试了多少组、最后卡在哪、最后一句原因 */
+            /*
+             * 失败现场要能回答三个问题：proc 指针是多少、整轮扫了多少组、
+             * 结构体里第一个内核指针落在哪个偏移。上界不够 / 偏移漂移 /
+             * proc 本身不对，这三种情况给出的结果不一样。
+             */
+            uint32_t kptr_off = 0;
+            uint64_t kptr_val = 0;
+            int has_kptr = mf_chain_first_kernel_ptr(proc, MFCAL_PROC_LAST, &kptr_off, &kptr_val);
             snprintf(report, report_len,
-                     "calib fail; probes=%u stage=%d last proc+0x%x -> %#llx/%#llx/%#llx root=%#llx; %s",
-                     scan.probed, scan.stage,
-                     (unsigned)scan.offsets.proc_task,
-                     (unsigned long long)scan_probe.task,
-                     (unsigned long long)scan_probe.map,
-                     (unsigned long long)scan_probe.pmap,
-                     (unsigned long long)scan_probe.root,
+                     "calib fail; proc=%#llx probes=%u stage=%d %s%#x=%#llx; %s",
+                     (unsigned long long)proc, scan.probed, scan.stage,
+                     has_kptr ? "kptr+" : "kptr-none:",
+                     (unsigned)kptr_off, (unsigned long long)kptr_val,
                      scan_probe.why);
         }
         return -4;

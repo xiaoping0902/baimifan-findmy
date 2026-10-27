@@ -64,9 +64,16 @@ typedef struct mfcal_result {
 
 /* ── 候选范围（集中在这里，方便一处调整）────────────────────────── */
 
-/* proc 里找 task 指针：0x00 到 0x400，步长 8。 */
-#define MFCAL_PROC_FIRST 0x000u
-#define MFCAL_PROC_LAST 0x400u
+/*
+ * proc 里找 task 指针：0x00 到 0x1000，步长 8。
+ *
+ * 上界为什么是 0x1000 而不是 0x400：iOS 16 起 proc.task 内嵌字段被删除，
+ * task 挪到 proc 结构体之后（Dopamine 的 info.c 记录了这个变化）。
+ * 16.6.1 实测 0x000–0x400 全是 0 —— 扫描区间根本没覆盖到 task。
+ * 一个 513 候选的区间，全扫也就几百毫秒，没必要为了省这点时间把功能赌掉。
+ */
+#define MFCAL_PROC_FIRST 0x0000u
+#define MFCAL_PROC_LAST 0x1000u
 #define MFCAL_PROC_STEP 8u
 
 /* 阶段一：唯一假设 —— task.map=0x28、map.pmap=0x40（社区与上游共识值）。 */

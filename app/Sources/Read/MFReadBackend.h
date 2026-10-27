@@ -89,6 +89,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 用 pid 解析目标 pmap 根表并接管读取。返回 YES 表示此后读取全走 KFD。
 - (BOOL)attachKFDPid:(int)pid;
 
+/// [M5.228] 最近一次绑定失败的完整原因（成功时为 nil）。
+///
+/// 为什么要暴露它：`mf_pid_chain` 的失败详情原来只走 NSLog，等于必须有人
+/// 恰好在设备前抓 syslog 才能看到。HUD 引导阶段把它一并写进
+/// `/mf-debug/mf-hud-kfd.txt`，事后拉一个文件就能定位。
+@property (nonatomic, copy, readonly, nullable) NSString *lastAttachError;
+
 /// 解绑（目标退出 / 换目标时调用），同时作废 v2p 缓存
 - (void)detachKFD;
 

@@ -800,7 +800,14 @@ static BOOL MFHUDLooksLikeGame(NSString *name, NSString *path) {
 
         /* ③ 解析 pmap 并接管读取 */
         if (![[MFReadBackend shared] attachKFDPid:game.pid]) {
-            [log appendString:@"[attach] attachKFDPid 失败\n"];
+            /*
+             * [M5.228] 把失败详情写进文件，而不是只写"失败"两个字。
+             * 以前这条原因只走 NSLog：必须有人恰好在设备前抓 syslog 才看得到，
+             * 事后拉 /mf-debug/mf-hud-kfd.txt 只有一行光秃秃的失败。
+             */
+            NSString *why = [MFReadBackend shared].lastAttachError;
+            [log appendFormat:@"[attach] attachKFDPid 失败 pid=%d\n[attach] %@\n",
+             game.pid, why.length ? why : @"(无详情)"];
             [self writeHUDKernelLog:log];
             return;
         }
