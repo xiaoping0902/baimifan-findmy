@@ -1196,6 +1196,7 @@ uint64_t mf_get_current_task(void) { return mf_info_field(5); }
 
 /* 下面这两个 helper 的定义在 5b 段；这里先声明，供链表遍历使用。 */
 static uint64_t mf_bridge_unsign(uint64_t p);
+static int mf_bridge_in_heap(uint64_t a);      /* [M5.232] 内核堆窗口判定（定义在后） */
 static int mf_bridge_is_kernel_va(uint64_t a);
 
 /* p_pid 扫描范围：struct proc 开头这一段里它一定在 */
@@ -1426,7 +1427,7 @@ static uint64_t mf_bridge_unsign(uint64_t p)
  * 所以那条下界在本机并不误杀；而 0xfffffdf0... 那个"被误杀"的记录（M5.100）
  * 与 t1sz=25 的 0xffffff80 下界同样矛盾，只能当成一次误读。
  *
- * [M5.231] 这里只做"高 16 位全 1"的粗筛，真正的门是下面的 mf_bridge_kaddr_mapped：
+ * [M5.232] 这里只做"高 16 位全 1"的粗筛，真正的门是 mf_bridge_in_heap（堆窗口 + 8 字节对齐）：
  * panic 里那个 0xffffff8d000002a4 也满足"高位全 1"，照样让内核 panic。
  * 换句话说，下界松紧不是安全边界，映射检查才是。
  */
@@ -1442,32 +1443,13 @@ static int mf_bridge_is_page_aligned(uint64_t a)
 }
 
 /*
- * [M5.231] 解引用前的最后一道闸：这个地址在内核自己的页表里到底映没映。
+ * [M5.232] 解引用前的闸门 = 内核堆窗口（定义在下面，和窗口推导放一起）。
  *
- * 为什么必须有 —— 真机 panic 原文（panic-full-2026-10-27-162314.000.ips）：
- *     panic(cpu 2 caller ...): copy_validate(0x16f8c6258, 0xffffff8d000002a4, 8)
- *         - kaddr not in kernel @copyio.c:194
- * 那个地址高位全 1、看着像内核指针，但根本没有映射；kread 一碰，
- * copy_validate 直接 panic，设备重启。任何"只判高位/只判下界"的守卫都挡不住它。
- *
- * 所以：凡是**不是我们亲手派生出来的**指针（proc 里的字段、task/map/pmap 上一跳
- * 读到的值），读之前都要先问内核页表：能不能翻译？
- *   - 用 kfd 在 kopen 时抓到的 ttbr1（内核页表根，可信）做翻译；
- *   - 翻译只读页表页，不碰目标地址本身；
- *   - 拿不到根表就一律拒绝（宁可校准失败，也不拿设备赌）。
+ * 为什么不再用"页表翻译"：M5.231 试过用 kfd 的 ttbr1 当根表翻内核堆地址，
+ * 结果把**读得通的**链表指针全判成 unmapped（真机日志：
+ * calib fail; ... no-mapped-pointer-in-proc），校准直接被自己的闸门堵死。
+ * 现在的做法是用可信锚点现算窗口，见 mf_bridge_derive_heap_window。
  */
-static int mf_bridge_kaddr_mapped(uint64_t a)
-{
-    if (!mf_bridge_is_kernel_va(a)) {
-        return 0;
-    }
-    uint64_t root = 0;
-    if (mf_ttbr_snapshot(NULL, NULL, NULL, &root) != 0 || !mf_bridge_is_kernel_va(root)) {
-        return 0;
-    }
-    uint64_t pa = 0;
-    return mfpt_translate(root, a, &pa) == 0;
-}
 
 typedef struct {
     uint64_t proc;       /* 起点：kernel_proc、目标进程的 proc，或本进程 proc */
@@ -1513,45 +1495,6 @@ static int mf_chain_root_reads_macho(uint64_t root, uint64_t want_base, uint64_t
     return 1;
 }
 
-/*
- * [M5.231] 失败诊断：只报告 proc 里"映射在内核里"的指针偏移，**一次都不解引用它们**。
- *
- * 上一版（M5.229）为了找"task 形状"会顺着 proc 字段一路读到 task+0x28、map+0x40，
- * 每个候选要读 4 次内存。proc 里的字段是可被随意伪造的值（PAC 标签、计数器、
- * 长度字段都长得像指针），于是它们被当成地址去读 —— 内核在 copy_validate 里
- * 直接 panic（真机证据：copy_validate(..., 0xffffff8d000002a4, 8)）。
- *
- * 现在只做一次读：*(proc+off)，然后问内核页表"这个值映没映"。映射结果本身
- * 就是有用信息：区间够不够、proc 起点对不对，看"有没有映射指针、落在哪些偏移"，
- * 不需要拿设备去试探。
- */
-static void mf_chain_describe_task_like(uint64_t proc, uint32_t limit,
-                                        char *out, size_t cap)
-{
-    unsigned listed = 0;
-
-    if (out == NULL || cap == 0) return;
-    if (limit > 0x400u) limit = 0x400u;      /* 诊断同样有上界 */
-
-    for (uint32_t off = 0; off <= limit; off += 8u) {
-        uint64_t p = 0;
-        if (mf_kread64(proc + off, &p) != 0) continue;
-        p = mf_bridge_unsign(p);
-        if (!mf_bridge_kaddr_mapped(p)) continue;
-
-        if (listed < 3u) {
-            size_t used = strlen(out);
-            snprintf(out + used, cap - used, "%smapped@%#x", used ? " " : "", (unsigned)off);
-        }
-        ++listed;
-    }
-
-    if (listed == 0) {
-        size_t used = strlen(out);
-        snprintf(out + used, cap - used, "no-mapped-pointer-in-proc");
-    }
-}
-
 static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
 {
     mf_chain_probe *p = (mf_chain_probe *)ctx;
@@ -1572,7 +1515,7 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_kaddr_mapped(v)) {
+    if (!mf_bridge_in_heap(v)) {
         snprintf(p->why, sizeof(p->why), "proc+0x%x -> %#llx unmapped",
                  (unsigned)offsets->proc_task, (unsigned long long)v);
         return 0;
@@ -1586,7 +1529,7 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
             return 0;
         }
         t = mf_bridge_unsign(t);
-        if (!mf_bridge_kaddr_mapped(t)) {
+        if (!mf_bridge_in_heap(t)) {
             snprintf(p->why, sizeof(p->why), "proc_ro+0x%x -> %#llx unmapped",
                      (unsigned)offsets->proc_task2, (unsigned long long)t);
             return 0;
@@ -1601,7 +1544,7 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_kaddr_mapped(v)) {
+    if (!mf_bridge_in_heap(v)) {
         snprintf(p->why, sizeof(p->why), "task+0x%x -> %#llx unmapped",
                  (unsigned)offsets->task_map, (unsigned long long)v);
         return 0;
@@ -1618,7 +1561,7 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_kaddr_mapped(v)) {
+    if (!mf_bridge_in_heap(v)) {
         snprintf(p->why, sizeof(p->why), "map+0x%x -> %#llx unmapped",
                  (unsigned)offsets->map_pmap, (unsigned long long)v);
         return 0;
@@ -1631,7 +1574,7 @@ static int mf_chain_probe_fn(void *ctx, const mfcal_offsets *offsets)
         return 0;
     }
     v = mf_bridge_unsign(v);
-    if (!mf_bridge_kaddr_mapped(v) || !mf_bridge_is_page_aligned(v)) {
+    if (!mf_bridge_in_heap(v) || !mf_bridge_is_page_aligned(v)) {
         snprintf(p->why, sizeof(p->why), "pmap->tte %#llx unmapped or not page-aligned",
                  (unsigned long long)v);
         return 0;
@@ -1690,19 +1633,231 @@ static uint64_t mf_self_image_base(void)
     return (uint64_t)(uintptr_t)info.dli_fbase;
 }
 
+/*
+ * [M5.232] 自适应校准：不预设"哪一跳是哪个偏移"，改成"扫结构 + 自证"。
+ *
+ * 前两版都在猜形状（0x18/0x08、0x10……），猜错就是白跑一轮。真机上唯一
+ * 可信的事实只有两类：
+ *   ① 地址落不落在内核堆窗口里 —— 窗口由 kernel_proc/kernel_task/kernel_map/
+ *      kernel_pmap 加 proc 链前几个节点现算，不查版本表；
+ *   ② 这条链解出来的页表根，能不能读回 Mach-O 头 0xfeedfacf —— 野指针编不出这个。
+ * 所以扫描只需要：在 proc 里逐个偏移找"窗口内的指针"，再顺着它往下走
+ * （task.map=0x28、vm_map.pmap=0x40 是 15/16 共同的社区共识值，也一并留了邻居），
+ * 最后由 ①+② 判定。命中即缓存；换设备、换系统都走同一条路。
+ *
+ * 安全性：每一次解引用都先过 mf_bridge_in_heap —— 窗口外的值一次都不读。
+ * 这正是上一版 panic 的教训（copy_validate 读 0xffffff8d000002a4 重启）。
+ */
+
+static uint64_t g_heap_lo;
+static uint64_t g_heap_hi;
+
+static void mf_bridge_derive_heap_window(void)
+{
+    uint64_t anchors[12];
+    unsigned n = 0;
+    uint64_t v;
+    uint64_t procs[8];
+
+    v = mf_get_kernel_proc(); if (mf_bridge_is_kernel_va(v)) anchors[n++] = v;
+    v = mf_get_kernel_task(); if (mf_bridge_is_kernel_va(v)) anchors[n++] = v;
+    v = mf_get_kernel_map();  if (mf_bridge_is_kernel_va(v)) anchors[n++] = v;
+    v = mf_get_kernel_pmap(); if (mf_bridge_is_kernel_va(v)) anchors[n++] = v;
+
+    int c = mf_collect_proc_chain(procs, (int)(sizeof(procs) / sizeof(procs[0])));
+    for (int i = 0; i < c && n < (unsigned)(sizeof(anchors) / sizeof(anchors[0])); i++) {
+        if (mf_bridge_is_kernel_va(procs[i])) {
+            anchors[n++] = procs[i];
+        }
+    }
+    if (n == 0) {
+        g_heap_lo = g_heap_hi = 0;
+        return;
+    }
+
+    uint64_t lo = anchors[0];
+    uint64_t hi = anchors[0];
+    for (unsigned i = 1; i < n; i++) {
+        if (anchors[i] < lo) lo = anchors[i];
+        if (anchors[i] > hi) hi = anchors[i];
+    }
+    /* 堆里 proc/task/vm_map/pmap 各自分布在不同 zone，给 ±2GB 的余量。 */
+    g_heap_lo = (lo > 0x80000000ULL) ? lo - 0x80000000ULL : 0;
+    g_heap_hi = (hi < 0xffffffffffffffffULL - 0x80000000ULL) ? hi + 0x80000000ULL : 0xffffffffffffffffULL;
+}
+
+static int mf_bridge_in_heap(uint64_t a)
+{
+    /*
+     * 三条同时成立才允许解引用：
+     *   ① 高 16 位全 1（内核地址粗筛）；
+     *   ② 落在由可信锚点现算出来的堆窗口里 —— 挡掉 0xffffff8d… 那类"像内核、
+     *      其实离堆 148GB"的值（就是上次 panic 的那个）；
+     *   ③ 8 字节对齐 —— proc/task/vm_map/pmap 这类对象指针必然对齐，垃圾值很少对齐。
+     */
+    if (!mf_bridge_is_kernel_va(a)) return 0;
+    if ((a & 0x7ULL) != 0) return 0;
+    return g_heap_hi > g_heap_lo && a >= g_heap_lo && a <= g_heap_hi;
+}
+
+/* 第二跳候选（proc_ro 里 pr_task 及其邻居）。 */
+static const uint32_t mf_autoscan_second_hops[] = {0x08u, 0x00u, 0x10u, 0x18u, 0x20u, 0x28u};
+/* task->map / vm_map->pmap 的候选（首项是社区共识值）。 */
+static const uint32_t mf_autoscan_task_maps[]  = {0x28u, 0x20u, 0x30u};
+static const uint32_t mf_autoscan_map_pmaps[]  = {0x40u, 0x38u, 0x48u};
+
+/*
+ * 在 proc 里扫出一条能自证的链。成功返回 1，并把命中的形状写进 out。
+ * trace（可空）记录最后一次尝试卡在哪一跳，供失败日志用。
+ */
+static int mf_chain_autoscan_locked(uint64_t proc, uint64_t want_base,
+                                    mfcal_offsets *out, mf_chain_probe *trace)
+{
+    if (g_heap_hi <= g_heap_lo) {
+        mf_bridge_derive_heap_window();
+    }
+    if (g_heap_hi <= g_heap_lo) {
+        return 0;
+    }
+
+    for (uint32_t a = 0; a <= 0x400u; a += 8u) {
+        uint64_t first = 0;
+        if (mf_kread64(proc + a, &first) != 0) {
+            continue;
+        }
+        first = mf_bridge_unsign(first);
+        if (!mf_bridge_in_heap(first)) {
+            continue;
+        }
+
+        /* hop=1：first 本身就是 task（iOS 15 的内嵌形状）
+         * hop=2：first 是 proc_ro，task 在 first + B（iOS 16 的形状） */
+        for (unsigned hop = 1; hop <= 2; ++hop) {
+            const unsigned hop_n = (hop == 2)
+                ? (unsigned)(sizeof(mf_autoscan_second_hops) / sizeof(mf_autoscan_second_hops[0]))
+                : 1u;
+
+            for (unsigned bi = 0; bi < hop_n; ++bi) {
+                uint64_t task = first;
+                uint32_t b = 0;
+
+                if (hop == 2) {
+                    b = mf_autoscan_second_hops[bi];
+                    if (mf_kread64(first + b, &task) != 0) {
+                        continue;
+                    }
+                    task = mf_bridge_unsign(task);
+                    if (!mf_bridge_in_heap(task)) {
+                        continue;
+                    }
+                }
+
+                for (unsigned mi = 0; mi < (unsigned)(sizeof(mf_autoscan_task_maps) / sizeof(mf_autoscan_task_maps[0])); ++mi) {
+                    uint64_t map = 0;
+                    if (mf_kread64(task + mf_autoscan_task_maps[mi], &map) != 0) {
+                        continue;
+                    }
+                    map = mf_bridge_unsign(map);
+                    if (!mf_bridge_in_heap(map)) {
+                        continue;
+                    }
+
+                    for (unsigned pi = 0; pi < (unsigned)(sizeof(mf_autoscan_map_pmaps) / sizeof(mf_autoscan_map_pmaps[0])); ++pi) {
+                        uint64_t pmap = 0;
+                        uint64_t root = 0;
+                        uint64_t base = 0;
+
+                        if (mf_kread64(map + mf_autoscan_map_pmaps[pi], &pmap) != 0) {
+                            continue;
+                        }
+                        pmap = mf_bridge_unsign(pmap);
+                        if (!mf_bridge_in_heap(pmap)) {
+                            continue;
+                        }
+                        if (mf_kread64(pmap, &root) != 0) {
+                            continue;
+                        }
+                        root = mf_bridge_unsign(root);
+                        if (!mf_bridge_in_heap(root) || !mf_bridge_is_page_aligned(root)) {
+                            continue;
+                        }
+
+                        if (!mf_chain_root_reads_macho(root, want_base, &base)) {
+                            if (trace) {
+                                snprintf(trace->why, sizeof(trace->why),
+                                         "a=%#x hop=%u map=%#x pmap=%#x root=%#llx cannot read Mach-O",
+                                         (unsigned)a, hop, (unsigned)mf_autoscan_task_maps[mi],
+                                         (unsigned)mf_autoscan_map_pmaps[pi], (unsigned long long)root);
+                            }
+                            continue;
+                        }
+
+                        if (out) {
+                            out->proc_hop = hop;
+                            out->proc_task = a;
+                            out->proc_task2 = (hop == 2) ? b : 0u;
+                            out->task_map = mf_autoscan_task_maps[mi];
+                            out->map_pmap = mf_autoscan_map_pmaps[pi];
+                        }
+                        if (trace) {
+                            trace->proc = proc;
+                            trace->task = task;
+                            trace->map = map;
+                            trace->pmap = pmap;
+                            trace->root = root;
+                            trace->hop = hop;
+                            snprintf(trace->why, sizeof(trace->why), "hit a=%#x hop=%u", (unsigned)a, hop);
+                        }
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * 失败时把 proc 里"落在堆窗口内"的偏移写成一行：下一次日志就能看出
+ * p_ro / task 到底在哪个偏移，不用再猜。
+ */
+static void mf_chain_census(uint64_t proc, uint32_t limit, char *out, size_t cap)
+{
+    unsigned listed = 0;
+
+    if (out == NULL || cap == 0) return;
+    if (limit > 0x400u) limit = 0x400u;
+
+    for (uint32_t off = 0; off <= limit; off += 8u) {
+        uint64_t v = 0;
+        if (mf_kread64(proc + off, &v) != 0) continue;
+        v = mf_bridge_unsign(v);
+        if (!mf_bridge_in_heap(v)) continue;
+        if (listed < 6u) {
+            size_t used = strlen(out);
+            snprintf(out + used, cap - used, "%sinheap@%#x=%#llx",
+                     used ? " " : "", (unsigned)off, (unsigned long long)v);
+        }
+        ++listed;
+    }
+
+    if (listed == 0) {
+        size_t used = strlen(out);
+        snprintf(out + used, cap - used, "no-inheap-pointer(win=%#llx..%#llx)",
+                 (unsigned long long)g_heap_lo, (unsigned long long)g_heap_hi);
+    }
+}
+
 static int mf_chain_calibrate_locked(void)
 {
     mf_chain_probe probe;
     mfcal_result r;
 
+    mf_bridge_derive_heap_window();
+
     /*
-     * ① 本进程锚点（先跑）：自己的 executable 基址 + 自己的用户页表根。
-     *
-     * 为什么排第一：这条判据与等一下要用在游戏上的**完全同构** —— 同一个
-     * 用户地址、同一张用户 pmap、同一个 0xfeedfacf。而内核锚点要走内核那一半
-     * 页表（TTBR1），本工程的分级宏是按 t1sz=17（47 位）写的；A12X/A12Z 这类
-     * t1sz=25（39 位）的机器上，"走内核那一半"本身就没被证过（M5.107 只在
-     * A16 上验过）。先跑自己这一条，能把"偏移不对"和"锚点不对"分开。
+     * ① 本进程锚点：自己的 executable 基址 + 自己的用户页表根。
+     * 判据与等一下要用在游戏上的完全同构（同一个 0xfeedfacf）。
      */
     uint64_t self_base = mf_self_image_base();
     if (self_base != 0) {
@@ -1711,6 +1866,11 @@ static int mf_chain_calibrate_locked(void)
             memset(&probe, 0, sizeof(probe));
             probe.proc = self_proc;
             probe.want_base = self_base;
+            if (mf_chain_autoscan_locked(self_proc, self_base, &g_chain_offsets, &probe)) {
+                g_chain_offsets_known = 1;
+                return 1;
+            }
+            /* 自适应扫描没命中时，再退到"已知形状 + 邻域"的有限枚举 */
             r = mfcal_run(mf_chain_probe_fn, &probe, MFCAL_SAFE_BUDGET);
             if (r.found) {
                 g_chain_offsets = r.offsets;
@@ -1721,9 +1881,7 @@ static int mf_chain_calibrate_locked(void)
     }
 
     /*
-     * ② 内核锚点（兜底）：kernel_proc + kernelbase。
-     * 两者都不依赖 proc 布局（kernproc 符号直读、kbase = ARM64_LINK_ADDR + slide），
-     * 前提是 patchfinder 算出的 kbase 恰好指向 Mach-O 头、且内核那一半页表走得通。
+     * ② 内核锚点：kernel_proc + kernelbase。
      */
     uint64_t kernel_proc = mf_get_kernel_proc();
     uint64_t kbase = mf_get_kbase();
@@ -1731,6 +1889,10 @@ static int mf_chain_calibrate_locked(void)
         memset(&probe, 0, sizeof(probe));
         probe.proc = kernel_proc;
         probe.want_base = kbase;
+        if (mf_chain_autoscan_locked(kernel_proc, kbase, &g_chain_offsets, &probe)) {
+            g_chain_offsets_known = 1;
+            return 1;
+        }
         r = mfcal_run(mf_chain_probe_fn, &probe, MFCAL_SAFE_BUDGET);
         if (r.found) {
             g_chain_offsets = r.offsets;
@@ -1818,12 +1980,31 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
         }
     }
 
-    /* ③ 内核校准不可用：退到"用目标进程自己当锚点"扫一遍 */
+    /* ③ 内核校准不可用：用目标进程自己当锚点，先跑自适应扫描，再退到有限枚举 */
     {
         mf_chain_probe scan_probe;
         memset(&scan_probe, 0, sizeof(scan_probe));
         scan_probe.proc = proc;
         scan_probe.want_base = 0;   /* 自动取该进程最低映射页 */
+
+        mfcal_offsets auto_offsets;
+        if (mf_chain_autoscan_locked(proc, 0, &auto_offsets, &scan_probe)) {
+            g_chain_offsets = auto_offsets;
+            g_chain_offsets_known = 1;
+            if (proc_out) *proc_out = proc;
+            if (task_out) *task_out = scan_probe.task;
+            if (map_out)  *map_out = scan_probe.map;
+            if (pmap_out) *pmap_out = scan_probe.pmap;
+            if (root_out) *root_out = scan_probe.root;
+            if (report && report_len) {
+                char shape[64];
+                snprintf(report, report_len,
+                         "pid=%d proc=%#llx root=%#llx chain %s autoscan",
+                         pid, (unsigned long long)proc, (unsigned long long)scan_probe.root,
+                         mf_chain_shape_text(&auto_offsets, shape, sizeof(shape)));
+            }
+            return 0;
+        }
 
         mfcal_result scan = mfcal_run(mf_chain_probe_fn, &scan_probe, MFCAL_SAFE_BUDGET);
         if (scan.found) {
@@ -1846,19 +2027,14 @@ static int mf_pid_chain_locked(int pid, uint64_t *proc_out, uint64_t *task_out, 
         }
 
         if (report && report_len) {
-            /*
-             * 失败现场要能回答四个问题而不是三个：
-             *   proc 指针是多少、整轮扫了多少组、最后停在哪一组、
-             *   以及 proc 里有没有"task 形状"的候选（有 → 形状/偏移问题；
-             *   只有裸内核指针没有 task 形状 → proc 指针本身可疑）。
-             */
-            char shape[120];
-            shape[0] = '\0';
-            mf_chain_describe_task_like(proc, MFCAL_SWEEP_LAST, shape, sizeof(shape));
+            char census[320];
+            census[0] = '\0';
+            mf_chain_census(proc, 0x200u, census, sizeof(census));
             snprintf(report, report_len,
-                     "calib fail; proc=%#llx probes=%u stage=%d %s; %s",
-                     (unsigned long long)proc, scan.probed, scan.stage,
-                     shape, scan_probe.why);
+                     "calib fail; proc=%#llx window=%#llx..%#llx probes=%u %s",
+                     (unsigned long long)proc,
+                     (unsigned long long)g_heap_lo, (unsigned long long)g_heap_hi,
+                     scan.probed, census);
         }
         return -4;
     }
